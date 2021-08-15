@@ -302,19 +302,19 @@ where
         task_pool: &TaskPool,
         batch_size: usize,
         f: FN,
-    )
-    {
+    ) {
         // SAFE: system runs without conflicts with other systems. same-system queries have runtime
         // borrow checks when they conflict
         unsafe {
-            self.state.par_for_each_unchecked_manual::<Q::ReadOnlyFetch, FN>(
-                self.world,
-                task_pool,
-                batch_size,
-                f,
-                self.last_change_tick,
-                self.change_tick,
-            )
+            self.state
+                .par_for_each_unchecked_manual::<Q::ReadOnlyFetch, FN>(
+                    self.world,
+                    task_pool,
+                    batch_size,
+                    f,
+                    self.last_change_tick,
+                    self.change_tick,
+                )
         };
     }
 
@@ -511,9 +511,7 @@ where
     /// ```
     ///
     /// This can only return immutable data, see [`Self::single_mut`] for mutable access.
-    pub fn single(
-        &'s self,
-    ) -> Result<<Q::ReadOnlyFetch as Fetch<'w, 's>>::Item, QuerySingleError> {
+    pub fn single(&'s self) -> Result<<Q::ReadOnlyFetch as Fetch<'w, 's>>::Item, QuerySingleError> {
         let mut query = self.iter();
         let first = query.next();
         let extra = query.next().is_some();
