@@ -3,7 +3,7 @@ use crate::{
     entity::Entity,
     query::{
         Fetch, FilterFetch, NopFetch, QueryCombinationIter, QueryEntityError, QueryIter,
-        QueryState, ReadOnlyFetch, WorldQuery,
+        QueryState, WorldQuery,
     },
     world::{Mut, World},
 };
@@ -146,7 +146,7 @@ where
     ///
     /// This can only return immutable data, see [`Self::iter_mut`] for mutable queries.
     #[inline]
-    pub fn iter<'s>(&'s self) -> QueryIter<'w, 's, Q, Q::ReadOnlyFetch, F> {
+    pub fn iter(&'s self) -> QueryIter<'w, 's, Q, Q::ReadOnlyFetch, F> {
         // SAFE: system runs without conflicts with other systems.
         // same-system queries have runtime borrow checks when they conflict
         unsafe {
@@ -231,7 +231,7 @@ where
     /// This function makes it possible to violate Rust's aliasing guarantees. You must make sure
     /// this call does not result in multiple mutable references to the same component
     #[inline]
-    pub unsafe fn iter_unsafe<'s>(&'s self) -> QueryIter<'w, 's, Q, Q::Fetch, F> {
+    pub unsafe fn iter_unsafe(&'s self) -> QueryIter<'w, 's, Q, Q::Fetch, F> {
         // SEMI-SAFE: system runs without conflicts with other systems.
         // same-system queries have runtime borrow checks when they conflict
         self.state
@@ -385,7 +385,7 @@ where
     /// This function makes it possible to violate Rust's aliasing guarantees. You must make sure
     /// this call does not result in multiple mutable references to the same component
     #[inline]
-    pub unsafe fn get_unchecked<'s>(
+    pub unsafe fn get_unchecked(
         &'s self,
         entity: Entity,
     ) -> Result<<Q::Fetch as Fetch<'w, 's>>::Item, QueryEntityError> {
