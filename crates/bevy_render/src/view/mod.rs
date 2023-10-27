@@ -2,6 +2,7 @@ pub mod visibility;
 pub mod window;
 
 use bevy_asset::{load_internal_asset, Handle};
+use bevy_derive::{Deref, DerefMut};
 pub use visibility::*;
 pub use window::*;
 
@@ -22,7 +23,7 @@ use bevy_ecs::prelude::*;
 use bevy_math::{Mat4, UVec4, Vec3, Vec4, Vec4Swizzles};
 use bevy_reflect::Reflect;
 use bevy_transform::components::GlobalTransform;
-use bevy_utils::HashMap;
+use bevy_utils::{EntityHashMap, HashMap};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -53,16 +54,19 @@ impl Plugin for ViewPlugin {
             .add_plugins((ExtractResourcePlugin::<Msaa>::default(), VisibilityPlugin));
 
         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app.init_resource::<ViewUniforms>().add_systems(
-                Render,
-                (
-                    prepare_view_targets
-                        .in_set(RenderSet::ManageViews)
-                        .after(prepare_windows)
-                        .after(crate::render_asset::prepare_assets::<Image>),
-                    prepare_view_uniforms.in_set(RenderSet::PrepareResources),
-                ),
-            );
+            render_app
+                .init_resource::<ViewUniforms>()
+                .init_resource::<RenderReflectionPlaneTextureViews>()
+                .add_systems(
+                    Render,
+                    (
+                        prepare_view_targets
+                            .in_set(RenderSet::ManageViews)
+                            .after(prepare_windows)
+                            .after(crate::render_asset::prepare_assets::<Image>),
+                        prepare_view_uniforms.in_set(RenderSet::PrepareResources),
+                    ),
+                );
         }
     }
 }
@@ -199,6 +203,12 @@ pub struct PostProcessWrite<'a> {
     pub source: &'a TextureView,
     pub destination: &'a TextureView,
 }
+
+/// Maps from the camera/view entity to the texture view.
+#[derive(Resource, Deref, DerefMut, Default)]
+pub struct RenderReflectionPlaneTextureViews(
+    pub EntityHashMap<Entity, (TextureView, TextureFormat)>,
+);
 
 impl ViewTarget {
     pub const TEXTURE_FORMAT_HDR: TextureFormat = TextureFormat::Rgba16Float;
@@ -435,13 +445,24 @@ fn prepare_view_targets(
     mut texture_cache: ResMut<TextureCache>,
     cameras: Query<(Entity, &ExtractedCamera, &ExtractedView)>,
     manual_texture_views: Res<ManualTextureViews>,
+    reflection_plane_texture_views: Res<RenderReflectionPlaneTextureViews>,
 ) {
     let mut textures = HashMap::default();
     for (entity, camera, view) in cameras.iter() {
         if let (Some(target_size), Some(target)) = (camera.physical_target_size, &camera.target) {
             if let (Some(out_texture_view), Some(out_texture_format)) = (
-                target.get_texture_view(&windows, &images, &manual_texture_views),
-                target.get_texture_format(&windows, &images, &manual_texture_views),
+                target.get_texture_view(
+                    &windows,
+                    &images,
+                    &manual_texture_views,
+                    &reflection_plane_texture_views,
+                ),
+                target.get_texture_format(
+                    &windows,
+                    &images,
+                    &manual_texture_views,
+                    &reflection_plane_texture_views,
+                ),
             ) {
                 let size = Extent3d {
                     width: target_size.x,

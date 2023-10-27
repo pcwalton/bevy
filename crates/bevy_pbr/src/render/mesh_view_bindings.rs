@@ -27,8 +27,9 @@ use bevy_render::{
 
 use crate::{
     environment_map, prepass, EnvironmentMapLight, FogMeta, GlobalLightMeta, GpuFog, GpuLights,
-    GpuPointLights, LightMeta, MeshPipeline, MeshPipelineKey, ScreenSpaceAmbientOcclusionTextures,
-    ShadowSamplers, ViewClusterBindings, ViewShadowBindings,
+    GpuPointLights, GpuReflectionPlanes, LightMeta, MeshPipeline, MeshPipelineKey,
+    RenderReflectionPlanes, ScreenSpaceAmbientOcclusionTextures, ShadowSamplers,
+    ViewClusterBindings, ViewShadowBindings,
 };
 
 #[derive(Clone)]
@@ -275,9 +276,38 @@ fn layout_entries(
             },
             count: None,
         },
-        // Screen space ambient occlusion texture
+        // Reflection planes
         BindGroupLayoutEntry {
             binding: 11,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: Some(GpuReflectionPlanes::min_size()),
+            },
+            count: None,
+        },
+        // Reflection planes texture
+        BindGroupLayoutEntry {
+            binding: 12,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Texture {
+                sample_type: TextureSampleType::Float { filterable: true },
+                view_dimension: TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        // Reflection planes sampler
+        BindGroupLayoutEntry {
+            binding: 13,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Sampler(SamplerBindingType::Filtering),
+            count: None,
+        },
+        // Screen space ambient occlusion texture
+        BindGroupLayoutEntry {
+            binding: 14,
             visibility: ShaderStages::FRAGMENT,
             ty: BindingType::Texture {
                 multisampled: false,
@@ -289,11 +319,11 @@ fn layout_entries(
     ];
 
     // EnvironmentMapLight
-    let environment_map_entries = environment_map::get_bind_group_layout_entries([12, 13, 14]);
+    let environment_map_entries = environment_map::get_bind_group_layout_entries([15, 16, 17]);
     entries.extend_from_slice(&environment_map_entries);
 
     // Tonemapping
-    let tonemapping_lut_entries = get_lut_bind_group_layout_entries([15, 16]);
+    let tonemapping_lut_entries = get_lut_bind_group_layout_entries([18, 19]);
     entries.extend_from_slice(&tonemapping_lut_entries);
 
     // Prepass
@@ -302,7 +332,7 @@ fn layout_entries(
             && !layout_key.contains(MeshPipelineViewLayoutKey::MULTISAMPLED))
     {
         entries.extend_from_slice(&prepass::get_bind_group_layout_entries(
-            [17, 18, 19, 20],
+            [20, 21, 22, 23],
             layout_key,
         ));
     }
@@ -391,6 +421,7 @@ pub fn prepare_mesh_view_bind_groups(
     msaa: Res<Msaa>,
     globals_buffer: Res<GlobalsBuffer>,
     tonemapping_luts: Res<TonemappingLuts>,
+    reflection_planes: Res<RenderReflectionPlanes>,
 ) {
     if let (
         Some(view_binding),
@@ -398,12 +429,14 @@ pub fn prepare_mesh_view_bind_groups(
         Some(point_light_binding),
         Some(globals),
         Some(fog_binding),
+        Some(reflection_planes_binding),
     ) = (
         view_uniforms.uniforms.binding(),
         light_meta.view_gpu_lights.binding(),
         global_light_meta.gpu_point_lights.binding(),
         globals_buffer.buffer.binding(),
         fog_meta.gpu_fogs.binding(),
+        reflection_planes.buffer.binding(),
     ) {
         for (
             entity,
@@ -429,6 +462,15 @@ pub fn prepare_mesh_view_bind_groups(
                     | MeshPipelineViewLayoutKey::from(prepass_textures),
             );
 
+            let reflection_planes_texture_view = match reflection_planes.textures.get(&entity) {
+                Some((_, ref texture_view)) => texture_view,
+                None => {
+                    &fallback_images
+                        .image_for_samplecount(0, TextureFormat::Rgba8Unorm)
+                        .texture_view
+                }
+            };
+
             let mut entries = DynamicBindGroupEntries::new_with_indices((
                 (0, view_binding.clone()),
                 (1, light_binding.clone()),
@@ -441,19 +483,22 @@ pub fn prepare_mesh_view_bind_groups(
                 (8, cluster_bindings.offsets_and_counts_binding().unwrap()),
                 (9, globals.clone()),
                 (10, fog_binding.clone()),
-                (11, ssao_view),
+                (11, reflection_planes_binding.clone()),
+                (12, reflection_planes_texture_view),
+                (13, &reflection_planes.sampler),
+                (14, ssao_view),
             ));
 
             let env_map_bindings =
                 environment_map::get_bindings(environment_map, &images, &fallback_cubemap);
             entries = entries.extend_with_indices((
-                (12, env_map_bindings.0),
-                (13, env_map_bindings.1),
-                (14, env_map_bindings.2),
+                (15, env_map_bindings.0),
+                (16, env_map_bindings.1),
+                (17, env_map_bindings.2),
             ));
 
             let lut_bindings = get_lut_bindings(&images, &tonemapping_luts, tonemapping);
-            entries = entries.extend_with_indices(((15, lut_bindings.0), (16, lut_bindings.1)));
+            entries = entries.extend_with_indices(((18, lut_bindings.0), (19, lut_bindings.1)));
 
             // When using WebGL, we can't have a depth texture with multisampling
             let prepass_bindings;
@@ -463,7 +508,7 @@ pub fn prepare_mesh_view_bind_groups(
                 for (binding, index) in prepass_bindings
                     .iter()
                     .map(Option::as_ref)
-                    .zip([17, 18, 19, 20])
+                    .zip([20, 21, 22, 23])
                     .flat_map(|(b, i)| b.map(|b| (b, i)))
                 {
                     entries = entries.extend_with_indices(((index, binding),));

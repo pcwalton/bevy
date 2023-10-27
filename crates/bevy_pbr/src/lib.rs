@@ -13,6 +13,7 @@ mod material;
 mod parallax;
 mod pbr_material;
 mod prepass;
+mod reflection_planes;
 mod render;
 mod ssao;
 
@@ -26,6 +27,7 @@ pub use material::*;
 pub use parallax::*;
 pub use pbr_material::*;
 pub use prepass::*;
+pub use reflection_planes::*;
 pub use render::*;
 pub use ssao::*;
 
@@ -260,6 +262,7 @@ impl Plugin for PbrPlugin {
                 FogPlugin,
                 ExtractResourcePlugin::<DefaultOpaqueRendererMethod>::default(),
                 ExtractComponentPlugin::<ShadowFilteringMethod>::default(),
+                ReflectionPlanesPlugin,
             ))
             .configure_sets(
                 PostUpdate,

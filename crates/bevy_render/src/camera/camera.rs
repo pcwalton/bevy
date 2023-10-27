@@ -5,7 +5,10 @@ use crate::{
     primitives::Frustum,
     render_asset::RenderAssets,
     render_resource::TextureView,
-    view::{ColorGrading, ExtractedView, ExtractedWindows, RenderLayers, VisibleEntities},
+    view::{
+        ColorGrading, ExtractedView, ExtractedWindows, RenderLayers,
+        RenderReflectionPlaneTextureViews, VisibleEntities,
+    },
     Extract,
 };
 use bevy_asset::{AssetEvent, AssetId, Assets, Handle};
@@ -61,7 +64,7 @@ impl Default for Viewport {
 }
 
 /// Information about the current [`RenderTarget`].
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Reflect, PartialEq)]
 pub struct RenderTargetInfo {
     /// The physical size of this render target (ignores scale factor).
     pub physical_size: UVec2,
@@ -407,6 +410,12 @@ impl CameraRenderGraph {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Component, Reflect)]
+pub struct ReflectionPlaneKey {
+    pub reflection_plane: Entity,
+    pub camera: Entity,
+}
+
 /// The "target" that a [`Camera`] will render to. For example, this could be a [`Window`]
 /// swapchain or an [`Image`].
 #[derive(Debug, Clone, Reflect)]
@@ -432,6 +441,7 @@ pub enum NormalizedRenderTarget {
     /// Texture View to which the camera's view is rendered.
     /// Useful when the texture view needs to be created outside of Bevy, for example OpenXR.
     TextureView(ManualTextureViewHandle),
+    ReflectionPlane(Entity),
 }
 
 impl Default for RenderTarget {
@@ -459,6 +469,7 @@ impl NormalizedRenderTarget {
         windows: &'a ExtractedWindows,
         images: &'a RenderAssets<Image>,
         manual_texture_views: &'a ManualTextureViews,
+        reflection_planes: &'a RenderReflectionPlaneTextureViews,
     ) -> Option<&'a TextureView> {
         match self {
             NormalizedRenderTarget::Window(window_ref) => windows
@@ -470,6 +481,9 @@ impl NormalizedRenderTarget {
             NormalizedRenderTarget::TextureView(id) => {
                 manual_texture_views.get(id).map(|tex| &tex.texture_view)
             }
+            NormalizedRenderTarget::ReflectionPlane(entity) => reflection_planes
+                .get(entity)
+                .map(|(texture_view, _)| texture_view),
         }
     }
 
@@ -479,6 +493,7 @@ impl NormalizedRenderTarget {
         windows: &'a ExtractedWindows,
         images: &'a RenderAssets<Image>,
         manual_texture_views: &'a ManualTextureViews,
+        reflection_planes: &'a RenderReflectionPlaneTextureViews,
     ) -> Option<TextureFormat> {
         match self {
             NormalizedRenderTarget::Window(window_ref) => windows
@@ -490,6 +505,9 @@ impl NormalizedRenderTarget {
             NormalizedRenderTarget::TextureView(id) => {
                 manual_texture_views.get(id).map(|tex| tex.format)
             }
+            NormalizedRenderTarget::ReflectionPlane(entity) => reflection_planes
+                .get(entity)
+                .map(|(_, texture_format)| *texture_format),
         }
     }
 
@@ -523,6 +541,11 @@ impl NormalizedRenderTarget {
                     scale_factor: 1.0,
                 })
             }
+            NormalizedRenderTarget::ReflectionPlane(_) => {
+                // This should never happen, because reflection planes are
+                // internal to the render app.
+                None
+            }
         }
     }
 
@@ -539,7 +562,8 @@ impl NormalizedRenderTarget {
             NormalizedRenderTarget::Image(image_handle) => {
                 changed_image_handles.contains(&image_handle.id())
             }
-            NormalizedRenderTarget::TextureView(_) => true,
+            NormalizedRenderTarget::TextureView(_)
+            | NormalizedRenderTarget::ReflectionPlane { .. } => true,
         }
     }
 }

@@ -12,6 +12,7 @@
     ambient,
     mesh_types::{MESH_FLAGS_SHADOW_RECEIVER_BIT, MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT},
     utils::E,
+    reflection_planes,
 }
 
 #ifdef ENVIRONMENT_MAP
@@ -349,6 +350,10 @@ fn apply_pbr_lighting(
     // If there's no environment map light, there's no transmitted environment
     // light specular component, so we can just hardcode it to zero.
     let specular_transmitted_environment_light = vec3<f32>(0.0);
+#endif
+
+#ifdef REFLECTION_PLANES
+    indirect_light += reflection_planes::reflection_planes_light();
 #endif
 
     let emissive_light = emissive.rgb * output_color.a;

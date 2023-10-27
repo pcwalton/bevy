@@ -858,6 +858,17 @@ category = "3D Rendering"
 wasm = false
 
 [[example]]
+name = "reflection_planes"
+path = "examples/3d/reflection_planes.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.reflection_planes]
+name = "Reflection planes"
+description = "Showcases wireframe rendering"
+category = "3D Rendering"
+wasm = false
+
+[[example]]
 name = "no_prepass"
 path = "tests/3d/no_prepass.rs"
 doc-scrape-examples = true
