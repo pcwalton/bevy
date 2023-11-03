@@ -108,3 +108,12 @@ struct ClusterOffsetsAndCounts {
     data: array<vec4<u32>, 1024u>,
 };
 #endif
+
+struct ReflectionPlane {
+    transform: mat4x4<f32>,
+    index: u32,
+};
+
+struct ReflectionPlanes {
+    data: array<ReflectionPlane, 256u>,
+};

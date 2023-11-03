@@ -21,7 +21,10 @@ use bevy_render::{
         TextureFormat, TextureSampleType, TextureViewDimension,
     },
     renderer::RenderDevice,
-    texture::{BevyDefault, FallbackImageCubemap, FallbackImageMsaa, FallbackImageZero, Image},
+    texture::{
+        BevyDefault, FallbackImage, FallbackImageCubemap, FallbackImageMsaa, FallbackImageZero,
+        Image,
+    },
     view::{Msaa, ViewUniform, ViewUniforms},
 };
 
@@ -412,7 +415,7 @@ pub fn prepare_mesh_view_bind_groups(
         Option<&EnvironmentMapLight>,
         &Tonemapping,
     )>,
-    (images, mut fallback_images, fallback_cubemap, fallback_image_zero): (
+    (images, mut fallback_images_msaa, fallback_cubemap, fallback_image_zero): (
         Res<RenderAssets<Image>>,
         FallbackImageMsaa,
         Res<FallbackImageCubemap>,
@@ -422,6 +425,7 @@ pub fn prepare_mesh_view_bind_groups(
     globals_buffer: Res<GlobalsBuffer>,
     tonemapping_luts: Res<TonemappingLuts>,
     reflection_planes: Res<RenderReflectionPlanes>,
+    fallback_images: Res<FallbackImage>,
 ) {
     if let (
         Some(view_binding),
@@ -449,7 +453,7 @@ pub fn prepare_mesh_view_bind_groups(
             tonemapping,
         ) in &views
         {
-            let fallback_ssao = fallback_images
+            let fallback_ssao = fallback_images_msaa
                 .image_for_samplecount(1, TextureFormat::bevy_default())
                 .texture_view
                 .clone();
@@ -464,11 +468,7 @@ pub fn prepare_mesh_view_bind_groups(
 
             let reflection_planes_texture_view = match reflection_planes.textures.get(&entity) {
                 Some((_, ref texture_view)) => texture_view,
-                None => {
-                    &fallback_images
-                        .image_for_samplecount(0, TextureFormat::Rgba8Unorm)
-                        .texture_view
-                }
+                None => &fallback_images.d2_array.texture_view,
             };
 
             let mut entries = DynamicBindGroupEntries::new_with_indices((

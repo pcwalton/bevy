@@ -7,7 +7,7 @@ pub use visibility::*;
 pub use window::*;
 
 use crate::{
-    camera::{ExtractedCamera, ManualTextureViews, MipBias, TemporalJitter},
+    camera::{ExtractedCamera, ManualTextureViews, MipBias, ReflectionPlaneKey, TemporalJitter},
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     prelude::{Image, Shader},
     primitives::Frustum,
@@ -436,19 +436,24 @@ struct MainTargetTextures {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_view_targets(
+pub fn prepare_view_targets(
     mut commands: Commands,
     windows: Res<ExtractedWindows>,
     images: Res<RenderAssets<Image>>,
     msaa: Res<Msaa>,
     render_device: Res<RenderDevice>,
     mut texture_cache: ResMut<TextureCache>,
-    cameras: Query<(Entity, &ExtractedCamera, &ExtractedView)>,
+    cameras: Query<(
+        Entity,
+        &ExtractedCamera,
+        &ExtractedView,
+        Has<ReflectionPlaneKey>,
+    )>,
     manual_texture_views: Res<ManualTextureViews>,
     reflection_plane_texture_views: Res<RenderReflectionPlaneTextureViews>,
 ) {
     let mut textures = HashMap::default();
-    for (entity, camera, view) in cameras.iter() {
+    for (entity, camera, view, has_reflection_plane_key) in cameras.iter() {
         if let (Some(target_size), Some(target)) = (camera.physical_target_size, &camera.target) {
             if let (Some(out_texture_view), Some(out_texture_format)) = (
                 target.get_texture_view(

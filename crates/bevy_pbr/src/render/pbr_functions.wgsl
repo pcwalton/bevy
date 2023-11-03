@@ -352,9 +352,11 @@ fn apply_pbr_lighting(
     let specular_transmitted_environment_light = vec3<f32>(0.0);
 #endif
 
-#ifdef REFLECTION_PLANES
-    indirect_light += reflection_planes::reflection_planes_light();
-#endif
+//#ifdef REFLECTION_PLANES
+    if (in.material.metallic > 0.5) {
+        indirect_light += reflection_planes::reflection_planes_light(in.frag_coord.xy);
+    }
+//#endif
 
     let emissive_light = emissive.rgb * output_color.a;
 

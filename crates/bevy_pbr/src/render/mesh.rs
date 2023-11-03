@@ -987,10 +987,10 @@ pub struct SetMeshViewBindGroup<const I: usize>;
 impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetMeshViewBindGroup<I> {
     type Param = ();
     type ViewWorldQuery = (
-        Read<ViewUniformOffset>,
-        Read<ViewLightsUniformOffset>,
-        Read<ViewFogUniformOffset>,
-        Read<MeshViewBindGroup>,
+        Option<Read<ViewUniformOffset>>,
+        Option<Read<ViewLightsUniformOffset>>,
+        Option<Read<ViewFogUniformOffset>>,
+        Option<Read<MeshViewBindGroup>>,
     );
     type ItemWorldQuery = ();
 
@@ -1005,6 +1005,10 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetMeshViewBindGroup<I> 
         _: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
+        let mesh_view_bind_group = mesh_view_bind_group.expect("No mesh view bind group!");
+        let view_uniform = view_uniform.expect("No view uniform!");
+        let view_lights = view_lights.expect("No view lights!");
+        let view_fog = view_fog.expect("No view fog!");
         pass.set_bind_group(
             I,
             &mesh_view_bind_group.value,

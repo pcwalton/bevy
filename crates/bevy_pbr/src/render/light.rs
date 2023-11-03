@@ -2,7 +2,7 @@ use bevy_core_pipeline::core_3d::{Transparent3d, CORE_3D_DEPTH_FORMAT};
 use bevy_ecs::prelude::*;
 use bevy_math::{Mat4, UVec3, UVec4, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use bevy_render::{
-    camera::Camera,
+    camera::{Camera, ReflectionPlaneKey},
     color::Color,
     mesh::Mesh,
     render_asset::RenderAssets,
@@ -266,16 +266,24 @@ pub fn extract_clusters(
     views: Extract<Query<(Entity, &Clusters), With<Camera>>>,
 ) {
     for (entity, clusters) in &views {
-        commands.get_or_spawn(entity).insert((
+        commands
+            .get_or_spawn(entity)
+            .insert(clusters.create_components());
+    }
+}
+
+impl Clusters {
+    pub fn create_components(&self) -> (ExtractedClustersPointLights, ExtractedClusterConfig) {
+        (
             ExtractedClustersPointLights {
-                data: clusters.lights.clone(),
+                data: self.lights.clone(),
             },
             ExtractedClusterConfig {
-                near: clusters.near,
-                far: clusters.far,
-                dimensions: clusters.dimensions,
+                near: self.near,
+                far: self.far,
+                dimensions: self.dimensions,
             },
-        ));
+        )
     }
 }
 
@@ -646,6 +654,7 @@ pub fn prepare_lights(
             &ExtractedView,
             &ExtractedClusterConfig,
             Option<&EnvironmentMapLight>,
+            Option<&ReflectionPlaneKey>,
         ),
         With<RenderPhase<Transparent3d>>,
     >,
@@ -891,7 +900,7 @@ pub fn prepare_lights(
         .write_buffer(&render_device, &render_queue);
 
     // set up light data for each view
-    for (entity, extracted_view, clusters, environment_map) in &views {
+    for (entity, extracted_view, clusters, environment_map, reflection_plane_key) in &views {
         let point_light_depth_texture = texture_cache.get(
             &render_device,
             TextureDescriptor {
@@ -1091,9 +1100,16 @@ pub fn prepare_lights(
             .enumerate()
             .take(directional_shadow_enabled_count)
         {
+            // Cascades are keyed by the main camera, not by the reflection
+            // plane view. Account for that.
+            let camera_entity = match reflection_plane_key {
+                Some(key) => key.camera,
+                None => entity,
+            };
+
             for (cascade_index, (cascade, bound)) in light
                 .cascades
-                .get(&entity)
+                .get(&camera_entity)
                 .unwrap()
                 .iter()
                 .take(MAX_CASCADES_PER_LIGHT)
@@ -1549,7 +1565,7 @@ pub fn queue_shadows<M: Material>(
     render_material_instances: Res<RenderMaterialInstances<M>>,
     mut pipelines: ResMut<SpecializedMeshPipelines<PrepassPipeline<M>>>,
     pipeline_cache: Res<PipelineCache>,
-    view_lights: Query<(Entity, &ViewLightEntities)>,
+    view_lights: Query<(Entity, &ViewLightEntities, Option<&ReflectionPlaneKey>)>,
     mut view_light_shadow_phases: Query<(&LightEntity, &mut RenderPhase<Shadow>)>,
     point_light_entities: Query<&CubemapVisibleEntities, With<ExtractedPointLight>>,
     directional_light_entities: Query<&CascadesVisibleEntities, With<ExtractedDirectionalLight>>,
@@ -1557,7 +1573,13 @@ pub fn queue_shadows<M: Material>(
 ) where
     M::Data: PartialEq + Eq + Hash + Clone,
 {
-    for (entity, view_lights) in &view_lights {
+    for (view_entity, view_lights, reflection_plane_key) in &view_lights {
+        // Visible entities are keyed off the camera, so grab that if this is a reflection plane.
+        let entity = match reflection_plane_key {
+            None => view_entity,
+            Some(reflection_plane_key) => reflection_plane_key.camera,
+        };
+
         let draw_shadow_mesh = shadow_draw_functions.read().id::<DrawPrepass<M>>();
         for view_light_entity in view_lights.lights.iter().copied() {
             let (light_entity, mut shadow_phase) =

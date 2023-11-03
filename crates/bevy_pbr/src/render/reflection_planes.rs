@@ -1,5 +1,9 @@
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Handle};
+use bevy_core_pipeline::{
+    core_3d::{AlphaMask3d, Camera3d, Opaque3d, Transparent3d},
+    tonemapping::Tonemapping,
+};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     prelude::{Entity, Res, ResMut},
@@ -8,12 +12,16 @@ use bevy_ecs::{
     system::{Commands, Query, Resource},
     world::{FromWorld, World},
 };
-use bevy_math::{uvec4, Mat4, UVec2};
+use bevy_math::{
+    uvec4, vec2, vec3, vec3a, vec4, Mat3, Mat3A, Mat4, UVec2, Vec3, Vec3A, Vec4, Vec4Swizzles,
+};
 use bevy_render::{
     camera::{
-        CameraRenderGraph, ExtractedCamera, NormalizedRenderTarget, ReflectionPlaneKey, Viewport,
+        CameraRenderGraph, ExtractedCamera, NormalizedRenderTarget, Projection, ReflectionPlaneKey,
+        Viewport,
     },
     prelude::Camera,
+    render_phase::RenderPhase,
     render_resource::TextureFormat,
     render_resource::{
         AddressMode, Extent3d, FilterMode, Sampler, SamplerDescriptor, Shader, ShaderType, Texture,
@@ -22,13 +30,16 @@ use bevy_render::{
     },
     renderer::{RenderDevice, RenderQueue},
     texture::BevyDefault,
-    view::{ColorGrading, ExtractedView, RenderReflectionPlaneTextureViews, ViewTarget},
+    view::{
+        prepare_view_targets, ColorGrading, ExtractedView, RenderReflectionPlaneTextureViews,
+        ViewTarget, VisibleEntities,
+    },
     Extract, ExtractSchedule, Render, RenderApp, RenderSet,
 };
 use bevy_transform::prelude::GlobalTransform;
 use bevy_utils::{EntityHashMap, EntityHashSet, HashMap};
 
-use crate::ReflectionPlane;
+use crate::{Clusters, ExtractedClustersPointLights, ReflectionPlane};
 
 pub const REFLECTION_PLANES_SHADER_HANDLE: Handle<Shader> =
     Handle::weak_from_u128(166489733890667948920569244961095141211);
@@ -81,7 +92,9 @@ impl Plugin for ReflectionPlanesPlugin {
             .add_systems(ExtractSchedule, extract_reflection_planes)
             .add_systems(
                 Render,
-                build_reflection_plane_textures.in_set(RenderSet::PrepareResources),
+                build_reflection_plane_textures
+                    .in_set(RenderSet::ManageViews)
+                    .before(prepare_view_targets),
             );
     }
 
@@ -103,14 +116,33 @@ pub fn extract_reflection_planes(
             &Camera,
             &CameraRenderGraph,
             &GlobalTransform,
+            &Projection,
+            &Clusters,
             Option<&ColorGrading>,
         )>,
     >,
-    reflection_planes: Extract<Query<Entity, With<ReflectionPlane>>>,
+    reflection_planes: Extract<Query<(Entity, &GlobalTransform), With<ReflectionPlane>>>,
+    bogus_visible_entities: Extract<Query<Entity>>,
 ) {
-    for reflection_plane_entity in reflection_planes.iter() {
-        for (camera_entity, camera, camera_render_graph, camera_transform, color_grading) in
-            cameras.iter()
+    render_reflection_plane_views.clear();
+
+    // FIXME(pcwalton): Actually determine which entities are visible from this
+    // reflection plane.
+    let mut visible_entities = VisibleEntities::default();
+    for visible_entity in bogus_visible_entities.iter() {
+        visible_entities.entities.push(visible_entity);
+    }
+
+    for (reflection_plane_entity, reflection_plane_transform) in reflection_planes.iter() {
+        for (
+            camera_entity,
+            camera,
+            camera_render_graph,
+            camera_transform,
+            camera_projection,
+            clusters,
+            color_grading,
+        ) in cameras.iter()
         {
             let key = ReflectionPlaneKey {
                 reflection_plane: reflection_plane_entity,
@@ -131,6 +163,22 @@ pub fn extract_reflection_planes(
                 ..Viewport::default()
             };
 
+            let view = camera_transform.compute_matrix().inverse();
+
+            // FIXME(pcwalton): Use inverse transpose.
+            let view_space_reflection_transform =
+                view * reflection_plane_transform.compute_matrix();
+            let plane_normal = (view_space_reflection_transform * Vec3::NEG_Y.extend(1.0)
+                - view_space_reflection_transform * vec4(0.0, 0.0, 0.0, 1.0))
+            .xyz()
+            .normalize_or_zero();
+
+            let projection = oblique_reversed_infinite_projection(
+                &camera_projection,
+                plane_normal.into(),
+                view_space_reflection_transform.w_axis.xyz().into(),
+            );
+
             commands
                 .entity(reflection_plane_view_entity)
                 .insert(ExtractedCamera {
@@ -145,19 +193,30 @@ pub fn extract_reflection_planes(
                     sorted_camera_index_for_target: 0,
                 })
                 .insert(ExtractedView {
-                    projection: camera.projection_matrix(),
+                    projection,
                     transform: *camera_transform,
-                    view_projection: None,
+                    // FIXME(pcwalton): This is wrong.
+                    view_projection: Some(
+                        projection * view * Mat4::from_scale(vec3(1.0, -1.0, 1.0)),
+                    ),
                     hdr: camera.hdr,
                     viewport: uvec4(0, 0, viewport.physical_size.x, viewport.physical_size.y),
                     color_grading: color_grading.cloned().unwrap_or_default(),
                 })
+                .insert(visible_entities.clone())
+                .insert(RenderPhase::<Opaque3d>::default())
+                .insert(RenderPhase::<AlphaMask3d>::default())
+                .insert(RenderPhase::<Transparent3d>::default())
+                .insert(Camera3d::default())
+                .insert(Tonemapping::None)
+                .insert(clusters.create_components())
                 .insert(key);
         }
     }
 }
 
 pub fn build_reflection_plane_textures(
+    mut commands: Commands,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut reflection_planes: Query<(
@@ -264,7 +323,9 @@ pub fn build_reflection_plane_textures(
     }
 
     // Finally, upload the uniform buffer.
-    render_reflection_planes.buffer.write_buffer(&render_device, &render_queue);
+    render_reflection_planes
+        .buffer
+        .write_buffer(&render_device, &render_queue);
 }
 
 impl FromWorld for RenderReflectionPlanes {
@@ -293,5 +354,46 @@ impl Default for GpuReflectionPlanes {
         Self {
             data: [GpuReflectionPlane::default(); MAX_REFLECTION_PLANES],
         }
+    }
+}
+
+/*
+// http://terathon.com/code/oblique.html
+fn make_projection_matrix_clip_to_plane(matrix: &Mat4, clip_plane: Vec4) -> Mat4 {
+    let m = matrix.to_cols_array();
+
+    /*let q = (clip_plane.xy().signum() + vec2(m[8], m[9])) / vec2(m[0], m[5]);
+    let q = q.extend(-1.0).extend((1.0 + m[10]) / m[14]);*/
+    let q = matrix.inverse() * clip_plane.xy().signum().extend(1.0).extend(1.0);
+
+    println!("q={}", q);
+
+    let c = clip_plane * 2.0 / clip_plane.dot(q);
+
+    let mut matrix = *matrix;
+    matrix.x_axis.z = c.x;
+    matrix.y_axis.z = c.y;
+    matrix.z_axis.z = c.z + 1.0;
+    matrix.w_axis.z = c.w;
+    matrix
+}
+*/
+
+fn oblique_reversed_infinite_projection(projection: &Projection, n: Vec3A, p: Vec3A) -> Mat4 {
+    match *projection {
+        Projection::Perspective(ref perspective) => {
+            let f = 1.0 / f32::tan(perspective.fov * 0.5);
+            let q = perspective.aspect_ratio * n.x * n.x.signum() + n.y * n.y.signum();
+            let c = q / f - n.z;
+            Mat4::from_cols(
+                vec4(f / perspective.aspect_ratio, 0.0, 0.0, 0.0),
+                vec4(0.0, f, 0.0, 0.0),
+                (-(n / c + vec3a(0.0, 0.0, 1.0))).extend(n.dot(p) / c),
+                vec4(0.0, 0.0, -1.0, 0.0),
+            )
+            .transpose()
+        }
+
+        Projection::Orthographic(_) => todo!(),
     }
 }

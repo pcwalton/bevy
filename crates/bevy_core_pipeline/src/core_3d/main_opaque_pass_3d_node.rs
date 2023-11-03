@@ -6,7 +6,7 @@ use crate::{
 };
 use bevy_ecs::{prelude::*, query::QueryItem};
 use bevy_render::{
-    camera::ExtractedCamera,
+    camera::{ExtractedCamera, ReflectionPlaneKey},
     render_graph::{NodeRunError, RenderGraphContext, ViewNode},
     render_phase::RenderPhase,
     render_resource::{
@@ -38,6 +38,7 @@ impl ViewNode for MainOpaquePass3dNode {
         Option<&'static SkyboxPipelineId>,
         Option<&'static SkyboxBindGroup>,
         &'static ViewUniformOffset,
+        Has<ReflectionPlaneKey>,
     );
 
     fn run(
@@ -58,6 +59,7 @@ impl ViewNode for MainOpaquePass3dNode {
             skybox_pipeline,
             skybox_bind_group,
             view_uniform_offset,
+            has_reflection_plane_key,
         ): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {

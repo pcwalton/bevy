@@ -36,10 +36,13 @@ fn setup(
         base_color: Color::rgba(0.1, 0.1, 0.1, 1.0),
         perceptual_roughness: 0.0,
         metallic: 1.0,
+        cull_mode: None,    // FIXME
         ..StandardMaterial::default()
     });
     let cube_material = materials.add(StandardMaterial {
         base_color: Color::rgba(0.7, 0.0, 0.0, 1.0),
+        metallic: 0.0,
+        cull_mode: None,    // FIXME
         ..StandardMaterial::default()
     });
 
@@ -61,7 +64,8 @@ fn setup(
     // Spawn reflection plane.
     commands
         .spawn(SpatialBundle {
-            transform: Transform::from_scale(Vec3::splat(10.0)),
+            transform: Transform::from_scale(Vec3::splat(10.0))
+                .with_translation(vec3(0.0, -0.1, 0.0)),
             ..SpatialBundle::default()
         })
         .insert(ReflectionPlane);

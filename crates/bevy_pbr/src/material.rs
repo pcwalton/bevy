@@ -16,8 +16,7 @@ use bevy_ecs::{
 };
 use bevy_reflect::Reflect;
 use bevy_render::{
-    camera::Projection,
-    camera::TemporalJitter,
+    camera::{Projection, ReflectionPlaneKey, TemporalJitter},
     extract_instances::{ExtractInstancesPlugin, ExtractedInstances},
     extract_resource::ExtractResource,
     mesh::{Mesh, MeshVertexBufferLayout},
@@ -478,6 +477,7 @@ pub fn queue_material_meshes<M: Material>(
             Has<DepthPrepass>,
             Has<MotionVectorPrepass>,
             Has<DeferredPrepass>,
+            Has<ReflectionPlaneKey>,
         ),
         Option<&Camera3d>,
         Option<&TemporalJitter>,
@@ -498,7 +498,13 @@ pub fn queue_material_meshes<M: Material>(
         environment_map,
         shadow_filter_method,
         ssao,
-        (normal_prepass, depth_prepass, motion_vector_prepass, deferred_prepass),
+        (
+            normal_prepass,
+            depth_prepass,
+            motion_vector_prepass,
+            deferred_prepass,
+            has_reflection_plane_key,
+        ),
         camera_3d,
         temporal_jitter,
         projection,

@@ -1,15 +1,10 @@
 #define_import_path bevy_pbr::reflection_planes
 
-struct ReflectionPlane {
-    transform: mat4x4<f32>,
-    index: u32,
-};
+#import bevy_pbr::view_transformations
+#import bevy_pbr::mesh_view_bindings::{reflection_planes_texture, reflection_planes_sampler}
 
-struct ReflectionPlanes {
-    data: array<ReflectionPlane, 256u>,
-};
-
-fn reflection_planes_light() -> vec3<f32> {
-    // TODO(pcwalton): Fill this in.
-    return vec3(1.0, 0.0, 0.0);
+fn reflection_planes_light(frag_coord: vec2<f32>) -> vec3<f32> {
+    // TODO(pcwalton): Raytrace.
+    let uv = view_transformations::frag_coord_to_uv(frag_coord);
+    return textureSample(reflection_planes_texture, reflection_planes_sampler, uv, 0u).rgb;
 }

@@ -1,7 +1,6 @@
 #define_import_path bevy_pbr::mesh_view_bindings
 
 #import bevy_pbr::mesh_view_types as types
-#import bevy_pbr::reflection_planes::ReflectionPlanes;
 #import bevy_render::{
     view::View,
     globals::Globals,
@@ -35,7 +34,7 @@
 @group(0) @binding(9) var<uniform> globals: Globals;
 @group(0) @binding(10) var<uniform> fog: types::Fog;
 
-@group(0) @binding(11) var<uniform> reflection_planes: ReflectionPlanes;
+@group(0) @binding(11) var<uniform> reflection_planes: types::ReflectionPlanes;
 @group(0) @binding(12) var reflection_planes_texture: texture_2d_array<f32>;
 @group(0) @binding(13) var reflection_planes_sampler: sampler;
 
