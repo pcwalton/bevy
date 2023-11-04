@@ -12,13 +12,11 @@ use bevy_ecs::{
     system::{Commands, Query, Resource},
     world::{FromWorld, World},
 };
-use bevy_math::{
-    uvec4, vec2, vec3, vec3a, vec4, Mat3, Mat3A, Mat4, UVec2, Vec3, Vec3A, Vec4, Vec4Swizzles,
-};
+use bevy_math::{uvec4, vec3, vec4, Mat4, UVec2, Vec3, Vec3A, Vec3Swizzles, Vec4Swizzles};
 use bevy_render::{
     camera::{
-        CameraRenderGraph, ExtractedCamera, NormalizedRenderTarget, Projection, ReflectionPlaneKey,
-        Viewport,
+        CameraProjection, CameraRenderGraph, ExtractedCamera, NormalizedRenderTarget, Projection,
+        ReflectionPlaneKey, Viewport,
     },
     prelude::Camera,
     render_phase::RenderPhase,
@@ -39,7 +37,7 @@ use bevy_render::{
 use bevy_transform::prelude::GlobalTransform;
 use bevy_utils::{EntityHashMap, EntityHashSet, HashMap};
 
-use crate::{Clusters, ExtractedClustersPointLights, ReflectionPlane};
+use crate::{Clusters, ReflectionPlane};
 
 pub const REFLECTION_PLANES_SHADER_HANDLE: Handle<Shader> =
     Handle::weak_from_u128(166489733890667948920569244961095141211);
@@ -173,8 +171,8 @@ pub fn extract_reflection_planes(
             .xyz()
             .normalize_or_zero();
 
-            let projection = oblique_reversed_infinite_projection(
-                &camera_projection,
+            let projection = oblique_projection(
+                &camera_projection.get_projection_matrix(),
                 plane_normal.into(),
                 view_space_reflection_transform.w_axis.xyz().into(),
             );
@@ -357,43 +355,16 @@ impl Default for GpuReflectionPlanes {
     }
 }
 
-/*
-// http://terathon.com/code/oblique.html
-fn make_projection_matrix_clip_to_plane(matrix: &Mat4, clip_plane: Vec4) -> Mat4 {
-    let m = matrix.to_cols_array();
-
-    /*let q = (clip_plane.xy().signum() + vec2(m[8], m[9])) / vec2(m[0], m[5]);
-    let q = q.extend(-1.0).extend((1.0 + m[10]) / m[14]);*/
-    let q = matrix.inverse() * clip_plane.xy().signum().extend(1.0).extend(1.0);
-
-    println!("q={}", q);
-
-    let c = clip_plane * 2.0 / clip_plane.dot(q);
-
-    let mut matrix = *matrix;
-    matrix.x_axis.z = c.x;
-    matrix.y_axis.z = c.y;
-    matrix.z_axis.z = c.z + 1.0;
-    matrix.w_axis.z = c.w;
-    matrix
-}
-*/
-
-fn oblique_reversed_infinite_projection(projection: &Projection, n: Vec3A, p: Vec3A) -> Mat4 {
-    match *projection {
-        Projection::Perspective(ref perspective) => {
-            let f = 1.0 / f32::tan(perspective.fov * 0.5);
-            let q = perspective.aspect_ratio * n.x * n.x.signum() + n.y * n.y.signum();
-            let c = q / f - n.z;
-            Mat4::from_cols(
-                vec4(f / perspective.aspect_ratio, 0.0, 0.0, 0.0),
-                vec4(0.0, f, 0.0, 0.0),
-                (-(n / c + vec3a(0.0, 0.0, 1.0))).extend(n.dot(p) / c),
-                vec4(0.0, 0.0, -1.0, 0.0),
-            )
-            .transpose()
-        }
-
-        Projection::Orthographic(_) => todo!(),
-    }
+// https://aras-p.info/texts/obliqueortho.html
+fn oblique_projection(projection: &Mat4, n: Vec3A, p: Vec3A) -> Mat4 {
+    let plane = n.extend(-n.dot(p));
+    let q = projection.inverse() * plane.xy().signum().extend(0.0).extend(1.0);
+    let c = plane / plane.dot(q);
+    Mat4::from_cols(
+        projection.row(0),
+        projection.row(1),
+        projection.row(3) - c,
+        projection.row(3),
+    )
+    .transpose()
 }

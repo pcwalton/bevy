@@ -65,7 +65,7 @@ fn setup(
     commands
         .spawn(SpatialBundle {
             transform: Transform::from_scale(Vec3::splat(10.0))
-                .with_translation(vec3(0.0, -0.1, 0.0)),
+                .with_translation(vec3(0.0, -0.00001, 0.0)),
             ..SpatialBundle::default()
         })
         .insert(ReflectionPlane);
