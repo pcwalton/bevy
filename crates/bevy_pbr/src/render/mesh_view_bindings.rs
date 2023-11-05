@@ -10,7 +10,7 @@ use bevy_core_pipeline::{
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    system::{Commands, Query, Res},
+    system::{Commands, Query, Res}, query::Has,
 };
 use bevy_render::{
     globals::{GlobalsBuffer, GlobalsUniform},
@@ -25,7 +25,7 @@ use bevy_render::{
         BevyDefault, FallbackImage, FallbackImageCubemap, FallbackImageMsaa, FallbackImageZero,
         Image,
     },
-    view::{Msaa, ViewUniform, ViewUniforms},
+    view::{Msaa, ViewUniform, ViewUniforms}, camera::ReflectionPlaneKey,
 };
 
 use crate::{
@@ -343,7 +343,7 @@ fn layout_entries(
     // View Transmission Texture
     entries.extend_from_slice(&[
         BindGroupLayoutEntry {
-            binding: 21,
+            binding: 24,
             visibility: ShaderStages::FRAGMENT,
             ty: BindingType::Texture {
                 sample_type: TextureSampleType::Float { filterable: true },
@@ -353,7 +353,7 @@ fn layout_entries(
             count: None,
         },
         BindGroupLayoutEntry {
-            binding: 22,
+            binding: 25,
             visibility: ShaderStages::FRAGMENT,
             ty: BindingType::Sampler(SamplerBindingType::Filtering),
             count: None,
@@ -414,6 +414,7 @@ pub fn prepare_mesh_view_bind_groups(
         Option<&ViewTransmissionTexture>,
         Option<&EnvironmentMapLight>,
         &Tonemapping,
+        Has<ReflectionPlaneKey>,
     )>,
     (images, mut fallback_images_msaa, fallback_cubemap, fallback_image_zero): (
         Res<RenderAssets<Image>>,
@@ -451,6 +452,7 @@ pub fn prepare_mesh_view_bind_groups(
             transmission_texture,
             environment_map,
             tonemapping,
+            has_reflection_plane_key,
         ) in &views
         {
             let fallback_ssao = fallback_images_msaa
@@ -524,7 +526,7 @@ pub fn prepare_mesh_view_bind_groups(
                 .unwrap_or(&fallback_image_zero.sampler);
 
             entries =
-                entries.extend_with_indices(((21, transmission_view), (22, transmission_sampler)));
+                entries.extend_with_indices(((24, transmission_view), (25, transmission_sampler)));
 
             commands.entity(entity).insert(MeshViewBindGroup {
                 value: render_device.create_bind_group("mesh_view_bind_group", layout, &entries),

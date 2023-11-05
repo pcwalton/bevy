@@ -1,7 +1,7 @@
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Handle};
 use bevy_core_pipeline::{
-    core_3d::{AlphaMask3d, Camera3d, Opaque3d, Transparent3d},
+    core_3d::{AlphaMask3d, Camera3d, Opaque3d, Transmissive3d, Transparent3d},
     tonemapping::Tonemapping,
 };
 use bevy_derive::{Deref, DerefMut};
@@ -12,7 +12,7 @@ use bevy_ecs::{
     system::{Commands, Query, Resource},
     world::{FromWorld, World},
 };
-use bevy_math::{uvec4, vec3, vec4, Mat4, UVec2, Vec3, Vec3A, Vec3Swizzles, Vec4Swizzles};
+use bevy_math::{uvec4, vec3, vec4, Mat3A, Mat4, UVec2, Vec3, Vec3A, Vec4Swizzles};
 use bevy_render::{
     camera::{
         CameraProjection, CameraRenderGraph, ExtractedCamera, NormalizedRenderTarget, Projection,
@@ -35,7 +35,7 @@ use bevy_render::{
     Extract, ExtractSchedule, Render, RenderApp, RenderSet,
 };
 use bevy_transform::prelude::GlobalTransform;
-use bevy_utils::{EntityHashMap, EntityHashSet, HashMap};
+use bevy_utils::{tracing::error, EntityHashMap, EntityHashSet, HashMap};
 
 use crate::{Clusters, ReflectionPlane};
 
@@ -51,7 +51,13 @@ pub struct ReflectionPlanesPlugin;
 /// represents the virtual camera for that reflection plane relative to that
 /// view.
 #[derive(Resource, Default, Deref, DerefMut)]
-pub struct RenderReflectionPlaneViews(HashMap<ReflectionPlaneKey, Entity>);
+pub struct RenderReflectionPlaneViews(HashMap<ReflectionPlaneKey, RenderReflectionPlaneView>);
+
+pub struct RenderReflectionPlaneView {
+    entity: Entity,
+    view_space_normal: Vec3,
+    view_space_origin: Vec3,
+}
 
 #[derive(ShaderType)]
 pub struct GpuReflectionPlanes {
@@ -60,7 +66,10 @@ pub struct GpuReflectionPlanes {
 
 #[derive(ShaderType, Default, Clone, Copy)]
 struct GpuReflectionPlane {
-    transform: Mat4,
+    view_space_reflection_matrix: Mat4,
+    view_space_normal: Vec3,
+    thickness: f32,
+    view_space_origin: Vec3,
     index: u32,
 }
 
@@ -119,7 +128,7 @@ pub fn extract_reflection_planes(
             Option<&ColorGrading>,
         )>,
     >,
-    reflection_planes: Extract<Query<(Entity, &GlobalTransform), With<ReflectionPlane>>>,
+    reflection_planes: Extract<Query<(Entity, &GlobalTransform, &ReflectionPlane)>>,
     bogus_visible_entities: Extract<Query<Entity>>,
 ) {
     render_reflection_plane_views.clear();
@@ -131,7 +140,9 @@ pub fn extract_reflection_planes(
         visible_entities.entities.push(visible_entity);
     }
 
-    for (reflection_plane_entity, reflection_plane_transform) in reflection_planes.iter() {
+    for (reflection_plane_entity, reflection_plane_transform, reflection_plane) in
+        reflection_planes.iter()
+    {
         for (
             camera_entity,
             camera,
@@ -146,10 +157,6 @@ pub fn extract_reflection_planes(
                 reflection_plane: reflection_plane_entity,
                 camera: camera_entity,
             };
-
-            let reflection_plane_view_entity = *render_reflection_plane_views
-                .entry(key)
-                .or_insert_with(|| commands.spawn(()).id());
 
             let viewport = Viewport {
                 physical_position: UVec2::default(),
@@ -166,16 +173,25 @@ pub fn extract_reflection_planes(
             // FIXME(pcwalton): Use inverse transpose.
             let view_space_reflection_transform =
                 view * reflection_plane_transform.compute_matrix();
-            let plane_normal = (view_space_reflection_transform * Vec3::NEG_Y.extend(1.0)
-                - view_space_reflection_transform * vec4(0.0, 0.0, 0.0, 1.0))
-            .xyz()
-            .normalize_or_zero();
+            let plane_inside_normal = (Mat3A::from_mat4(view_space_reflection_transform)
+                * Vec3::NEG_Y)
+                .normalize_or_zero();
+            let plane_outside_normal = (Mat3A::from_mat4(view) * Vec3::Y).normalize_or_zero();
 
             let projection = oblique_projection(
                 &camera_projection.get_projection_matrix(),
-                plane_normal.into(),
+                plane_inside_normal.into(),
                 view_space_reflection_transform.w_axis.xyz().into(),
             );
+
+            let reflection_plane_view_entity = render_reflection_plane_views
+                .entry(key)
+                .or_insert_with(|| RenderReflectionPlaneView {
+                    entity: commands.spawn(()).id(),
+                    view_space_normal: plane_outside_normal,
+                    view_space_origin: view_space_reflection_transform.w_axis.xyz(),
+                })
+                .entity;
 
             commands
                 .entity(reflection_plane_view_entity)
@@ -204,11 +220,13 @@ pub fn extract_reflection_planes(
                 .insert(visible_entities.clone())
                 .insert(RenderPhase::<Opaque3d>::default())
                 .insert(RenderPhase::<AlphaMask3d>::default())
+                .insert(RenderPhase::<Transmissive3d>::default())
                 .insert(RenderPhase::<Transparent3d>::default())
                 .insert(Camera3d::default())
                 .insert(Tonemapping::None)
                 .insert(clusters.create_components())
-                .insert(key);
+                .insert(key)
+                .insert(*reflection_plane);
         }
     }
 }
@@ -220,16 +238,18 @@ pub fn build_reflection_plane_textures(
     mut reflection_planes: Query<(
         Entity,
         &ReflectionPlaneKey,
+        &ReflectionPlane,
         &mut ExtractedCamera,
         &ExtractedView,
     )>,
     mut render_reflection_planes: ResMut<RenderReflectionPlanes>,
+    render_reflection_plane_views: Res<RenderReflectionPlaneViews>,
     mut render_reflection_plane_texture_views: ResMut<RenderReflectionPlaneTextureViews>,
 ) {
     // FIXME: Don't recreate this every frame!
 
     let mut reflection_plane_entities = EntityHashSet::default();
-    for (_, reflection_plane_key, _, _) in reflection_planes.iter() {
+    for (_, reflection_plane_key, _, _, _) in reflection_planes.iter() {
         reflection_plane_entities.insert(reflection_plane_key.reflection_plane);
     }
 
@@ -238,7 +258,9 @@ pub fn build_reflection_plane_textures(
 
     // Recreate textures, and assign each plane an index.
     let mut reflection_plane_indices = EntityHashMap::default();
-    for (_, reflection_plane_key, extracted_camera, extracted_view) in reflection_planes.iter() {
+    for (_, reflection_plane_key, reflection_plane, extracted_camera, extracted_view) in
+        reflection_planes.iter()
+    {
         if !render_reflection_planes
             .textures
             .contains_key(&reflection_plane_key.camera)
@@ -280,23 +302,51 @@ pub fn build_reflection_plane_textures(
                 .insert(reflection_plane_key.camera, (texture, texture_view));
         }
 
-        if !reflection_plane_indices.contains_key(&reflection_plane_key.reflection_plane) {
-            let reflection_plane_index = reflection_plane_indices.len();
-            reflection_plane_indices.insert(
-                reflection_plane_key.reflection_plane,
-                reflection_plane_index as u32,
-            );
-            render_reflection_planes.buffer.get_mut().data[reflection_plane_index] =
-                GpuReflectionPlane {
-                    transform: extracted_view.transform.compute_matrix(),
-                    index: reflection_plane_index as u32,
-                };
+        if reflection_plane_indices.contains_key(&reflection_plane_key.reflection_plane) {
+            continue;
         }
+
+        let Some(render_reflection_plane_view) =
+            render_reflection_plane_views.get(reflection_plane_key)
+        else {
+            error!(
+                "No reflection plane view found for reflection plane {:?}",
+                reflection_plane_key
+            );
+            continue;
+        };
+
+        let reflection_plane_index = reflection_plane_indices.len();
+        reflection_plane_indices.insert(
+            reflection_plane_key.reflection_plane,
+            reflection_plane_index as u32,
+        );
+
+        let view_space_reflection_matrix =
+            Mat4::from_translation(render_reflection_plane_view.view_space_origin)
+                * Mat4::from_mat3a(reflection_matrix(
+                    render_reflection_plane_view.view_space_normal.into(),
+                ))
+                * Mat4::from_translation(-render_reflection_plane_view.view_space_origin);
+
+        render_reflection_planes.buffer.get_mut().data[reflection_plane_index] =
+            GpuReflectionPlane {
+                view_space_origin: render_reflection_plane_view.view_space_origin,
+                view_space_normal: render_reflection_plane_view.view_space_normal,
+                index: reflection_plane_index as u32,
+                view_space_reflection_matrix,
+                thickness: reflection_plane.thickness,
+            };
     }
 
     // Recreate views.
-    for (reflection_plane_view_entity, reflection_plane_key, mut extracted_camera, _) in
-        reflection_planes.iter_mut()
+    for (
+        reflection_plane_view_entity,
+        reflection_plane_key,
+        reflection_plane,
+        mut extracted_camera,
+        _,
+    ) in reflection_planes.iter_mut()
     {
         let &(ref texture, _) = &render_reflection_planes.textures[&reflection_plane_key.camera];
         let texture_view = texture.create_view(&TextureViewDescriptor {
@@ -367,4 +417,9 @@ fn oblique_projection(projection: &Mat4, n: Vec3A, p: Vec3A) -> Mat4 {
         projection.row(3),
     )
     .transpose()
+}
+
+/// Computes the matrix that reflects points across a plane centered at the origin with normal N.
+fn reflection_matrix(n: Vec3A) -> Mat3A {
+    Mat3A::IDENTITY - 2.0 * Mat3A::from_cols(n.x * n, n.y * n, n.z * n)
 }

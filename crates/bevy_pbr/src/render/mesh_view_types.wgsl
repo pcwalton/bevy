@@ -110,7 +110,10 @@ struct ClusterOffsetsAndCounts {
 #endif
 
 struct ReflectionPlane {
-    transform: mat4x4<f32>,
+    view_space_reflection_matrix: mat4x4<f32>,
+    view_space_normal: vec3<f32>,
+    thickness: f32,
+    view_space_origin: vec3<f32>,
     index: u32,
 };
 

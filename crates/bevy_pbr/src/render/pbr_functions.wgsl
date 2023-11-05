@@ -354,7 +354,11 @@ fn apply_pbr_lighting(
 
 //#ifdef REFLECTION_PLANES
     if (in.material.metallic > 0.5) {
-        indirect_light += reflection_planes::reflection_planes_light(in.frag_coord.xy);
+        let view_space_normal = normalize(mat3x3<f32>(
+            view_bindings::view.inverse_view[0].xyz,
+            view_bindings::view.inverse_view[1].xyz,
+            view_bindings::view.inverse_view[2].xyz) * in.N);
+        indirect_light += reflection_planes::reflection_planes_light(in.frag_coord.xy, view_space_normal);
     }
 //#endif
 

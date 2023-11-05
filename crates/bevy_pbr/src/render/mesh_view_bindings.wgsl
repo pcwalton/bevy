@@ -76,5 +76,5 @@
 @group(0) @binding(23) var deferred_prepass_texture: texture_2d<u32>;
 #endif // DEFERRED_PREPASS
 
-@group(0) @binding(21) var view_transmission_texture: texture_2d<f32>;
-@group(0) @binding(22) var view_transmission_sampler: sampler;
+@group(0) @binding(24) var view_transmission_texture: texture_2d<f32>;
+@group(0) @binding(25) var view_transmission_sampler: sampler;

@@ -2,10 +2,12 @@ use std::f32::consts::FRAC_PI_4;
 
 use bevy::prelude::*;
 use bevy_internal::{
+    asset::AssetLoader,
     core_pipeline::prepass::DepthPrepass,
     math::vec3,
     pbr::ReflectionPlane,
     prelude::shape::{Cube, Plane},
+    render::texture::{ImageFormatSetting, ImageLoaderSettings, ImageSampler},
 };
 
 const CAMERA_ROTATION_SPEED: f32 = 0.3;
@@ -26,23 +28,38 @@ fn main() {
 
 fn setup(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let plane = meshes.add(Plane::default().into());
+    // Add mesh assets.
+    let plane = meshes.add(
+        Mesh::from(Plane::default())
+            .with_generated_tangents()
+            .unwrap(),
+    );
     let cube = meshes.add(Cube::default().into());
+
+    // Add normal map asset.
+    let normal_map: Handle<Image> = asset_server.load_with_settings(
+        "textures/NormalMap.png",
+        |settings: &mut ImageLoaderSettings| {
+            settings.is_srgb = false;
+        },
+    );
 
     let reflective_material = materials.add(StandardMaterial {
         base_color: Color::rgba(0.1, 0.1, 0.1, 1.0),
         perceptual_roughness: 0.0,
         metallic: 1.0,
-        cull_mode: None,    // FIXME
+        cull_mode: None, // FIXME
+        normal_map_texture: Some(normal_map),
         ..StandardMaterial::default()
     });
     let cube_material = materials.add(StandardMaterial {
         base_color: Color::rgba(0.7, 0.0, 0.0, 1.0),
         metallic: 0.0,
-        cull_mode: None,    // FIXME
+        cull_mode: None, // FIXME
         ..StandardMaterial::default()
     });
 
@@ -68,7 +85,7 @@ fn setup(
                 .with_translation(vec3(0.0, -0.00001, 0.0)),
             ..SpatialBundle::default()
         })
-        .insert(ReflectionPlane);
+        .insert(ReflectionPlane { thickness: 0.2 });
 
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
