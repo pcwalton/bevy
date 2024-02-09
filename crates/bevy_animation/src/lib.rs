@@ -602,7 +602,7 @@ pub fn advance_animations(
 /// according to the currently-playing animation.
 pub fn animate_targets(
     clips: Res<Assets<AnimationClip>>,
-    players: Query<&AnimationPlayer, Without<AnimationTarget>>,
+    players: Query<&AnimationPlayer>,
     mut targets: Query<(
         Entity,
         &AnimationTarget,

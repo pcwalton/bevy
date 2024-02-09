@@ -952,10 +952,15 @@ fn load_node(
         None => {
             if animation_roots.contains(&gltf_node.index()) {
                 // This is an animation root. Make a new animation context.
-                animation_context = Some(AnimationContext {
+                let new_animation_context = AnimationContext {
                     root: node.id(),
                     path: smallvec![name],
+                };
+                node.insert(AnimationTarget {
+                    id: AnimationTargetId::from_names(new_animation_context.path.iter()),
+                    player: new_animation_context.root,
                 });
+                animation_context = Some(new_animation_context)
             }
         }
         Some(ref mut animation_context) => {
