@@ -1,4 +1,4 @@
-use bevy_asset::{load_internal_asset, AssetId};
+use bevy_asset::{load_internal_asset, AssetId, UntypedAssetId};
 use bevy_core_pipeline::{
     core_3d::{AlphaMask3d, Opaque3d, Transmissive3d, Transparent3d, CORE_3D_DEPTH_FORMAT},
     deferred::{AlphaMask3dDeferred, Opaque3dDeferred},
@@ -39,7 +39,7 @@ use crate::render::{
 };
 use crate::*;
 
-use self::irradiance_volume::IRRADIANCE_VOLUMES_ARE_USABLE;
+use self::{irradiance_volume::IRRADIANCE_VOLUMES_ARE_USABLE, pbr_data::PbrData};
 
 use super::skin::SkinIndices;
 
@@ -240,14 +240,14 @@ bitflags::bitflags! {
 pub struct RenderMeshInstance {
     pub transforms: MeshTransforms,
     pub mesh_asset_id: AssetId<Mesh>,
-    pub material_bind_group_id: AtomicMaterialBindGroupId,
+    pub material_asset_id: UntypedAssetId,
     pub shadow_caster: bool,
     pub automatic_batching: bool,
 }
 
 impl RenderMeshInstance {
     pub fn should_batch(&self) -> bool {
-        self.automatic_batching && self.material_bind_group_id.get().is_some()
+        self.automatic_batching
     }
 }
 
@@ -264,6 +264,7 @@ pub fn extract_meshes(
             &GlobalTransform,
             Option<&PreviousGlobalTransform>,
             &Handle<Mesh>,
+            &PbrData<StandardMaterial>, // FIXME
             Has<NotShadowReceiver>,
             Has<TransmittedShadowReceiver>,
             Has<NotShadowCaster>,
@@ -278,6 +279,7 @@ pub fn extract_meshes(
             transform,
             previous_transform,
             handle,
+            pbr_data,
             not_shadow_receiver,
             transmitted_receiver,
             not_shadow_caster,
@@ -311,7 +313,7 @@ pub fn extract_meshes(
                         mesh_asset_id: handle.id(),
                         transforms,
                         shadow_caster: !not_shadow_caster,
-                        material_bind_group_id: AtomicMaterialBindGroupId::default(),
+                        material_asset_id: pbr_data.material_asset_id,
                         automatic_batching: !no_automatic_batching,
                     },
                 ));
@@ -446,7 +448,7 @@ impl GetBatchData for MeshPipeline {
     type Param = (SRes<RenderMeshInstances>, SRes<RenderLightmaps>);
     // The material bind group ID, the mesh ID, and the lightmap ID,
     // respectively.
-    type CompareData = (MaterialBindGroupId, AssetId<Mesh>, Option<AssetId<Image>>);
+    type CompareData = (UntypedAssetId, AssetId<Mesh>, Option<AssetId<Image>>);
 
     type BufferData = MeshUniform;
 
@@ -463,7 +465,7 @@ impl GetBatchData for MeshPipeline {
                 maybe_lightmap.map(|lightmap| lightmap.uv_rect),
             ),
             mesh_instance.should_batch().then_some((
-                mesh_instance.material_bind_group_id.get(),
+                mesh_instance.material_asset_id,
                 mesh_instance.mesh_asset_id,
                 maybe_lightmap.map(|lightmap| lightmap.image),
             )),

@@ -502,12 +502,17 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
 
                 Ok(#render_path::render_resource::UnpreparedBindGroup {
                     bindings,
-                    data: #get_prepared_data,
+                    data: self.data(),
                 })
             }
 
             fn bind_group_layout_entries(render_device: &#render_path::renderer::RenderDevice) -> Vec<#render_path::render_resource::BindGroupLayoutEntry> {
                 vec![#(#binding_layouts,)*]
+            }
+
+            #[allow(clippy::unused_unit)]
+            fn data(&self) -> Self::Data {
+                #get_prepared_data
             }
         }
     }))

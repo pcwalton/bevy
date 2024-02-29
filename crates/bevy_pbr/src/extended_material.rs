@@ -150,6 +150,10 @@ impl<B: Material, E: MaterialExtension> AsBindGroup for ExtendedMaterial<B, E> {
         entries.extend(E::bind_group_layout_entries(render_device));
         entries
     }
+
+    fn data(&self) -> Self::Data {
+        (self.base.data(), self.extension.data())
+    }
 }
 
 impl<B: Material, E: MaterialExtension> Material for ExtendedMaterial<B, E> {

@@ -169,6 +169,8 @@ impl AsBindGroup for BindlessMaterial {
             },
         ]
     }
+
+    fn data(&self) -> Self::Data {}
 }
 
 impl Material for BindlessMaterial {

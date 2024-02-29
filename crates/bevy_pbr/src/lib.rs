@@ -12,6 +12,7 @@ mod light_probe;
 mod lightmap;
 mod material;
 mod parallax;
+mod pbr_data;
 mod pbr_material;
 mod prepass;
 mod render;

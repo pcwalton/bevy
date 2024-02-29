@@ -18,7 +18,7 @@ use bevy_render::{
     camera::TemporalJitter,
     extract_instances::{ExtractInstancesPlugin, ExtractedInstances},
     extract_resource::ExtractResource,
-    mesh::{Mesh, MeshVertexBufferLayout},
+    mesh::MeshVertexBufferLayout,
     render_asset::RenderAssets,
     render_phase::*,
     render_resource::*,
@@ -32,7 +32,11 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{hash::Hash, num::NonZeroU32};
 
-use self::{irradiance_volume::IrradianceVolume, prelude::EnvironmentMapLight};
+use self::{
+    irradiance_volume::IrradianceVolume,
+    pbr_data::{update_pbr_data, RenderPbrData},
+    prelude::EnvironmentMapLight,
+};
 
 /// Materials are used alongside [`MaterialPlugin`] and [`MaterialMeshBundle`]
 /// to spawn entities that are rendered with a specific [`Material`] type. They serve as an easy to use high level
@@ -209,7 +213,12 @@ where
 {
     fn build(&self, app: &mut App) {
         app.init_asset::<M>()
-            .add_plugins(ExtractInstancesPlugin::<AssetId<M>>::extract_visible());
+            .add_plugins(ExtractInstancesPlugin::<AssetId<M>>::extract_visible())
+            .add_plugins(ExtractInstancesPlugin::<RenderPbrData<M>>::extract_visible())
+            .add_systems(
+                PostUpdate,
+                update_pbr_data::<M>.after(VisibilitySystems::CheckVisibility),
+            );
 
         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
@@ -460,11 +469,7 @@ pub fn queue_material_meshes<M: Material>(
     mut pipelines: ResMut<SpecializedMeshPipelines<MaterialPipeline<M>>>,
     pipeline_cache: Res<PipelineCache>,
     msaa: Res<Msaa>,
-    render_meshes: Res<RenderAssets<Mesh>>,
-    render_materials: Res<RenderMaterials<M>>,
-    render_mesh_instances: Res<RenderMeshInstances>,
-    render_material_instances: Res<RenderMaterialInstances<M>>,
-    render_lightmaps: Res<RenderLightmaps>,
+    render_pbr_data: Res<ExtractedInstances<RenderPbrData<M>>>,
     mut views: Query<(
         &ExtractedView,
         &VisibleEntities,
@@ -585,54 +590,20 @@ pub fn queue_material_meshes<M: Material>(
         }
         let rangefinder = view.rangefinder3d();
         for visible_entity in &visible_entities.entities {
-            let Some(material_asset_id) = render_material_instances.get(visible_entity) else {
-                continue;
-            };
-            let Some(mesh_instance) = render_mesh_instances.get(visible_entity) else {
-                continue;
-            };
-            let Some(mesh) = render_meshes.get(mesh_instance.mesh_asset_id) else {
-                continue;
-            };
-            let Some(material) = render_materials.get(material_asset_id) else {
+            let Some(pbr_render_data) = render_pbr_data.get(visible_entity) else {
                 continue;
             };
 
-            let forward = match material.properties.render_method {
-                OpaqueRendererMethod::Forward => true,
-                OpaqueRendererMethod::Deferred => false,
-                OpaqueRendererMethod::Auto => unreachable!(),
-            };
-
-            let mut mesh_key = view_key;
-
-            mesh_key |= MeshPipelineKey::from_primitive_topology(mesh.primitive_topology);
-
-            if mesh.morph_targets.is_some() {
-                mesh_key |= MeshPipelineKey::MORPH_TARGETS;
-            }
-
-            if material.properties.reads_view_transmission_texture {
-                mesh_key |= MeshPipelineKey::READS_VIEW_TRANSMISSION_TEXTURE;
-            }
-
-            mesh_key |= alpha_mode_pipeline_key(material.properties.alpha_mode);
-
-            if render_lightmaps
-                .render_lightmaps
-                .contains_key(visible_entity)
-            {
-                mesh_key |= MeshPipelineKey::LIGHTMAPPED;
-            }
+            let mesh_key = view_key | pbr_render_data.pbr_data.mesh_pipeline_key;
 
             let pipeline_id = pipelines.specialize(
                 &pipeline_cache,
                 &material_pipeline,
                 MaterialPipelineKey {
                     mesh_key,
-                    bind_group_data: material.key.clone(),
+                    bind_group_data: pbr_render_data.pbr_data.bind_group_data.clone(),
                 },
-                &mesh.layout,
+                &pbr_render_data.pbr_data.mesh_layout,
             );
             let pipeline_id = match pipeline_id {
                 Ok(id) => id,
@@ -642,16 +613,12 @@ pub fn queue_material_meshes<M: Material>(
                 }
             };
 
-            mesh_instance
-                .material_bind_group_id
-                .set(material.get_bind_group_id());
-
-            match material.properties.alpha_mode {
+            match pbr_render_data.pbr_data.alpha_mode {
                 AlphaMode::Opaque => {
-                    if material.properties.reads_view_transmission_texture {
+                    if mesh_key.contains(MeshPipelineKey::READS_VIEW_TRANSMISSION_TEXTURE) {
                         let distance = rangefinder
-                            .distance_translation(&mesh_instance.transforms.transform.translation)
-                            + material.properties.depth_bias;
+                            .distance_translation(&pbr_render_data.translation)
+                            + pbr_render_data.pbr_data.depth_bias;
                         transmissive_phase.add(Transmissive3d {
                             entity: *visible_entity,
                             draw_function: draw_transmissive_pbr,
@@ -660,22 +627,24 @@ pub fn queue_material_meshes<M: Material>(
                             batch_range: 0..1,
                             dynamic_offset: None,
                         });
-                    } else if forward {
+                    } else if pbr_render_data.pbr_data.opaque_renderer_method
+                        == OpaqueRendererMethod::Forward
+                    {
                         opaque_phase.add(Opaque3d {
                             entity: *visible_entity,
                             draw_function: draw_opaque_pbr,
                             pipeline: pipeline_id,
-                            asset_id: mesh_instance.mesh_asset_id,
+                            asset_id: pbr_render_data.pbr_data.mesh_asset_id,
                             batch_range: 0..1,
                             dynamic_offset: None,
                         });
                     }
                 }
                 AlphaMode::Mask(_) => {
-                    if material.properties.reads_view_transmission_texture {
+                    if mesh_key.contains(MeshPipelineKey::READS_VIEW_TRANSMISSION_TEXTURE) {
                         let distance = rangefinder
-                            .distance_translation(&mesh_instance.transforms.transform.translation)
-                            + material.properties.depth_bias;
+                            .distance_translation(&pbr_render_data.translation)
+                            + pbr_render_data.pbr_data.depth_bias;
                         transmissive_phase.add(Transmissive3d {
                             entity: *visible_entity,
                             draw_function: draw_transmissive_pbr,
@@ -684,12 +653,14 @@ pub fn queue_material_meshes<M: Material>(
                             batch_range: 0..1,
                             dynamic_offset: None,
                         });
-                    } else if forward {
+                    } else if pbr_render_data.pbr_data.opaque_renderer_method
+                        == OpaqueRendererMethod::Forward
+                    {
                         alpha_mask_phase.add(AlphaMask3d {
                             entity: *visible_entity,
                             draw_function: draw_alpha_mask_pbr,
                             pipeline: pipeline_id,
-                            asset_id: mesh_instance.mesh_asset_id,
+                            asset_id: pbr_render_data.pbr_data.mesh_asset_id,
                             batch_range: 0..1,
                             dynamic_offset: None,
                         });
@@ -699,9 +670,8 @@ pub fn queue_material_meshes<M: Material>(
                 | AlphaMode::Premultiplied
                 | AlphaMode::Add
                 | AlphaMode::Multiply => {
-                    let distance = rangefinder
-                        .distance_translation(&mesh_instance.transforms.transform.translation)
-                        + material.properties.depth_bias;
+                    let distance = rangefinder.distance_translation(&pbr_render_data.translation)
+                        + pbr_render_data.pbr_data.depth_bias;
                     transparent_phase.add(Transparent3d {
                         entity: *visible_entity,
                         draw_function: draw_transparent_pbr,
@@ -718,7 +688,7 @@ pub fn queue_material_meshes<M: Material>(
 
 /// Default render method used for opaque materials.
 #[derive(Default, Resource, Clone, Debug, ExtractResource, Reflect)]
-pub struct DefaultOpaqueRendererMethod(OpaqueRendererMethod);
+pub struct DefaultOpaqueRendererMethod(pub(crate) OpaqueRendererMethod);
 
 impl DefaultOpaqueRendererMethod {
     pub fn forward() -> Self {
@@ -756,7 +726,7 @@ impl DefaultOpaqueRendererMethod {
 /// bandwidth usage which can be unsuitable for low end mobile or other bandwidth-constrained devices.
 ///
 /// If a material indicates `OpaqueRendererMethod::Auto`, `DefaultOpaqueRendererMethod` will be used.
-#[derive(Default, Clone, Copy, Debug, Reflect)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Reflect)]
 pub enum OpaqueRendererMethod {
     #[default]
     Forward,

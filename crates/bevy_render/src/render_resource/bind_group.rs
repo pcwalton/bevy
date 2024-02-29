@@ -339,6 +339,8 @@ pub trait AsBindGroup {
     fn bind_group_layout_entries(render_device: &RenderDevice) -> Vec<BindGroupLayoutEntry>
     where
         Self: Sized;
+
+    fn data(&self) -> Self::Data;
 }
 
 /// An error that occurs during [`AsBindGroup::as_bind_group`] calls.
