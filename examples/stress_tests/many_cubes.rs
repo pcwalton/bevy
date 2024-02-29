@@ -18,6 +18,7 @@ use bevy::{
     render::{
         render_asset::RenderAssetUsages,
         render_resource::{Extent3d, TextureDimension, TextureFormat},
+        view::NoFrustumCulling,
     },
     window::{PresentMode, WindowPlugin, WindowResolution},
     winit::{UpdateMode, WinitSettings},
@@ -131,12 +132,14 @@ fn setup(
                 let spherical_polar_theta_phi =
                     fibonacci_spiral_on_sphere(golden_ratio, i, N_POINTS);
                 let unit_sphere_p = spherical_polar_to_cartesian(spherical_polar_theta_phi);
-                commands.spawn(PbrBundle {
-                    mesh: mesh.clone(),
-                    material: materials.choose(&mut material_rng).unwrap().clone(),
-                    transform: Transform::from_translation((radius * unit_sphere_p).as_vec3()),
-                    ..default()
-                });
+                commands
+                    .spawn(PbrBundle {
+                        mesh: mesh.clone(),
+                        material: materials.choose(&mut material_rng).unwrap().clone(),
+                        transform: Transform::from_translation((radius * unit_sphere_p).as_vec3()),
+                        ..default()
+                    })
+                    .insert(NoFrustumCulling);
             }
 
             // camera

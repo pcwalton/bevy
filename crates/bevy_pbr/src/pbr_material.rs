@@ -737,30 +737,50 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
     }
 }
 
-/// The pipeline key for [`StandardMaterial`].
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct StandardMaterialKey {
-    normal_map: bool,
-    cull_mode: Option<Face>,
-    depth_bias: i32,
-    relief_mapping: bool,
-    diffuse_transmission: bool,
-    specular_transmission: bool,
+bitflags::bitflags! {
+    #[repr(transparent)]
+    #[derive(Clone, Hash, PartialEq, Eq)]
+    pub struct StandardMaterialKey: u64 {
+        const DEPTH_BIAS_BITS       = 0xffffffff;
+        const CULL_FRONT            = 1 << 32;
+        const CULL_BACK             = 1 << 33;
+        const NORMAL_MAP            = 1 << 34;
+        const RELIEF_MAPPING        = 1 << 35;
+        const DIFFUSE_TRANSMISSION  = 1 << 36;
+        const SPECULAR_TRANSMISSION = 1 << 37;
+    }
 }
 
 impl From<&StandardMaterial> for StandardMaterialKey {
     fn from(material: &StandardMaterial) -> Self {
-        StandardMaterialKey {
-            normal_map: material.normal_map_texture.is_some(),
-            cull_mode: material.cull_mode,
-            depth_bias: material.depth_bias as i32,
-            relief_mapping: matches!(
-                material.parallax_mapping_method,
-                ParallaxMappingMethod::Relief { .. }
-            ),
-            diffuse_transmission: material.diffuse_transmission > 0.0,
-            specular_transmission: material.specular_transmission > 0.0,
+        let mut flags = StandardMaterialKey::empty();
+        match material.cull_mode {
+            Some(Face::Front) => flags |= StandardMaterialKey::CULL_FRONT,
+            Some(Face::Back) => flags |= StandardMaterialKey::CULL_BACK,
+            None => {}
         }
+        if material.normal_map_texture.is_some() {
+            flags |= StandardMaterialKey::NORMAL_MAP;
+        }
+        // FIXME: This seems dubious, but the previous code was also dubious
+        // because it converted the depth bias to an integer.
+        if material.depth_bias != 0.0 {
+            flags |=
+                StandardMaterialKey::from_bits_retain(material.depth_bias as i32 as u32 as u64);
+        }
+        if matches!(
+            material.parallax_mapping_method,
+            ParallaxMappingMethod::Relief { .. }
+        ) {
+            flags |= StandardMaterialKey::RELIEF_MAPPING;
+        }
+        if material.diffuse_transmission > 0.0 {
+            flags |= StandardMaterialKey::DIFFUSE_TRANSMISSION;
+        }
+        if material.specular_transmission > 0.0 {
+            flags |= StandardMaterialKey::SPECULAR_TRANSMISSION;
+        }
+        flags
     }
 }
 
@@ -818,32 +838,56 @@ impl Material for StandardMaterial {
         if let Some(fragment) = descriptor.fragment.as_mut() {
             let shader_defs = &mut fragment.shader_defs;
 
-            if key.bind_group_data.normal_map {
+            if key
+                .bind_group_data
+                .contains(StandardMaterialKey::NORMAL_MAP)
+            {
                 shader_defs.push("STANDARD_MATERIAL_NORMAL_MAP".into());
             }
-            if key.bind_group_data.relief_mapping {
+            if key
+                .bind_group_data
+                .contains(StandardMaterialKey::RELIEF_MAPPING)
+            {
                 shader_defs.push("RELIEF_MAPPING".into());
             }
 
-            if key.bind_group_data.diffuse_transmission {
+            if key
+                .bind_group_data
+                .contains(StandardMaterialKey::DIFFUSE_TRANSMISSION)
+            {
                 shader_defs.push("STANDARD_MATERIAL_DIFFUSE_TRANSMISSION".into());
             }
 
-            if key.bind_group_data.specular_transmission {
+            if key
+                .bind_group_data
+                .contains(StandardMaterialKey::SPECULAR_TRANSMISSION)
+            {
                 shader_defs.push("STANDARD_MATERIAL_SPECULAR_TRANSMISSION".into());
             }
 
-            if key.bind_group_data.diffuse_transmission || key.bind_group_data.specular_transmission
-            {
+            if key.bind_group_data.intersects(
+                StandardMaterialKey::DIFFUSE_TRANSMISSION
+                    | StandardMaterialKey::SPECULAR_TRANSMISSION,
+            ) {
                 shader_defs.push("STANDARD_MATERIAL_SPECULAR_OR_DIFFUSE_TRANSMISSION".into());
             }
         }
-        descriptor.primitive.cull_mode = key.bind_group_data.cull_mode;
+        descriptor.primitive.cull_mode = if key
+            .bind_group_data
+            .contains(StandardMaterialKey::CULL_FRONT)
+        {
+            Some(Face::Front)
+        } else if key.bind_group_data.contains(StandardMaterialKey::CULL_BACK) {
+            Some(Face::Back)
+        } else {
+            None
+        };
         if let Some(label) = &mut descriptor.label {
             *label = format!("pbr_{}", *label).into();
         }
         if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
-            depth_stencil.bias.constant = key.bind_group_data.depth_bias;
+            depth_stencil.bias.constant =
+                (key.bind_group_data & StandardMaterialKey::DEPTH_BIAS_BITS).bits() as i32
         }
         Ok(())
     }
