@@ -11,10 +11,12 @@ use std::{
     sync::Arc,
 };
 
-use crate::{prelude::Image, render_asset::RenderAssetPlugin, RenderApp};
-use bevy_app::{App, Plugin};
+use crate::{prelude::Image, render_asset::RenderAssetPlugin, view::check_visibility, RenderApp};
+use bevy_app::{App, Plugin, PostUpdate};
 use bevy_asset::AssetApp;
-use bevy_ecs::{entity::Entity, system::Resource};
+use bevy_ecs::{entity::Entity, schedule::IntoSystemConfigs, system::Resource};
+
+use self::skinning::{compute_poses, ComputedPose};
 
 /// Adds the [`Mesh`] as an asset and makes sure that they are extracted and prepared for the GPU.
 pub struct MeshPlugin;
@@ -26,8 +28,10 @@ impl Plugin for MeshPlugin {
             .register_asset_reflect::<Mesh>()
             .register_type::<skinning::SkinnedMesh>()
             .register_type::<Vec<Entity>>()
+            .register_type::<ComputedPose>()
             // 'Mesh' must be prepared after 'Image' as meshes rely on the morph target image being ready
-            .add_plugins(RenderAssetPlugin::<Mesh, Image>::default());
+            .add_plugins(RenderAssetPlugin::<Mesh, Image>::default())
+            .add_systems(PostUpdate, compute_poses.after(check_visibility));
 
         let Ok(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;

@@ -1,20 +1,15 @@
-use bevy_asset::Assets;
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::entity::EntityHashMap;
 use bevy_ecs::prelude::*;
 use bevy_math::Mat4;
 use bevy_render::{
     batching::NoAutomaticBatching,
-    mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes},
+    mesh::skinning::{ComputedPose, SkinnedMesh, MAX_JOINTS},
     render_resource::{BufferUsages, BufferVec},
     renderer::{RenderDevice, RenderQueue},
     view::ViewVisibility,
     Extract,
 };
-use bevy_transform::prelude::GlobalTransform;
-
-/// Maximum number of joints supported for skinned meshes.
-pub const MAX_JOINTS: usize = 256;
 
 #[derive(Component)]
 pub struct SkinIndex {
@@ -90,39 +85,20 @@ pub fn prepare_skins(
 pub fn extract_skins(
     mut skin_indices: ResMut<SkinIndices>,
     mut uniform: ResMut<SkinUniform>,
-    query: Extract<Query<(Entity, &ViewVisibility, &SkinnedMesh)>>,
-    inverse_bindposes: Extract<Res<Assets<SkinnedMeshInverseBindposes>>>,
-    joints: Extract<Query<&GlobalTransform>>,
+    query: Extract<Query<(Entity, &ViewVisibility, &ComputedPose)>>,
 ) {
     uniform.buffer.clear();
     skin_indices.clear();
     let mut last_start = 0;
 
-    // PERF: This can be expensive, can we move this to prepare?
-    for (entity, view_visibility, skin) in &query {
+    for (entity, view_visibility, pose) in &query {
         if !view_visibility.get() {
             continue;
         }
         let buffer = &mut uniform.buffer;
-        let Some(inverse_bindposes) = inverse_bindposes.get(&skin.inverse_bindposes) else {
-            continue;
-        };
         let start = buffer.len();
 
-        let target = start + skin.joints.len().min(MAX_JOINTS);
-        buffer.extend(
-            joints
-                .iter_many(&skin.joints)
-                .zip(inverse_bindposes.iter())
-                .take(MAX_JOINTS)
-                .map(|(joint, bindpose)| joint.affine() * *bindpose),
-        );
-        // iter_many will skip any failed fetches. This will cause it to assign the wrong bones,
-        // so just bail by truncating to the start.
-        if buffer.len() != target {
-            buffer.truncate(start);
-            continue;
-        }
+        buffer.extend(pose.joints.iter().copied());
         last_start = last_start.max(start);
 
         // Pad to 256 byte alignment

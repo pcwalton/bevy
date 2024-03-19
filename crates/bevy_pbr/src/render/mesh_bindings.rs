@@ -5,7 +5,7 @@ use bevy_render::{
     mesh::morph::MAX_MORPH_WEIGHTS, render_resource::*, renderer::RenderDevice, texture::GpuImage,
 };
 
-use crate::render::skin::MAX_JOINTS;
+use bevy_render::mesh::skinning::MAX_JOINTS;
 
 const MORPH_WEIGHT_SIZE: usize = std::mem::size_of::<f32>();
 pub const MORPH_BUFFER_SIZE: usize = MAX_MORPH_WEIGHTS * MORPH_WEIGHT_SIZE;

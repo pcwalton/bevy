@@ -8,7 +8,7 @@ use bevy::{
     prelude::*,
     render::{
         mesh::{
-            skinning::{SkinnedMesh, SkinnedMeshInverseBindposes},
+            skinning::{ComputedPose, SkinnedMesh, SkinnedMeshInverseBindposes},
             Indices, PrimitiveTopology, VertexAttributeValues,
         },
         render_asset::RenderAssetUsages,
@@ -158,6 +158,7 @@ fn setup(
                 inverse_bindposes: inverse_bindposes.clone(),
                 joints: joint_entities,
             },
+            ComputedPose::default(),
         ));
     }
 }

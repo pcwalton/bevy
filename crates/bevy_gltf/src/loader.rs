@@ -12,8 +12,9 @@ use bevy_hierarchy::{BuildWorldChildren, WorldChildBuilder};
 use bevy_math::{Affine2, Mat4, Vec3};
 use bevy_pbr::{
     DirectionalLight, DirectionalLightBundle, PbrBundle, PointLight, PointLightBundle, SpotLight,
-    SpotLightBundle, StandardMaterial, MAX_JOINTS,
+    SpotLightBundle, StandardMaterial,
 };
+use bevy_render::mesh::skinning::{ComputedPose, MAX_JOINTS};
 use bevy_render::{
     alpha::AlphaMode,
     camera::{Camera, OrthographicProjection, PerspectiveProjection, Projection, ScalingMode},
@@ -656,10 +657,12 @@ async fn load_gltf<'a, 'b, 'c>(
                     MAX_JOINTS
                 );
             }
-            entity.insert(SkinnedMesh {
-                inverse_bindposes: skinned_mesh_inverse_bindposes[skin_index].clone(),
-                joints: joint_entities,
-            });
+            entity
+                .insert(SkinnedMesh {
+                    inverse_bindposes: skinned_mesh_inverse_bindposes[skin_index].clone(),
+                    joints: joint_entities,
+                })
+                .insert(ComputedPose::default());
         }
         let loaded_scene = scene_load_context.finish(Scene::new(world), None);
         let scene_handle = load_context.add_loaded_labeled_asset(scene_label(&scene), loaded_scene);
