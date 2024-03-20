@@ -150,7 +150,7 @@ pub struct Mesh2dTransforms {
     pub flags: u32,
 }
 
-#[derive(ShaderType, Clone)]
+#[derive(ShaderType, Default, Clone)]
 pub struct Mesh2dUniform {
     // Affine 4x3 matrix transposed to 3x4
     pub transform: [Vec4; 3],

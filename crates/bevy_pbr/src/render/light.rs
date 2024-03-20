@@ -79,15 +79,9 @@ impl Default for GpuPointLightsUniform {
     }
 }
 
-#[derive(ShaderType, Default)]
-pub struct GpuPointLightsStorage {
-    #[size(runtime)]
-    data: Vec<GpuPointLight>,
-}
-
 pub enum GpuPointLights {
     Uniform(UniformBuffer<GpuPointLightsUniform>),
-    Storage(StorageBuffer<GpuPointLightsStorage>),
+    Storage(StorageBuffer<GpuPointLight>),
 }
 
 impl GpuPointLights {
@@ -106,7 +100,7 @@ impl GpuPointLights {
         Self::Storage(StorageBuffer::default())
     }
 
-    fn set(&mut self, mut lights: Vec<GpuPointLight>) {
+    fn set(&mut self, lights: Vec<GpuPointLight>) {
         match self {
             GpuPointLights::Uniform(buffer) => {
                 let len = lights.len().min(MAX_UNIFORM_BUFFER_POINT_LIGHTS);
@@ -114,9 +108,9 @@ impl GpuPointLights {
                 let dst = &mut buffer.get_mut().data[..len];
                 dst.copy_from_slice(src);
             }
-            GpuPointLights::Storage(buffer) => {
-                buffer.get_mut().data.clear();
-                buffer.get_mut().data.append(&mut lights);
+            GpuPointLights::Storage(ref mut buffer) => {
+                buffer.clear();
+                buffer.extend(lights.into_iter());
             }
         }
     }
@@ -124,7 +118,7 @@ impl GpuPointLights {
     fn write_buffer(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
         match self {
             GpuPointLights::Uniform(buffer) => buffer.write_buffer(render_device, render_queue),
-            GpuPointLights::Storage(buffer) => buffer.write_buffer(render_device, render_queue),
+            GpuPointLights::Storage(buffer) => buffer.force_write_buffer(render_device, render_queue),
         }
     }
 
@@ -137,7 +131,7 @@ impl GpuPointLights {
 
     pub fn min_size(buffer_binding_type: BufferBindingType) -> NonZeroU64 {
         match buffer_binding_type {
-            BufferBindingType::Storage { .. } => GpuPointLightsStorage::min_size(),
+            BufferBindingType::Storage { .. } => GpuPointLight::min_size(),
             BufferBindingType::Uniform => GpuPointLightsUniform::min_size(),
         }
     }
@@ -1329,17 +1323,9 @@ impl Default for GpuClusterOffsetsAndCountsUniform {
     }
 }
 
-#[derive(ShaderType, Default)]
-struct GpuClusterLightIndexListsStorage {
-    #[size(runtime)]
-    data: Vec<u32>,
-}
+type GpuClusterLightIndex = u32;
 
-#[derive(ShaderType, Default)]
-struct GpuClusterOffsetsAndCountsStorage {
-    #[size(runtime)]
-    data: Vec<UVec4>,
-}
+type GpuClusterOffsetAndCount = UVec4;
 
 enum ViewClusterBuffers {
     Uniform {
@@ -1349,8 +1335,8 @@ enum ViewClusterBuffers {
         cluster_offsets_and_counts: UniformBuffer<GpuClusterOffsetsAndCountsUniform>,
     },
     Storage {
-        cluster_light_index_lists: StorageBuffer<GpuClusterLightIndexListsStorage>,
-        cluster_offsets_and_counts: StorageBuffer<GpuClusterOffsetsAndCountsStorage>,
+        cluster_light_index_lists: StorageBuffer<GpuClusterLightIndex>,
+        cluster_offsets_and_counts: StorageBuffer<GpuClusterOffsetAndCount>,
     },
 }
 
@@ -1411,8 +1397,8 @@ impl ViewClusterBindings {
                 cluster_offsets_and_counts,
                 ..
             } => {
-                cluster_light_index_lists.get_mut().data.clear();
-                cluster_offsets_and_counts.get_mut().data.clear();
+                cluster_light_index_lists.clear();
+                cluster_offsets_and_counts.clear();
             }
         }
     }
@@ -1437,7 +1423,7 @@ impl ViewClusterBindings {
                 cluster_offsets_and_counts,
                 ..
             } => {
-                cluster_offsets_and_counts.get_mut().data.push(UVec4::new(
+                cluster_offsets_and_counts.push(UVec4::new(
                     offset as u32,
                     point_count as u32,
                     spot_count as u32,
@@ -1471,7 +1457,7 @@ impl ViewClusterBindings {
                 cluster_light_index_lists,
                 ..
             } => {
-                cluster_light_index_lists.get_mut().data.push(index as u32);
+                cluster_light_index_lists.push(index as u32);
             }
         }
 
@@ -1491,8 +1477,8 @@ impl ViewClusterBindings {
                 cluster_light_index_lists,
                 cluster_offsets_and_counts,
             } => {
-                cluster_light_index_lists.write_buffer(render_device, render_queue);
-                cluster_offsets_and_counts.write_buffer(render_device, render_queue);
+                cluster_light_index_lists.force_write_buffer(render_device, render_queue);
+                cluster_offsets_and_counts.force_write_buffer(render_device, render_queue);
             }
         }
     }
@@ -1527,7 +1513,7 @@ impl ViewClusterBindings {
         buffer_binding_type: BufferBindingType,
     ) -> NonZeroU64 {
         match buffer_binding_type {
-            BufferBindingType::Storage { .. } => GpuClusterLightIndexListsStorage::min_size(),
+            BufferBindingType::Storage { .. } => GpuClusterLightIndex::min_size(),
             BufferBindingType::Uniform => GpuClusterLightIndexListsUniform::min_size(),
         }
     }
@@ -1536,7 +1522,7 @@ impl ViewClusterBindings {
         buffer_binding_type: BufferBindingType,
     ) -> NonZeroU64 {
         match buffer_binding_type {
-            BufferBindingType::Storage { .. } => GpuClusterOffsetsAndCountsStorage::min_size(),
+            BufferBindingType::Storage { .. } => GpuClusterOffsetAndCount::min_size(),
             BufferBindingType::Uniform => GpuClusterOffsetsAndCountsUniform::min_size(),
         }
     }
