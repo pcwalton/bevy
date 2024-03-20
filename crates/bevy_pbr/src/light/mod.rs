@@ -10,6 +10,7 @@ use bevy_render::{
     camera::{Camera, CameraProjection},
     extract_component::ExtractComponent,
     extract_resource::ExtractResource,
+    mesh::Mesh,
     primitives::{Aabb, CascadesFrusta, CubemapFrusta, Frustum, HalfSpace, Sphere},
     render_resource::BufferBindingType,
     renderer::RenderDevice,
@@ -2043,7 +2044,11 @@ pub fn check_light_mesh_visibility(
             Option<&Aabb>,
             Option<&GlobalTransform>,
         ),
-        (Without<NotShadowCaster>, Without<DirectionalLight>),
+        (
+            Without<NotShadowCaster>,
+            Without<DirectionalLight>,
+            With<Handle<Mesh>>,
+        ),
     >,
 ) {
     fn shrink_entities(visible_entities: &mut VisibleEntities) {
