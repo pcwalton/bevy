@@ -1,6 +1,6 @@
 use crate::{ExtractSchedule, MainWorld, Render, RenderApp, RenderSet};
 use bevy_app::{App, Plugin};
-use bevy_asset::{Asset, AssetEvent, AssetId, Assets};
+use bevy_asset::{Asset, AssetEvent, AssetId, Assets, PackedAssetId, PackedAssetIdMap};
 use bevy_ecs::{
     prelude::{Commands, EventReader, IntoSystemConfigs, ResMut, Resource},
     schedule::SystemConfigs,
@@ -172,7 +172,7 @@ impl<A: RenderAsset> Default for ExtractedAssets<A> {
 /// Stores all GPU representations ([`RenderAsset::PreparedAssets`](RenderAsset::PreparedAsset))
 /// of [`RenderAssets`](RenderAsset) as long as they exist.
 #[derive(Resource)]
-pub struct RenderAssets<A: RenderAsset>(HashMap<AssetId<A>, A::PreparedAsset>);
+pub struct RenderAssets<A: RenderAsset>(PackedAssetIdMap<A, A::PreparedAsset>);
 
 impl<A: RenderAsset> Default for RenderAssets<A> {
     fn default() -> Self {
@@ -181,31 +181,31 @@ impl<A: RenderAsset> Default for RenderAssets<A> {
 }
 
 impl<A: RenderAsset> RenderAssets<A> {
-    pub fn get(&self, id: impl Into<AssetId<A>>) -> Option<&A::PreparedAsset> {
+    pub fn get(&self, id: impl Into<PackedAssetId<A>>) -> Option<&A::PreparedAsset> {
         self.0.get(&id.into())
     }
 
-    pub fn get_mut(&mut self, id: impl Into<AssetId<A>>) -> Option<&mut A::PreparedAsset> {
+    pub fn get_mut(&mut self, id: impl Into<PackedAssetId<A>>) -> Option<&mut A::PreparedAsset> {
         self.0.get_mut(&id.into())
     }
 
     pub fn insert(
         &mut self,
-        id: impl Into<AssetId<A>>,
+        id: impl Into<PackedAssetId<A>>,
         value: A::PreparedAsset,
     ) -> Option<A::PreparedAsset> {
         self.0.insert(id.into(), value)
     }
 
-    pub fn remove(&mut self, id: impl Into<AssetId<A>>) -> Option<A::PreparedAsset> {
+    pub fn remove(&mut self, id: impl Into<PackedAssetId<A>>) -> Option<A::PreparedAsset> {
         self.0.remove(&id.into())
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (AssetId<A>, &A::PreparedAsset)> {
+    pub fn iter(&self) -> impl Iterator<Item = (PackedAssetId<A>, &A::PreparedAsset)> {
         self.0.iter().map(|(k, v)| (*k, v))
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (AssetId<A>, &mut A::PreparedAsset)> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (PackedAssetId<A>, &mut A::PreparedAsset)> {
         self.0.iter_mut().map(|(k, v)| (*k, v))
     }
 }

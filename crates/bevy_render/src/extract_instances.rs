@@ -7,7 +7,7 @@
 use std::marker::PhantomData;
 
 use bevy_app::{App, Plugin};
-use bevy_asset::{Asset, AssetId, Handle};
+use bevy_asset::{Asset, AssetId, Handle, PackedAssetId};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     entity::EntityHashMap,
@@ -144,5 +144,17 @@ where
 
     fn extract(item: QueryItem<'_, Self::QueryData>) -> Option<Self> {
         Some(item.id())
+    }
+}
+
+impl<A> ExtractInstance for PackedAssetId<A>
+where
+    A: Asset,
+{
+    type QueryData = Read<Handle<A>>;
+    type QueryFilter = ();
+
+    fn extract(item: QueryItem<'_, Self::QueryData>) -> Option<Self> {
+        Some(item.id().into())
     }
 }

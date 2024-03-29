@@ -29,7 +29,7 @@
 //! [`bevy-baked-gi`]: https://github.com/pcwalton/bevy-baked-gi
 
 use bevy_app::{App, Plugin};
-use bevy_asset::{load_internal_asset, AssetId, Handle};
+use bevy_asset::{load_internal_asset, AssetId, Handle, PackedAssetId};
 use bevy_ecs::entity::EntityHashMap;
 use bevy_ecs::{
     component::Component,
@@ -85,7 +85,7 @@ pub struct Lightmap {
 #[derive(Debug)]
 pub(crate) struct RenderLightmap {
     /// The ID of the lightmap texture.
-    pub(crate) image: AssetId<Image>,
+    pub(crate) image: PackedAssetId<Image>,
 
     /// The rectangle within the lightmap texture that the UVs are relative to.
     ///
@@ -112,7 +112,7 @@ pub struct RenderLightmaps {
     /// Gathering all lightmap images into a set makes mesh bindgroup
     /// preparation slightly more efficient, because only one bindgroup needs to
     /// be created per lightmap texture.
-    pub(crate) all_lightmap_images: HashSet<AssetId<Image>>,
+    pub(crate) all_lightmap_images: HashSet<PackedAssetId<Image>>,
 }
 
 impl Plugin for LightmapPlugin {
@@ -167,20 +167,20 @@ fn extract_lightmaps(
         // Store information about the lightmap in the render world.
         render_lightmaps.render_lightmaps.insert(
             entity,
-            RenderLightmap::new(lightmap.image.id(), lightmap.uv_rect),
+            RenderLightmap::new(lightmap.image.id().into(), lightmap.uv_rect),
         );
 
         // Make a note of the loaded lightmap image so we can efficiently
         // process them later during mesh bindgroup creation.
         render_lightmaps
             .all_lightmap_images
-            .insert(lightmap.image.id());
+            .insert(lightmap.image.id().into());
     }
 }
 
 impl RenderLightmap {
     /// Creates a new lightmap from a texture and a UV rect.
-    fn new(image: AssetId<Image>, uv_rect: Rect) -> Self {
+    fn new(image: PackedAssetId<Image>, uv_rect: Rect) -> Self {
         Self { image, uv_rect }
     }
 }

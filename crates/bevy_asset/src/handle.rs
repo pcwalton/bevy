@@ -1,6 +1,5 @@
 use crate::{
-    meta::MetaTransform, Asset, AssetId, AssetIndexAllocator, AssetPath, InternalAssetId,
-    UntypedAssetId,
+    meta::MetaTransform, Asset, AssetId, AssetIndexAllocator, AssetPath, InternalAssetId, PackedAssetId, UntypedAssetId
 };
 use bevy_ecs::prelude::*;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect, TypePath};
@@ -253,6 +252,13 @@ impl<A: Asset> From<&Handle<A>> for AssetId<A> {
     #[inline]
     fn from(value: &Handle<A>) -> Self {
         value.id()
+    }
+}
+
+impl<A: Asset> From<&Handle<A>> for PackedAssetId<A> {
+    #[inline]
+    fn from(value: &Handle<A>) -> Self {
+        value.id().into()
     }
 }
 

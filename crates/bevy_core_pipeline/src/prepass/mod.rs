@@ -29,7 +29,7 @@ pub mod node;
 
 use std::ops::Range;
 
-use bevy_asset::AssetId;
+use bevy_asset::{AssetId, PackedAssetId};
 use bevy_ecs::prelude::*;
 use bevy_reflect::Reflect;
 use bevy_render::{
@@ -112,7 +112,7 @@ impl ViewPrepassTextures {
 /// Used to render all 3D meshes with materials that have no transparency.
 pub struct Opaque3dPrepass {
     pub entity: Entity,
-    pub asset_id: AssetId<Mesh>,
+    pub asset_id: PackedAssetId<Mesh>,
     pub pipeline_id: CachedRenderPipelineId,
     pub draw_function: DrawFunctionId,
     pub batch_range: Range<u32>,
@@ -120,7 +120,7 @@ pub struct Opaque3dPrepass {
 }
 
 impl PhaseItem for Opaque3dPrepass {
-    type SortKey = (usize, AssetId<Mesh>);
+    type SortKey = (usize, PackedAssetId<Mesh>);
 
     #[inline]
     fn entity(&self) -> Entity {
@@ -177,7 +177,7 @@ impl CachedRenderPipelinePhaseItem for Opaque3dPrepass {
 ///
 /// Used to render all meshes with a material with an alpha mask.
 pub struct AlphaMask3dPrepass {
-    pub asset_id: AssetId<Mesh>,
+    pub asset_id: PackedAssetId<Mesh>,
     pub entity: Entity,
     pub pipeline_id: CachedRenderPipelineId,
     pub draw_function: DrawFunctionId,
@@ -186,7 +186,7 @@ pub struct AlphaMask3dPrepass {
 }
 
 impl PhaseItem for AlphaMask3dPrepass {
-    type SortKey = (usize, AssetId<Mesh>);
+    type SortKey = (usize, PackedAssetId<Mesh>);
 
     #[inline]
     fn entity(&self) -> Entity {

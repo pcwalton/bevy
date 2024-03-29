@@ -1,12 +1,13 @@
 use crate::{Asset, AssetIndex};
 use bevy_reflect::Reflect;
+use bevy_utils::{hashbrown::HashMap, NoOpHash};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use std::{
     any::TypeId,
     fmt::{Debug, Display},
-    hash::Hash,
+    hash::{Hash, Hasher},
     marker::PhantomData,
 };
 use thiserror::Error;
@@ -35,6 +36,13 @@ pub enum AssetId<A: Asset> {
     /// [`Assets`]: crate::Assets
     Uuid { uuid: Uuid },
 }
+
+#[repr(transparent)]
+pub struct PackedAssetId<A>(pub u128, PhantomData<fn() -> A>)
+where
+    A: Asset;
+
+pub type PackedAssetIdMap<A, V> = HashMap<PackedAssetId<A>, V, NoOpHash>;
 
 impl<A: Asset> AssetId<A> {
     /// The uuid for the default [`AssetId`]. It is valid to assign a value to this in [`Assets`](crate::Assets)
@@ -117,7 +125,7 @@ impl<A: Asset> Debug for AssetId<A> {
 
 impl<A: Asset> Hash for AssetId<A> {
     #[inline]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.internal().hash(state);
         TypeId::of::<A>().hash(state);
     }
@@ -282,7 +290,7 @@ impl Eq for UntypedAssetId {}
 
 impl Hash for UntypedAssetId {
     #[inline]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.internal().hash(state);
         self.type_id().hash(state);
     }
@@ -420,6 +428,94 @@ pub enum UntypedAssetIdConversionError {
     TypeIdMismatch { expected: TypeId, found: TypeId },
 }
 
+impl<A> From<AssetId<A>> for PackedAssetId<A>
+where
+    A: Asset,
+{
+    #[inline]
+    fn from(unpacked: AssetId<A>) -> Self {
+        match unpacked {
+            AssetId::Index { index, marker: _ } => {
+                // These magic constants are just random numbers I generated.
+                // Don't read anything into them.
+                //
+                // Note that the first one must be odd per the Hull-Dubell
+                // theorem.
+                let hashed_index = index
+                    .to_bits()
+                    .wrapping_mul(3946703182609030767)
+                    .wrapping_add(1);
+                PackedAssetId(
+                    10673817242040624204u128 << 64 | hashed_index as u128,
+                    PhantomData,
+                )
+            }
+            AssetId::Uuid { uuid } => PackedAssetId(uuid.as_u128(), PhantomData),
+        }
+    }
+}
+
+impl<A> Clone for PackedAssetId<A>
+where
+    A: Asset,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A> Copy for PackedAssetId<A> where A: Asset {}
+
+impl<A> PartialEq for PackedAssetId<A>
+where
+    A: Asset,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<A> Eq for PackedAssetId<A> where A: Asset {}
+
+impl<A> Hash for PackedAssetId<A>
+where
+    A: Asset,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl<A> PartialOrd for PackedAssetId<A>
+where
+    A: Asset,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<A> Ord for PackedAssetId<A>
+where
+    A: Asset,
+{
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl<A> Debug for PackedAssetId<A>
+where
+    A: Asset,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PackedAssetId")
+            .field(&self.0)
+            .field(&self.1)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,8 +527,6 @@ mod tests {
 
     /// Simple utility to directly hash a value using a fixed hasher
     fn hash<T: Hash>(data: &T) -> u64 {
-        use std::hash::Hasher;
-
         let mut hasher = bevy_utils::AHasher::default();
         data.hash(&mut hasher);
         hasher.finish()

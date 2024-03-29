@@ -3,7 +3,7 @@ pub mod node;
 
 use std::ops::Range;
 
-use bevy_asset::AssetId;
+use bevy_asset::{AssetId, PackedAssetId};
 use bevy_ecs::prelude::*;
 use bevy_render::{
     mesh::Mesh,
@@ -23,7 +23,7 @@ pub const DEFERRED_LIGHTING_PASS_ID_DEPTH_FORMAT: TextureFormat = TextureFormat:
 /// Used to render all 3D meshes with materials that have no transparency.
 pub struct Opaque3dDeferred {
     pub entity: Entity,
-    pub asset_id: AssetId<Mesh>,
+    pub asset_id: PackedAssetId<Mesh>,
     pub pipeline_id: CachedRenderPipelineId,
     pub draw_function: DrawFunctionId,
     pub batch_range: Range<u32>,
@@ -31,7 +31,7 @@ pub struct Opaque3dDeferred {
 }
 
 impl PhaseItem for Opaque3dDeferred {
-    type SortKey = (usize, AssetId<Mesh>);
+    type SortKey = (usize, PackedAssetId<Mesh>);
 
     #[inline]
     fn entity(&self) -> Entity {
@@ -88,7 +88,7 @@ impl CachedRenderPipelinePhaseItem for Opaque3dDeferred {
 ///
 /// Used to render all meshes with a material with an alpha mask.
 pub struct AlphaMask3dDeferred {
-    pub asset_id: AssetId<Mesh>,
+    pub asset_id: PackedAssetId<Mesh>,
     pub entity: Entity,
     pub pipeline_id: CachedRenderPipelineId,
     pub draw_function: DrawFunctionId,
@@ -97,7 +97,7 @@ pub struct AlphaMask3dDeferred {
 }
 
 impl PhaseItem for AlphaMask3dDeferred {
-    type SortKey = (usize, AssetId<Mesh>);
+    type SortKey = (usize, PackedAssetId<Mesh>);
 
     #[inline]
     fn entity(&self) -> Entity {

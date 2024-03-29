@@ -4,7 +4,7 @@ use crate::meshlet::{
     MeshletGpuScene,
 };
 use crate::*;
-use bevy_asset::{Asset, AssetEvent, AssetId, AssetServer};
+use bevy_asset::{Asset, AssetEvent, AssetId, AssetServer, PackedAssetId, PackedAssetIdMap};
 use bevy_core_pipeline::{
     core_3d::{
         AlphaMask3d, Camera3d, Opaque3d, ScreenSpaceTransmissionQuality, Transmissive3d,
@@ -32,7 +32,7 @@ use bevy_render::{
     view::{ExtractedView, Msaa, VisibleEntities},
     Extract,
 };
-use bevy_utils::{tracing::error, HashMap, HashSet};
+use bevy_utils::{hashbrown::HashSet, tracing::error, HashMap};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{hash::Hash, num::NonZeroU32};
@@ -249,7 +249,7 @@ where
 {
     fn build(&self, app: &mut App) {
         app.init_asset::<M>()
-            .add_plugins(ExtractInstancesPlugin::<AssetId<M>>::extract_visible());
+            .add_plugins(ExtractInstancesPlugin::<PackedAssetId<M>>::extract_visible());
 
         if let Ok(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
@@ -462,7 +462,7 @@ impl<P: PhaseItem, M: Material, const I: usize> RenderCommand<P> for SetMaterial
     }
 }
 
-pub type RenderMaterialInstances<M> = ExtractedInstances<AssetId<M>>;
+pub type RenderMaterialInstances<M> = ExtractedInstances<PackedAssetId<M>>;
 
 pub const fn alpha_mode_pipeline_key(alpha_mode: AlphaMode) -> MeshPipelineKey {
     match alpha_mode {
@@ -891,8 +891,8 @@ impl<T: Material> PreparedMaterial<T> {
 
 #[derive(Resource)]
 pub struct ExtractedMaterials<M: Material> {
-    extracted: Vec<(AssetId<M>, M)>,
-    removed: Vec<AssetId<M>>,
+    extracted: Vec<(PackedAssetId<M>, M)>,
+    removed: Vec<PackedAssetId<M>>,
 }
 
 impl<M: Material> Default for ExtractedMaterials<M> {
@@ -906,7 +906,7 @@ impl<M: Material> Default for ExtractedMaterials<M> {
 
 /// Stores all prepared representations of [`Material`] assets for as long as they exist.
 #[derive(Resource, Deref, DerefMut)]
-pub struct RenderMaterials<T: Material>(pub HashMap<AssetId<T>, PreparedMaterial<T>>);
+pub struct RenderMaterials<T: Material>(pub PackedAssetIdMap<T, PreparedMaterial<T>>);
 
 impl<T: Material> Default for RenderMaterials<T> {
     fn default() -> Self {
@@ -921,8 +921,8 @@ pub fn extract_materials<M: Material>(
     mut events: Extract<EventReader<AssetEvent<M>>>,
     assets: Extract<Res<Assets<M>>>,
 ) {
-    let mut changed_assets = HashSet::default();
-    let mut removed = Vec::new();
+    let mut changed_assets: HashSet<AssetId<M>> = HashSet::default();
+    let mut removed: Vec<PackedAssetId<M>> = Vec::new();
     for event in events.read() {
         #[allow(clippy::match_same_arms)]
         match event {
@@ -931,7 +931,7 @@ pub fn extract_materials<M: Material>(
             }
             AssetEvent::Removed { id } => {
                 changed_assets.remove(id);
-                removed.push(*id);
+                removed.push((*id).into());
             }
             AssetEvent::Unused { .. } => {}
             AssetEvent::LoadedWithDependencies { .. } => {
@@ -943,7 +943,7 @@ pub fn extract_materials<M: Material>(
     let mut extracted_assets = Vec::new();
     for id in changed_assets.drain() {
         if let Some(asset) = assets.get(id) {
-            extracted_assets.push((id, asset.clone()));
+            extracted_assets.push((id.into(), asset.clone()));
         }
     }
 
@@ -955,7 +955,7 @@ pub fn extract_materials<M: Material>(
 
 /// All [`Material`] values of a given type that should be prepared next frame.
 pub struct PrepareNextFrameMaterials<M: Material> {
-    assets: Vec<(AssetId<M>, M)>,
+    assets: Vec<(PackedAssetId<M>, M)>,
 }
 
 impl<M: Material> Default for PrepareNextFrameMaterials<M> {

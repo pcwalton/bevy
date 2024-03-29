@@ -1,4 +1,4 @@
-use bevy_asset::{load_internal_asset, AssetId};
+use bevy_asset::{load_internal_asset, AssetId, PackedAssetId, PackedAssetIdMap};
 use bevy_core_pipeline::{
     core_3d::{AlphaMask3d, Opaque3d, Transmissive3d, Transparent3d, CORE_3D_DEPTH_FORMAT},
     deferred::{AlphaMask3dDeferred, Opaque3dDeferred},
@@ -239,7 +239,7 @@ bitflags::bitflags! {
 
 pub struct RenderMeshInstance {
     pub transforms: MeshTransforms,
-    pub mesh_asset_id: AssetId<Mesh>,
+    pub mesh_asset_id: PackedAssetId<Mesh>,
     pub material_bind_group_id: AtomicMaterialBindGroupId,
     pub shadow_caster: bool,
     pub automatic_batching: bool,
@@ -308,7 +308,7 @@ pub fn extract_meshes(
                 queue.push((
                     entity,
                     RenderMeshInstance {
-                        mesh_asset_id: handle.id(),
+                        mesh_asset_id: handle.id().into(),
                         transforms,
                         shadow_caster: !not_shadow_caster,
                         material_bind_group_id: AtomicMaterialBindGroupId::default(),
@@ -446,7 +446,11 @@ impl GetBatchData for MeshPipeline {
     type Param = (SRes<RenderMeshInstances>, SRes<RenderLightmaps>);
     // The material bind group ID, the mesh ID, and the lightmap ID,
     // respectively.
-    type CompareData = (MaterialBindGroupId, AssetId<Mesh>, Option<AssetId<Image>>);
+    type CompareData = (
+        MaterialBindGroupId,
+        PackedAssetId<Mesh>,
+        Option<PackedAssetId<Image>>,
+    );
 
     type BufferData = MeshUniform;
 
@@ -943,8 +947,8 @@ impl SpecializedMeshPipeline for MeshPipeline {
 pub struct MeshBindGroups {
     model_only: Option<BindGroup>,
     skinned: Option<BindGroup>,
-    morph_targets: HashMap<AssetId<Mesh>, BindGroup>,
-    lightmaps: HashMap<AssetId<Image>, BindGroup>,
+    morph_targets: PackedAssetIdMap<Mesh, BindGroup>,
+    lightmaps: PackedAssetIdMap<Image, BindGroup>,
 }
 impl MeshBindGroups {
     pub fn reset(&mut self) {
@@ -957,8 +961,8 @@ impl MeshBindGroups {
     /// key `lightmap`.
     pub fn get(
         &self,
-        asset_id: AssetId<Mesh>,
-        lightmap: Option<AssetId<Image>>,
+        asset_id: PackedAssetId<Mesh>,
+        lightmap: Option<PackedAssetId<Image>>,
         is_skinned: bool,
         morph: bool,
     ) -> Option<&BindGroup> {

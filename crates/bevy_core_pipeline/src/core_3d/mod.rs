@@ -40,7 +40,7 @@ pub const CORE_3D_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
 use std::ops::Range;
 
-use bevy_asset::AssetId;
+use bevy_asset::{AssetId, PackedAssetId};
 use bevy_color::LinearRgba;
 pub use camera_3d::*;
 pub use main_opaque_pass_3d_node::*;
@@ -181,7 +181,7 @@ impl Plugin for Core3dPlugin {
 }
 
 pub struct Opaque3d {
-    pub asset_id: AssetId<Mesh>,
+    pub asset_id: PackedAssetId<Mesh>,
     pub pipeline: CachedRenderPipelineId,
     pub entity: Entity,
     pub draw_function: DrawFunctionId,
@@ -190,7 +190,7 @@ pub struct Opaque3d {
 }
 
 impl PhaseItem for Opaque3d {
-    type SortKey = (usize, AssetId<Mesh>);
+    type SortKey = (usize, PackedAssetId<Mesh>);
 
     #[inline]
     fn entity(&self) -> Entity {
@@ -242,7 +242,7 @@ impl CachedRenderPipelinePhaseItem for Opaque3d {
 }
 
 pub struct AlphaMask3d {
-    pub asset_id: AssetId<Mesh>,
+    pub asset_id: PackedAssetId<Mesh>,
     pub pipeline: CachedRenderPipelineId,
     pub entity: Entity,
     pub draw_function: DrawFunctionId,
@@ -251,7 +251,7 @@ pub struct AlphaMask3d {
 }
 
 impl PhaseItem for AlphaMask3d {
-    type SortKey = (usize, AssetId<Mesh>);
+    type SortKey = (usize, PackedAssetId<Mesh>);
 
     #[inline]
     fn entity(&self) -> Entity {
