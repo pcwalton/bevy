@@ -34,9 +34,12 @@ struct DirectionalLight {
     cascades_overlap_proportion: f32,
     depth_texture_base_index: u32,
     render_layers: u32,
+    // This is for volumetric lighting.
+    distance: f32,
 };
 
 const DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT: u32 = 1u;
+const DIRECTIONAL_LIGHT_FLAGS_VOLUMETRIC_BIT: u32      = 2u;
 
 struct Lights {
     // NOTE: this array size must be kept in sync with the constants defined in bevy_pbr/src/render/light.rs

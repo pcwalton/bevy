@@ -8,7 +8,10 @@
 //! If you want to hot reload asset changes, enable the `file_watcher` cargo feature.
 
 use bevy::{
+    color::palettes::css::LEMON_CHIFFON,
+    core_pipeline::{bloom::BloomSettings, tonemapping::Tonemapping},
     math::Vec3A,
+    pbr::VolumetricFogSettings,
     prelude::*,
     render::primitives::{Aabb, Sphere},
 };
@@ -135,8 +138,10 @@ fn setup_scene_after_load(
                 .looking_at(Vec3::from(aabb.center), Vec3::Y),
                 camera: Camera {
                     is_active: false,
+                    hdr: true,
                     ..default()
                 },
+                tonemapping: Tonemapping::BlenderFilmic,
                 ..default()
             },
             EnvironmentMapLight {
@@ -146,6 +151,16 @@ fn setup_scene_after_load(
                     .load("assets/environment_maps/pisa_specular_rgb9e5_zstd.ktx2"),
                 intensity: 150.0,
             },
+            VolumetricFogSettings {
+                density: 0.0025,
+                absorption: 0.1,
+                scattering: 0.9,
+                scattering_asymmetry: 0.8,
+                light_intensity: 2.0,
+                light_tint: LEMON_CHIFFON.into(),
+                ..default()
+            },
+            BloomSettings::default(),
             camera_controller,
         ));
 

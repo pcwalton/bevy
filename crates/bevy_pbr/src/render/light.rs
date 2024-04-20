@@ -47,12 +47,14 @@ pub struct ExtractedDirectionalLight {
     pub illuminance: f32,
     pub transform: GlobalTransform,
     pub shadows_enabled: bool,
+    pub volumetric: bool,
     pub shadow_depth_bias: f32,
     pub shadow_normal_bias: f32,
     pub cascade_shadow_config: CascadeShadowConfig,
     pub cascades: EntityHashMap<Vec<Cascade>>,
     pub frusta: EntityHashMap<Vec<Frustum>>,
     pub render_layers: RenderLayers,
+    pub distance: f32,
 }
 
 #[derive(Copy, Clone, ShaderType, Default, Debug)]
@@ -175,6 +177,7 @@ pub struct GpuDirectionalLight {
     cascades_overlap_proportion: f32,
     depth_texture_base_index: u32,
     render_layers: u32,
+    distance: f32,
 }
 
 // NOTE: These must match the bit flags in bevy_pbr/src/render/mesh_view_types.wgsl!
@@ -182,6 +185,7 @@ bitflags::bitflags! {
     #[repr(transparent)]
     struct DirectionalLightFlags: u32 {
         const SHADOWS_ENABLED            = 1 << 0;
+        const VOLUMETRIC                 = 1 << 1;
         const NONE                       = 0;
         const UNINITIALIZED              = 0xFFFF;
     }
@@ -347,6 +351,7 @@ pub fn extract_lights(
                 &GlobalTransform,
                 &ViewVisibility,
                 Option<&RenderLayers>,
+                Option<&VolumetricLight>,
             ),
             Without<SpotLight>,
         >,
@@ -469,6 +474,7 @@ pub fn extract_lights(
         transform,
         view_visibility,
         maybe_layers,
+        volumetric_light,
     ) in &directional_lights
     {
         if !view_visibility.get() {
@@ -482,6 +488,7 @@ pub fn extract_lights(
                 color: directional_light.color.into(),
                 illuminance: directional_light.illuminance,
                 transform: *transform,
+                volumetric: volumetric_light.is_some(),
                 shadows_enabled: directional_light.shadows_enabled,
                 shadow_depth_bias: directional_light.shadow_depth_bias,
                 // The factor of SQRT_2 is for the worst-case diagonal offset
@@ -490,6 +497,10 @@ pub fn extract_lights(
                 cascades: cascades.cascades.clone(),
                 frusta: frusta.frusta.clone(),
                 render_layers: maybe_layers.copied().unwrap_or_default(),
+                distance: match volumetric_light {
+                    Some(volumetric_light) => volumetric_light.distance,
+                    None => 0.0,
+                },
             },
             render_visible_entities,
         ));
@@ -773,6 +784,13 @@ pub fn prepare_lights(
         .count()
         .min(max_texture_cubes);
 
+    let directional_volumetric_enabled_count = directional_lights
+        .iter()
+        .take(MAX_DIRECTIONAL_LIGHTS)
+        .filter(|(_, light)| light.volumetric)
+        .count()
+        .min(max_texture_array_layers / MAX_CASCADES_PER_LIGHT);
+
     let directional_shadow_enabled_count = directional_lights
         .iter()
         .take(MAX_DIRECTIONAL_LIGHTS)
@@ -807,13 +825,17 @@ pub fn prepare_lights(
     });
 
     // Sort lights by
-    // - those with shadows enabled first, so that the index can be used to render at most `directional_light_shadow_maps_count`
-    //   directional light shadows
-    // - then by entity as a stable key to ensure that a consistent set of lights are chosen if the light count limit is exceeded.
+    // - those with volumetric (and shadows) enabled first, so that the
+    //   volumetric lighting pass can quickly find the volumetric lights;
+    // - then those with shadows enabled second, so that the index can be used
+    //   to render at most `directional_light_shadow_maps_count` directional light
+    //   shadows
+    // - then by entity as a stable key to ensure that a consistent set of
+    //   lights are chosen if the light count limit is exceeded.
     directional_lights.sort_by(|(entity_1, light_1), (entity_2, light_2)| {
         directional_light_order(
-            (entity_1, &light_1.shadows_enabled),
-            (entity_2, &light_2.shadows_enabled),
+            (entity_1, &light_1.volumetric, &light_1.shadows_enabled),
+            (entity_2, &light_2.volumetric, &light_2.shadows_enabled),
         )
     });
 
@@ -894,7 +916,14 @@ pub fn prepare_lights(
     {
         let mut flags = DirectionalLightFlags::NONE;
 
-        // Lights are sorted, shadow enabled lights are first
+        // Lights are sorted, volumetric and shadow enabled lights are first
+        if light.volumetric
+            && light.shadows_enabled
+            && (index < directional_volumetric_enabled_count)
+        {
+            flags |= DirectionalLightFlags::VOLUMETRIC;
+        }
+        // Shadow enabled lights are second
         if light.shadows_enabled && (index < directional_shadow_enabled_count) {
             flags |= DirectionalLightFlags::SHADOWS_ENABLED;
         }
@@ -919,6 +948,7 @@ pub fn prepare_lights(
             cascades_overlap_proportion: light.cascade_shadow_config.overlap_proportion,
             depth_texture_base_index: num_directional_cascades_enabled as u32,
             render_layers: light.render_layers.bits(),
+            distance: light.distance,
         };
         if index < directional_shadow_enabled_count {
             num_directional_cascades_enabled += num_cascades;

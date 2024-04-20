@@ -3,6 +3,7 @@
 //! - Copy the code for the `SceneViewerPlugin` and add the plugin to your App.
 //! - Insert an initialized `SceneHandle` resource into your App's `AssetServer`.
 
+use bevy::pbr::VolumetricLight;
 use bevy::{
     asset::LoadState, gltf::Gltf, input::common_conditions::input_just_pressed, prelude::*,
     scene::InstanceId,
@@ -141,14 +142,16 @@ fn scene_load_check(
 }
 
 fn update_lights(
+    mut commands: Commands,
     key_input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    mut query: Query<(&mut Transform, &mut DirectionalLight)>,
+    mut query: Query<(Entity, &mut Transform, &mut DirectionalLight)>,
     mut animate_directional_light: Local<bool>,
 ) {
-    for (_, mut light) in &mut query {
+    for (light_entity, _, mut light) in &mut query {
         if key_input.just_pressed(KeyCode::KeyU) {
             light.shadows_enabled = !light.shadows_enabled;
+            commands.entity(light_entity).insert(VolumetricLight::default());
         }
     }
 
@@ -156,7 +159,7 @@ fn update_lights(
         *animate_directional_light = !*animate_directional_light;
     }
     if *animate_directional_light {
-        for (mut transform, _) in &mut query {
+        for (_, mut transform, _) in &mut query {
             transform.rotation = Quat::from_euler(
                 EulerRot::ZYX,
                 0.0,
