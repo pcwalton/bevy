@@ -35,6 +35,7 @@ pub use draw_state::*;
 use encase::{internal::WriteInto, ShaderSize};
 use nonmax::NonMaxU32;
 pub use rangefinder::*;
+use smallvec::smallvec;
 
 use crate::{
     batching::{
@@ -112,7 +113,7 @@ where
     ///
     /// The unbatchable entities immediately follow the batches in the storage
     /// buffers.
-    pub(crate) batch_sets: Vec<SmallVec<[BinnedRenderPhaseBatch; 1]>>,
+    pub(crate) batch_sets: Vec<BinnedRenderPhaseBatchSet>,
 }
 
 /// Information about a single batch of entities rendered using binned phase
@@ -124,14 +125,37 @@ pub struct BinnedRenderPhaseBatch {
     /// Bevy uses this to fetch the mesh. It can be any entity in the batch.
     pub representative_entity: Entity,
 
-    /// The range of instance indices in this batch.
-    pub instance_range: Range<u32>,
+    /// The range of instance indices in this batch, if in direct mode. If in
+    /// indirect mode, this will be the number of draw structures.
+    pub instance_range: BatchRange,
 
     /// The dynamic offset of the batch.
     ///
     /// Note that dynamic offsets are only used on platforms that don't support
     /// storage buffers.
     pub extra_index: PhaseItemExtraIndex,
+}
+
+#[derive(Debug)]
+pub(crate) struct BinnedRenderPhaseBatchSet {
+    pub(crate) batches: SmallVec<[BinnedRenderPhaseBatch; 1]>,
+    /// The index of the key in the [`BinnedRenderPhase::batchable_keys`] array.
+    pub(crate) key_index: BinnedRenderPhaseBatchSetKeyIndex,
+}
+
+impl BinnedRenderPhaseBatchSet {
+    pub(crate) fn new(key_index: BinnedRenderPhaseBatchSetKeyIndex) -> Self {
+        Self {
+            batches: smallvec![],
+            key_index,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum BinnedRenderPhaseBatchSetKeyIndex {
+    BatchableKeys(usize),
+    UnbatchableKeys(usize),
 }
 
 /// Information about the unbatchable entities in a bin.
@@ -242,72 +266,83 @@ where
         let mut draw_functions = draw_functions.write();
         draw_functions.prepare(world);
 
-        // Encode draws for batchables.
-        debug_assert_eq!(self.batchable_keys.len(), self.batch_sets.len());
-        for (key, batch_set) in self.batchable_keys.iter().zip(self.batch_sets.iter()) {
-            for batch in batch_set {
-                let binned_phase_item = BPI::new(
-                    key.clone(),
-                    batch.representative_entity,
-                    batch.instance_range.clone(),
-                    batch.extra_index,
-                );
+        // Encode draws.
+        for batch_set in self.batch_sets.iter() {
+            match batch_set.key_index {
+                BinnedRenderPhaseBatchSetKeyIndex::BatchableKeys(key_index) => {
+                    let key = &self.batchable_keys[key_index];
+                    for batch in &batch_set.batches {
+                        let binned_phase_item = BPI::new(
+                            key.clone(),
+                            batch.representative_entity,
+                            batch.instance_range,
+                            batch.extra_index,
+                        );
 
-                // Fetch the draw function.
-                let Some(draw_function) = draw_functions.get_mut(binned_phase_item.draw_function())
-                else {
-                    continue;
-                };
+                        // Fetch the draw function.
+                        let Some(draw_function) =
+                            draw_functions.get_mut(binned_phase_item.draw_function())
+                        else {
+                            continue;
+                        };
 
-                draw_function.draw(world, render_pass, view, &binned_phase_item);
-            }
-        }
-
-        // Encode draws for unbatchables.
-
-        for key in &self.unbatchable_keys {
-            let unbatchable_entities = &self.unbatchable_values[key];
-            for (entity_index, &entity) in unbatchable_entities.entities.iter().enumerate() {
-                let unbatchable_dynamic_offset = match &unbatchable_entities.buffer_indices {
-                    UnbatchableBinnedEntityIndexSet::NoEntities => {
-                        // Shouldn't happen…
-                        continue;
+                        draw_function.draw(world, render_pass, view, &binned_phase_item);
                     }
-                    UnbatchableBinnedEntityIndexSet::Sparse {
-                        instance_range,
-                        first_indirect_parameters_index,
-                    } => UnbatchableBinnedEntityIndices {
-                        instance_index: instance_range.start + entity_index as u32,
-                        extra_index: match first_indirect_parameters_index {
-                            None => PhaseItemExtraIndex::NONE,
-                            Some(first_indirect_parameters_index) => {
-                                PhaseItemExtraIndex::indirect_parameters_index(
-                                    u32::from(*first_indirect_parameters_index)
-                                        + entity_index as u32,
-                                )
+                }
+
+                BinnedRenderPhaseBatchSetKeyIndex::UnbatchableKeys(key_index) => {
+                    // Encode a draw for an unbatchable.
+                    let key = &self.unbatchable_keys[key_index];
+                    let unbatchable_entities = &self.unbatchable_values[key];
+                    for (entity_index, &entity) in unbatchable_entities.entities.iter().enumerate()
+                    {
+                        let unbatchable_dynamic_offset = match &unbatchable_entities.buffer_indices
+                        {
+                            UnbatchableBinnedEntityIndexSet::NoEntities => {
+                                // Shouldn't happen…
+                                continue;
                             }
-                        },
-                    },
-                    UnbatchableBinnedEntityIndexSet::Dense(ref dynamic_offsets) => {
-                        dynamic_offsets[entity_index]
+                            UnbatchableBinnedEntityIndexSet::Sparse {
+                                instance_range,
+                                first_indirect_parameters_index,
+                            } => UnbatchableBinnedEntityIndices {
+                                instance_index: instance_range.start + entity_index as u32,
+                                extra_index: match first_indirect_parameters_index {
+                                    None => PhaseItemExtraIndex::NONE,
+                                    Some(first_indirect_parameters_index) => {
+                                        PhaseItemExtraIndex::indirect_parameters_index(
+                                            u32::from(*first_indirect_parameters_index)
+                                                + entity_index as u32,
+                                        )
+                                    }
+                                },
+                            },
+                            UnbatchableBinnedEntityIndexSet::Dense(ref dynamic_offsets) => {
+                                dynamic_offsets[entity_index]
+                            }
+                        };
+
+                        let binned_phase_item = BPI::new(
+                            key.clone(),
+                            entity,
+                            // FIXME(pcwalton): Is this right?
+                            BatchRange::direct(
+                                unbatchable_dynamic_offset.instance_index,
+                                unbatchable_dynamic_offset.instance_index + 1,
+                            ),
+                            unbatchable_dynamic_offset.extra_index,
+                        );
+
+                        // Fetch the draw function.
+                        let Some(draw_function) =
+                            draw_functions.get_mut(binned_phase_item.draw_function())
+                        else {
+                            continue;
+                        };
+
+                        draw_function.draw(world, render_pass, view, &binned_phase_item);
                     }
-                };
-
-                let binned_phase_item = BPI::new(
-                    key.clone(),
-                    entity,
-                    unbatchable_dynamic_offset.instance_index
-                        ..(unbatchable_dynamic_offset.instance_index + 1),
-                    unbatchable_dynamic_offset.extra_index,
-                );
-
-                // Fetch the draw function.
-                let Some(draw_function) = draw_functions.get_mut(binned_phase_item.draw_function())
-                else {
-                    continue;
-                };
-
-                draw_function.draw(world, render_pass, view, &binned_phase_item);
+                }
             }
         }
     }
@@ -608,12 +643,12 @@ where
         while index < items.len() {
             let item = &items[index];
             let batch_range = item.batch_range();
-            if batch_range.is_empty() {
+            if batch_range.is_direct_empty() {
                 index += 1;
             } else {
                 let draw_function = draw_functions.get_mut(item.draw_function()).unwrap();
                 draw_function.draw(world, render_pass, view, item);
-                index += batch_range.len();
+                index += batch_range.direct_len() as usize;
             }
         }
     }
@@ -658,8 +693,8 @@ pub trait PhaseItem: Sized + Send + Sync + 'static {
     /// The range of instances that the batch covers. After doing a batched draw, batch range
     /// length phase items will be skipped. This design is to avoid having to restructure the
     /// render phase unnecessarily.
-    fn batch_range(&self) -> &Range<u32>;
-    fn batch_range_mut(&mut self) -> &mut Range<u32>;
+    fn batch_range(&self) -> &BatchRange;
+    fn batch_range_mut(&mut self) -> &mut BatchRange;
 
     /// Returns the [`PhaseItemExtraIndex`].
     ///
@@ -669,7 +704,84 @@ pub trait PhaseItem: Sized + Send + Sync + 'static {
 
     /// Returns a pair of mutable references to both the batch range and extra
     /// index.
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex);
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex);
+}
+
+/// If `start` is greater than 0 and `end` is zero, then `start` is the number
+/// of draw commands.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BatchRange {
+    start: u32,
+    end: u32,
+}
+
+impl Debug for BatchRange {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if self.is_direct() {
+            write!(f, "Direct({}..{})", self.start, self.end)
+        } else {
+            write!(f, "Indirect({})", self.start)
+        }
+    }
+}
+
+impl BatchRange {
+    pub fn direct(start: u32, end: u32) -> BatchRange {
+        debug_assert!(start <= end);
+        BatchRange { start, end }
+    }
+
+    pub fn indirect(draw_count: u32) -> BatchRange {
+        debug_assert!(draw_count > 0);
+        BatchRange {
+            start: draw_count,
+            end: 0,
+        }
+    }
+
+    pub fn is_direct(&self) -> bool {
+        self.start <= self.end
+    }
+
+    pub fn is_indirect(&self) -> bool {
+        !self.is_direct()
+    }
+
+    pub fn is_direct_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    pub fn direct_len(&self) -> u32 {
+        debug_assert!(self.is_direct());
+        self.end - self.start
+    }
+
+    pub fn direct_start(&self) -> u32 {
+        debug_assert!(self.is_direct());
+        self.start
+    }
+
+    pub fn direct_end(&self) -> u32 {
+        debug_assert!(self.is_direct());
+        self.end
+    }
+
+    pub fn set_direct_end(&mut self, end: u32) {
+        debug_assert!(self.is_direct());
+        debug_assert!(self.end >= self.start);
+        self.end = end;
+    }
+
+    pub fn indirect_draw_count(&self) -> u32 {
+        debug_assert!(self.is_indirect());
+        self.start
+    }
+
+    pub fn set_indirect_draw_count(&mut self, new_draw_count: u32) {
+        debug_assert!(self.is_indirect());
+        debug_assert!(new_draw_count > 0);
+        self.start = new_draw_count;
+    }
 }
 
 /// The "extra index" associated with some [`PhaseItem`]s, alongside the
@@ -825,9 +937,13 @@ pub trait BinnedPhaseItem: PhaseItem {
     fn new(
         key: Self::BinKey,
         representative_entity: Entity,
-        batch_range: Range<u32>,
+        batch_range: BatchRange,
         extra_index: PhaseItemExtraIndex,
     ) -> Self;
+
+    fn keys_can_form_multibatch(_key_a: &Self::BinKey, _key_b: &Self::BinKey) -> bool {
+        false
+    }
 }
 
 /// Represents phase items that must be sorted. The `SortKey` specifies the

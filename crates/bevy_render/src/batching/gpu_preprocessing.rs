@@ -1,5 +1,7 @@
 //! Batching functionality when GPU preprocessing is in use.
 
+use std::ops::Range;
+
 use bevy_app::{App, Plugin};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
@@ -18,8 +20,10 @@ use wgpu::{BindingResource, BufferUsages, DownlevelFlags, Features};
 
 use crate::{
     render_phase::{
-        BinnedPhaseItem, BinnedRenderPhase, BinnedRenderPhaseBatch, CachedRenderPipelinePhaseItem,
-        PhaseItemExtraIndex, SortedPhaseItem, SortedRenderPhase, UnbatchableBinnedEntityIndices,
+        BatchRange, BinnedPhaseItem, BinnedRenderPhase, BinnedRenderPhaseBatch,
+        BinnedRenderPhaseBatchSet, BinnedRenderPhaseBatchSetKeyIndex,
+        CachedRenderPipelinePhaseItem, PhaseItemExtraIndex, SortedPhaseItem, SortedRenderPhase,
+        UnbatchableBinnedEntityIndices,
     },
     render_resource::{BufferVec, GpuArrayBufferable, UninitBufferVec},
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
@@ -321,9 +325,54 @@ where
     {
         let (batch_range, batch_extra_index) =
             phase.items[self.phase_item_start_index as usize].batch_range_and_extra_index_mut();
-        *batch_range = self.instance_start_index..instance_end_index;
+        *batch_range = if self.indirect_parameters_index.is_some() {
+            // TODO: Support multidraw here too.
+            BatchRange::indirect(1)
+        } else {
+            BatchRange::direct(self.instance_start_index, instance_end_index)
+        };
         *batch_extra_index =
             PhaseItemExtraIndex::maybe_indirect_parameters_index(self.indirect_parameters_index);
+    }
+}
+
+struct BinnedRenderPhaseMultibatch {
+    /// Any one entity in the multibatch.
+    representative_entity: Entity,
+    /// The range of instances that this covers.
+    instance_range: Range<u32>,
+    /// The range of indirect parameter instances that this covers.
+    indirect_parameters_range: Range<u32>,
+}
+
+impl BinnedRenderPhaseMultibatch {
+    fn flush<BPI>(self, key_index: usize, gpu_culling: bool, phase: &mut BinnedRenderPhase<BPI>)
+    where
+        BPI: BinnedPhaseItem,
+    {
+        let batch = if gpu_culling {
+            BinnedRenderPhaseBatch {
+                representative_entity: self.representative_entity,
+                instance_range: BatchRange::indirect(self.indirect_parameters_range.len() as u32),
+                extra_index: PhaseItemExtraIndex::indirect_parameters_index(
+                    self.indirect_parameters_range.start,
+                ),
+            }
+        } else {
+            BinnedRenderPhaseBatch {
+                representative_entity: self.representative_entity,
+                instance_range: BatchRange::direct(
+                    self.instance_range.start,
+                    self.instance_range.end,
+                ),
+                extra_index: PhaseItemExtraIndex::NONE,
+            }
+        };
+
+        phase.batch_sets.push(BinnedRenderPhaseBatchSet {
+            batches: smallvec![batch],
+            key_index: BinnedRenderPhaseBatchSetKeyIndex::BatchableKeys(key_index),
+        });
     }
 }
 
@@ -516,63 +565,93 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
 
         // Prepare batchables.
 
-        for key in &phase.batchable_keys {
-            let mut batch: Option<BinnedRenderPhaseBatch> = None;
+        let mut batch: Option<BinnedRenderPhaseMultibatch> = None;
+        for key_index in 0..phase.batchable_keys.len() {
+            let key = &phase.batchable_keys[key_index];
+            // Flush the batch, unless we have multidraw and can combine the
+            // batches into a multibatch.
+            if batch.is_some()
+                && (!gpu_culling
+                    || !BPI::keys_can_form_multibatch(key, &phase.batchable_keys[key_index - 1]))
+            {
+                batch
+                    .take()
+                    .unwrap()
+                    .flush(key_index - 1, gpu_culling, phase);
+            }
+
+            let mut is_first_entity_in_batch = true;
+            let key = &phase.batchable_keys[key_index];
             for &entity in &phase.batchable_values[key] {
                 let Some(input_index) = GFBD::get_binned_index(&system_param_item, entity) else {
                     continue;
                 };
                 let output_index = data_buffer.add() as u32;
 
-                match batch {
-                    Some(ref mut batch) => {
-                        batch.instance_range.end = output_index + 1;
+                if is_first_entity_in_batch {
+                    let indirect_parameters_index = GFBD::get_batch_indirect_parameters_index(
+                        &system_param_item,
+                        &mut indirect_parameters_buffer,
+                        entity,
+                        output_index,
+                    )
+                    .unwrap();
+
+                    if gpu_culling {
+                        // TODO(pcwalton): Refactor this, can probably get rid
+                        // of `is_first_entity_in_batch` in favor of just
+                        // checking whether `batch` is Some
+                        match batch {
+                            Some(ref mut batch) => {
+                                // Make sure indirect parameter indices are contiguous.
+                                debug_assert_eq!(
+                                    batch.indirect_parameters_range.end,
+                                    u32::from(indirect_parameters_index)
+                                );
+                                batch.indirect_parameters_range.end += 1;
+                            }
+                            None => {
+                                batch = Some(BinnedRenderPhaseMultibatch {
+                                    representative_entity: entity,
+                                    instance_range: output_index..output_index + 1,
+                                    indirect_parameters_range: u32::from(indirect_parameters_index)
+                                        ..(u32::from(indirect_parameters_index) + 1),
+                                });
+                            }
+                        }
+
+                        /*
+                        let batch = batch.as_ref().expect("Should always have a batch");
                         work_item_buffer.buffer.push(PreprocessWorkItem {
                             input_index: input_index.into(),
-                            output_index: batch
-                                .extra_index
-                                .as_indirect_parameters_index()
-                                .unwrap_or(output_index),
+                            output_index: batch.extra_index.as_indirect_parameters_index().unwrap()
+                                + batch.instance_range.indirect_draw_count()
+                                - 1,
+                        });
+                        */
+                    } else {
+                        batch = Some(BinnedRenderPhaseMultibatch {
+                            representative_entity: entity,
+                            instance_range: output_index..output_index + 1,
+                            indirect_parameters_range: u32::from(indirect_parameters_index)
+                                ..(u32::from(indirect_parameters_index) + 1),
                         });
                     }
 
-                    None if gpu_culling => {
-                        let indirect_parameters_index = GFBD::get_batch_indirect_parameters_index(
-                            &system_param_item,
-                            &mut indirect_parameters_buffer,
-                            entity,
-                            output_index,
-                        );
-                        work_item_buffer.buffer.push(PreprocessWorkItem {
-                            input_index: input_index.into(),
-                            output_index: indirect_parameters_index.unwrap_or_default().into(),
-                        });
-                        batch = Some(BinnedRenderPhaseBatch {
-                            representative_entity: entity,
-                            instance_range: output_index..output_index + 1,
-                            extra_index: PhaseItemExtraIndex::maybe_indirect_parameters_index(
-                                indirect_parameters_index,
-                            ),
-                        });
-                    }
-
-                    None => {
-                        work_item_buffer.buffer.push(PreprocessWorkItem {
-                            input_index: input_index.into(),
-                            output_index,
-                        });
-                        batch = Some(BinnedRenderPhaseBatch {
-                            representative_entity: entity,
-                            instance_range: output_index..output_index + 1,
-                            extra_index: PhaseItemExtraIndex::NONE,
-                        });
-                    }
+                    is_first_entity_in_batch = false;
                 }
-            }
 
-            if let Some(batch) = batch {
-                phase.batch_sets.push(smallvec![batch]);
+                let batch = batch.as_ref().expect("Should always have a batch");
+                work_item_buffer.buffer.push(PreprocessWorkItem {
+                    input_index: input_index.into(),
+                    output_index: batch.indirect_parameters_range.end - 1,
+                });
             }
+        }
+
+        // Flush the final batch.
+        if let Some(batch) = batch {
+            batch.flush(phase.batchable_keys.len() - 1, gpu_culling, phase);
         }
 
         // Prepare unbatchables.
@@ -618,6 +697,12 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                 }
             }
         }
+
+        println!(
+            "multibatch count={} batch count={}",
+            phase.batch_sets.len(),
+            phase.batchable_keys.len() + phase.unbatchable_keys.len()
+        );
     }
 }
 

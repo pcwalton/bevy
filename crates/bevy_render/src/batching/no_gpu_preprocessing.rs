@@ -2,13 +2,13 @@
 
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::system::{Query, Res, ResMut, Resource, StaticSystemParam};
-use smallvec::{smallvec, SmallVec};
 use wgpu::BindingResource;
 
 use crate::{
     render_phase::{
-        BinnedPhaseItem, BinnedRenderPhase, BinnedRenderPhaseBatch, CachedRenderPipelinePhaseItem,
-        PhaseItemExtraIndex, SortedPhaseItem, SortedRenderPhase,
+        BatchRange, BinnedPhaseItem, BinnedRenderPhase, BinnedRenderPhaseBatch,
+        BinnedRenderPhaseBatchSet, BinnedRenderPhaseBatchSetKeyIndex,
+        CachedRenderPipelinePhaseItem, PhaseItemExtraIndex, SortedPhaseItem, SortedRenderPhase,
     },
     render_resource::{GpuArrayBuffer, GpuArrayBufferable},
     renderer::{RenderDevice, RenderQueue},
@@ -80,7 +80,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GBD>(
 
             let index = buffer_index.index;
             let (batch_range, extra_index) = item.batch_range_and_extra_index_mut();
-            *batch_range = index..index + 1;
+            *batch_range = BatchRange::direct(index, index + 1);
             *extra_index = PhaseItemExtraIndex::maybe_dynamic_offset(buffer_index.dynamic_offset);
 
             compare_data
@@ -106,8 +106,11 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
 
         // Prepare batchables.
 
-        for key in &phase.batchable_keys {
-            let mut batch_set: SmallVec<[BinnedRenderPhaseBatch; 1]> = smallvec![];
+        for (key_index, key) in phase.batchable_keys.iter().enumerate() {
+            let mut batch_set = BinnedRenderPhaseBatchSet::new(
+                BinnedRenderPhaseBatchSetKeyIndex::BatchableKeys(key_index),
+            );
+
             for &entity in &phase.batchable_values[key] {
                 let Some(buffer_data) = GFBD::get_binned_batch_data(&system_param_item, entity)
                 else {
@@ -120,22 +123,22 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                 // This is the only time we ever have more than one batch per
                 // bin. Note that dynamic offsets are only used on platforms
                 // with no storage buffers.
-                if !batch_set.last().is_some_and(|batch| {
-                    batch.instance_range.end == instance.index
+                if !batch_set.batches.last().is_some_and(|batch| {
+                    batch.instance_range.direct_end() == instance.index
                         && batch.extra_index
                             == PhaseItemExtraIndex::maybe_dynamic_offset(instance.dynamic_offset)
                 }) {
-                    batch_set.push(BinnedRenderPhaseBatch {
+                    batch_set.batches.push(BinnedRenderPhaseBatch {
                         representative_entity: entity,
-                        instance_range: instance.index..instance.index,
+                        instance_range: BatchRange::direct(instance.index, instance.index),
                         extra_index: PhaseItemExtraIndex::maybe_dynamic_offset(
                             instance.dynamic_offset,
                         ),
                     });
                 }
 
-                if let Some(batch) = batch_set.last_mut() {
-                    batch.instance_range.end = instance.index + 1;
+                if let Some(batch) = batch_set.batches.last_mut() {
+                    batch.instance_range.set_direct_end(instance.index + 1);
                 }
             }
 

@@ -19,8 +19,8 @@ use bevy_math::{Affine3A, FloatOrd, Quat, Rect, Vec2, Vec4};
 use bevy_render::{
     render_asset::RenderAssets,
     render_phase::{
-        DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand, RenderCommandResult,
-        SetItemPipeline, SortedRenderPhase, TrackedRenderPass,
+        BatchRange, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
+        RenderCommandResult, SetItemPipeline, SortedRenderPhase, TrackedRenderPass,
     },
     render_resource::{
         binding_types::{sampler, texture_2d, uniform_buffer},
@@ -515,7 +515,7 @@ pub fn queue_sprites(
                 entity: *entity,
                 sort_key,
                 // batch_range and dynamic_offset will be calculated in prepare_sprites
-                batch_range: 0..0,
+                batch_range: BatchRange::direct(0, 0),
                 extra_index: PhaseItemExtraIndex::NONE,
             });
         }
@@ -669,9 +669,8 @@ pub fn prepare_sprites(
                     ));
                 }
 
-                transparent_phase.items[batch_item_index]
-                    .batch_range_mut()
-                    .end += 1;
+                let batch_range = transparent_phase.items[batch_item_index].batch_range_mut();
+                batch_range.set_direct_end(batch_range.direct_end() + 1);
                 batches.last_mut().unwrap().1.range.end += 1;
                 index += 1;
             }

@@ -17,7 +17,7 @@ use bevy_render::{
         prepare_assets, PrepareAssetError, RenderAsset, RenderAssetPlugin, RenderAssets,
     },
     render_phase::{
-        AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
+        AddRenderCommand, BatchRange, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
         RenderCommandResult, SetItemPipeline, SortedRenderPhase, TrackedRenderPass,
     },
     render_resource::{
@@ -450,7 +450,7 @@ pub fn queue_material2d_meshes<M: Material2d>(
                 // camera. As such we can just use mesh_z as the distance
                 sort_key: FloatOrd(mesh_z + material2d.depth_bias),
                 // Batching is done in batch_and_prepare_render_phase
-                batch_range: 0..1,
+                batch_range: BatchRange::direct(0, 1),
                 extra_index: PhaseItemExtraIndex::NONE,
             });
         }

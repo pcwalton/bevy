@@ -10,7 +10,7 @@
 use bevy::{
     math::Vec3A,
     prelude::*,
-    render::primitives::{Aabb, Sphere},
+    render::{primitives::{Aabb, Sphere}, view::GpuCulling},
 };
 
 #[path = "../../helpers/camera_controller.rs"]
@@ -147,6 +147,7 @@ fn setup_scene_after_load(
                 intensity: 150.0,
             },
             camera_controller,
+            GpuCulling,
         ));
 
         // Spawn a default light if the scene does not have one

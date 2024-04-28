@@ -1,12 +1,10 @@
 pub mod copy_lighting_id;
 pub mod node;
 
-use std::ops::Range;
-
 use bevy_ecs::prelude::*;
 use bevy_render::{
     render_phase::{
-        BinnedPhaseItem, CachedRenderPipelinePhaseItem, DrawFunctionId, PhaseItem,
+        BatchRange, BinnedPhaseItem, CachedRenderPipelinePhaseItem, DrawFunctionId, PhaseItem,
         PhaseItemExtraIndex,
     },
     render_resource::{CachedRenderPipelineId, TextureFormat},
@@ -27,7 +25,7 @@ pub const DEFERRED_LIGHTING_PASS_ID_DEPTH_FORMAT: TextureFormat = TextureFormat:
 pub struct Opaque3dDeferred {
     pub key: OpaqueNoLightmap3dBinKey,
     pub representative_entity: Entity,
-    pub batch_range: Range<u32>,
+    pub batch_range: BatchRange,
     pub extra_index: PhaseItemExtraIndex,
 }
 
@@ -43,12 +41,12 @@ impl PhaseItem for Opaque3dDeferred {
     }
 
     #[inline]
-    fn batch_range(&self) -> &Range<u32> {
+    fn batch_range(&self) -> &BatchRange {
         &self.batch_range
     }
 
     #[inline]
-    fn batch_range_mut(&mut self) -> &mut Range<u32> {
+    fn batch_range_mut(&mut self) -> &mut BatchRange {
         &mut self.batch_range
     }
 
@@ -58,7 +56,7 @@ impl PhaseItem for Opaque3dDeferred {
     }
 
     #[inline]
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
 }
@@ -70,7 +68,7 @@ impl BinnedPhaseItem for Opaque3dDeferred {
     fn new(
         key: Self::BinKey,
         representative_entity: Entity,
-        batch_range: Range<u32>,
+        batch_range: BatchRange,
         extra_index: PhaseItemExtraIndex,
     ) -> Self {
         Self {
@@ -97,7 +95,7 @@ impl CachedRenderPipelinePhaseItem for Opaque3dDeferred {
 pub struct AlphaMask3dDeferred {
     pub key: OpaqueNoLightmap3dBinKey,
     pub representative_entity: Entity,
-    pub batch_range: Range<u32>,
+    pub batch_range: BatchRange,
     pub extra_index: PhaseItemExtraIndex,
 }
 
@@ -113,12 +111,12 @@ impl PhaseItem for AlphaMask3dDeferred {
     }
 
     #[inline]
-    fn batch_range(&self) -> &Range<u32> {
+    fn batch_range(&self) -> &BatchRange {
         &self.batch_range
     }
 
     #[inline]
-    fn batch_range_mut(&mut self) -> &mut Range<u32> {
+    fn batch_range_mut(&mut self) -> &mut BatchRange {
         &mut self.batch_range
     }
 
@@ -128,7 +126,7 @@ impl PhaseItem for AlphaMask3dDeferred {
     }
 
     #[inline]
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
 }
@@ -139,7 +137,7 @@ impl BinnedPhaseItem for AlphaMask3dDeferred {
     fn new(
         key: Self::BinKey,
         representative_entity: Entity,
-        batch_range: Range<u32>,
+        batch_range: BatchRange,
         extra_index: PhaseItemExtraIndex,
     ) -> Self {
         Self {

@@ -582,7 +582,8 @@ pub fn prepare_uimaterial_nodes<M: UiMaterial>(
 
                     index += QUAD_INDICES.len() as u32;
                     existing_batch.unwrap().1.range.end = index;
-                    ui_phase.items[batch_item_index].batch_range_mut().end += 1;
+                    let batch_range = ui_phase.items[batch_item_index].batch_range_mut();
+                    batch_range.set_direct_end(batch_range.direct_end() + 1);
                 } else {
                     batch_shader_handle = AssetId::invalid();
                 }
@@ -670,7 +671,7 @@ pub fn queue_ui_material_nodes<M: UiMaterial>(
                 FloatOrd(extracted_uinode.stack_index as f32),
                 entity.index(),
             ),
-            batch_range: 0..0,
+            batch_range: BatchRange::direct(0, 0),
             extra_index: PhaseItemExtraIndex::NONE,
         });
     }

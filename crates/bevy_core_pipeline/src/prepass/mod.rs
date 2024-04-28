@@ -27,15 +27,13 @@
 
 pub mod node;
 
-use std::ops::Range;
-
 use bevy_asset::AssetId;
 use bevy_ecs::prelude::*;
 use bevy_reflect::Reflect;
 use bevy_render::{
     mesh::Mesh,
     render_phase::{
-        BinnedPhaseItem, CachedRenderPipelinePhaseItem, DrawFunctionId, PhaseItem,
+        BatchRange, BinnedPhaseItem, CachedRenderPipelinePhaseItem, DrawFunctionId, PhaseItem,
         PhaseItemExtraIndex,
     },
     render_resource::{BindGroupId, CachedRenderPipelineId, Extent3d, TextureFormat, TextureView},
@@ -120,7 +118,7 @@ pub struct Opaque3dPrepass {
     /// batch, such as the mesh.
     pub representative_entity: Entity,
 
-    pub batch_range: Range<u32>,
+    pub batch_range: BatchRange,
     pub extra_index: PhaseItemExtraIndex,
 }
 
@@ -155,12 +153,12 @@ impl PhaseItem for Opaque3dPrepass {
     }
 
     #[inline]
-    fn batch_range(&self) -> &Range<u32> {
+    fn batch_range(&self) -> &BatchRange {
         &self.batch_range
     }
 
     #[inline]
-    fn batch_range_mut(&mut self) -> &mut Range<u32> {
+    fn batch_range_mut(&mut self) -> &mut BatchRange {
         &mut self.batch_range
     }
 
@@ -170,7 +168,7 @@ impl PhaseItem for Opaque3dPrepass {
     }
 
     #[inline]
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
 }
@@ -182,7 +180,7 @@ impl BinnedPhaseItem for Opaque3dPrepass {
     fn new(
         key: Self::BinKey,
         representative_entity: Entity,
-        batch_range: Range<u32>,
+        batch_range: BatchRange,
         extra_index: PhaseItemExtraIndex,
     ) -> Self {
         Opaque3dPrepass {
@@ -209,7 +207,7 @@ impl CachedRenderPipelinePhaseItem for Opaque3dPrepass {
 pub struct AlphaMask3dPrepass {
     pub key: OpaqueNoLightmap3dBinKey,
     pub representative_entity: Entity,
-    pub batch_range: Range<u32>,
+    pub batch_range: BatchRange,
     pub extra_index: PhaseItemExtraIndex,
 }
 
@@ -225,12 +223,12 @@ impl PhaseItem for AlphaMask3dPrepass {
     }
 
     #[inline]
-    fn batch_range(&self) -> &Range<u32> {
+    fn batch_range(&self) -> &BatchRange {
         &self.batch_range
     }
 
     #[inline]
-    fn batch_range_mut(&mut self) -> &mut Range<u32> {
+    fn batch_range_mut(&mut self) -> &mut BatchRange {
         &mut self.batch_range
     }
 
@@ -240,7 +238,7 @@ impl PhaseItem for AlphaMask3dPrepass {
     }
 
     #[inline]
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
 }
@@ -252,7 +250,7 @@ impl BinnedPhaseItem for AlphaMask3dPrepass {
     fn new(
         key: Self::BinKey,
         representative_entity: Entity,
-        batch_range: Range<u32>,
+        batch_range: BatchRange,
         extra_index: PhaseItemExtraIndex,
     ) -> Self {
         Self {

@@ -11,12 +11,14 @@ use bevy::{
     },
     prelude::*,
     render::{
+        allocator::{GpuAllocation, GpuAllocator},
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         mesh::{GpuBufferInfo, GpuMesh, MeshVertexBufferLayoutRef},
         render_asset::RenderAssets,
         render_phase::{
-            AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
-            RenderCommandResult, SetItemPipeline, SortedRenderPhase, TrackedRenderPass,
+            AddRenderCommand, BatchRange, DrawFunctions, PhaseItem, PhaseItemExtraIndex,
+            RenderCommand, RenderCommandResult, SetItemPipeline, SortedRenderPhase,
+            TrackedRenderPass,
         },
         render_resource::*,
         renderer::RenderDevice,
@@ -143,7 +145,7 @@ fn queue_custom(
                 pipeline,
                 draw_function: draw_custom,
                 distance: rangefinder.distance_translation(&mesh_instance.translation),
-                batch_range: 0..1,
+                batch_range: BatchRange::direct(0, 1),
                 extra_index: PhaseItemExtraIndex::NONE,
             });
         }
@@ -152,7 +154,7 @@ fn queue_custom(
 
 #[derive(Component)]
 struct InstanceBuffer {
-    buffer: Buffer,
+    buffer: GpuAllocation,
     length: usize,
 }
 
@@ -162,7 +164,8 @@ fn prepare_instance_buffers(
     render_device: Res<RenderDevice>,
 ) {
     for (entity, instance_data) in &query {
-        let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        todo!();
+        /*let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("instance data buffer"),
             contents: bytemuck::cast_slice(instance_data.as_slice()),
             usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
@@ -170,7 +173,7 @@ fn prepare_instance_buffers(
         commands.entity(entity).insert(InstanceBuffer {
             buffer,
             length: instance_data.len(),
-        });
+        });*/
     }
 }
 
@@ -233,7 +236,12 @@ type DrawCustom = (
 struct DrawMeshInstanced;
 
 impl<P: PhaseItem> RenderCommand<P> for DrawMeshInstanced {
-    type Param = (SRes<RenderAssets<GpuMesh>>, SRes<RenderMeshInstances>);
+    type Param = (
+        SRes<RenderAssets<GpuMesh>>,
+        SRes<RenderMeshInstances>,
+        SRes<GpuAllocator<VertexAllocation>>,
+        SRes<GpuAllocator<IndexAllocation>>,
+    );
     type ViewQuery = ();
     type ItemQuery = Read<InstanceBuffer>;
 
@@ -242,9 +250,16 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMeshInstanced {
         item: &P,
         _view: (),
         instance_buffer: Option<&'w InstanceBuffer>,
-        (meshes, render_mesh_instances): SystemParamItem<'w, '_, Self::Param>,
+        (meshes, render_mesh_instances, vbo_allocator, ibo_allocator): SystemParamItem<
+            'w,
+            '_,
+            Self::Param,
+        >,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
+        let vbo_allocator = vbo_allocator.into_inner();
+        let ibo_allocator = ibo_allocator.into_inner();
+
         let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(item.entity())
         else {
             return RenderCommandResult::Failure;
@@ -256,16 +271,16 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMeshInstanced {
             return RenderCommandResult::Failure;
         };
 
-        pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
-        pass.set_vertex_buffer(1, instance_buffer.buffer.slice(..));
+        pass.set_vertex_buffer(0, vbo_allocator.get(&gpu_mesh.vertex_buffer));
+        pass.set_vertex_buffer(1, vbo_allocator.get(&instance_buffer.buffer));
 
         match &gpu_mesh.buffer_info {
             GpuBufferInfo::Indexed {
-                buffer,
+                allocation,
                 index_format,
                 count,
             } => {
-                pass.set_index_buffer(buffer.slice(..), 0, *index_format);
+                pass.set_index_buffer(ibo_allocator.get(allocation), 0, *index_format);
                 pass.draw_indexed(0..*count, 0, 0..instance_buffer.length as u32);
             }
             GpuBufferInfo::NonIndexed => {

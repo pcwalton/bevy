@@ -11,6 +11,7 @@ use bevy_ecs::{
 };
 use bevy_math::{Affine3, Vec4};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
+use bevy_render::allocator::GpuAllocator;
 use bevy_render::batching::no_gpu_preprocessing::{
     self, batch_and_prepare_sorted_render_phase, write_batched_instance_buffer,
     BatchedInstanceBuffer,
@@ -661,7 +662,11 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetMesh2dBindGroup<I> {
 
 pub struct DrawMesh2d;
 impl<P: PhaseItem> RenderCommand<P> for DrawMesh2d {
-    type Param = (SRes<RenderAssets<GpuMesh>>, SRes<RenderMesh2dInstances>);
+    type Param = (
+        SRes<RenderAssets<GpuMesh>>,
+        SRes<RenderMesh2dInstances>,
+        SRes<GpuAllocator>,
+    );
     type ViewQuery = ();
     type ItemQuery = ();
 
@@ -670,11 +675,12 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh2d {
         item: &P,
         _view: (),
         _item_query: Option<()>,
-        (meshes, render_mesh2d_instances): SystemParamItem<'w, '_, Self::Param>,
+        (meshes, render_mesh2d_instances, allocator): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let meshes = meshes.into_inner();
         let render_mesh2d_instances = render_mesh2d_instances.into_inner();
+        let allocator = allocator.into_inner();
 
         let Some(RenderMesh2dInstance { mesh_asset_id, .. }) =
             render_mesh2d_instances.get(&item.entity())
@@ -685,20 +691,29 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh2d {
             return RenderCommandResult::Failure;
         };
 
-        pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+        let (vertex_buffer, _) = allocator.get_buffer_and_offset(&gpu_mesh.vertex_buffer);
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
 
         let batch_range = item.batch_range();
         match &gpu_mesh.buffer_info {
             GpuBufferInfo::Indexed {
-                buffer,
+                allocation,
                 index_format,
                 count,
             } => {
-                pass.set_index_buffer(buffer.slice(..), 0, *index_format);
-                pass.draw_indexed(0..*count, 0, batch_range.clone());
+                let (index_buffer, _) = allocator.get_buffer_and_offset(allocation);
+                pass.set_index_buffer(index_buffer.slice(..), 0, *index_format);
+                pass.draw_indexed(
+                    0..*count,
+                    0,
+                    batch_range.direct_start()..batch_range.direct_end(),
+                );
             }
             GpuBufferInfo::NonIndexed => {
-                pass.draw(0..gpu_mesh.vertex_count, batch_range.clone());
+                pass.draw(
+                    0..gpu_mesh.vertex_count,
+                    batch_range.direct_start()..batch_range.direct_end(),
+                );
             }
         }
         RenderCommandResult::Success

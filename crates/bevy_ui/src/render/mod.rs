@@ -7,6 +7,7 @@ use bevy_core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy_core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy_core_pipeline::{core_2d::Camera2d, core_3d::Camera3d};
 use bevy_hierarchy::Parent;
+use bevy_render::render_phase::BatchRange;
 use bevy_render::{
     render_phase::{PhaseItem, PhaseItemExtraIndex},
     texture::GpuImage,
@@ -904,7 +905,7 @@ pub fn queue_uinodes(
                 entity.index(),
             ),
             // batch_range will be calculated in prepare_uinodes
-            batch_range: 0..0,
+            batch_range: BatchRange::direct(0, 0),
             extra_index: PhaseItemExtraIndex::NONE,
         });
     }
@@ -1158,7 +1159,8 @@ pub fn prepare_uinodes(
                     indices_index += 4;
 
                     existing_batch.unwrap().1.range.end = vertices_index;
-                    ui_phase.items[batch_item_index].batch_range_mut().end += 1;
+                    let batch_range = ui_phase.items[batch_item_index].batch_range_mut();
+                    batch_range.set_direct_end(batch_range.direct_end() + 1);
                 } else {
                     batch_image_handle = AssetId::invalid();
                 }

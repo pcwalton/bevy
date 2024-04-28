@@ -14,7 +14,7 @@ use bevy::{
         mesh::{GpuMesh, Indices, MeshVertexAttribute},
         render_asset::{RenderAssetUsages, RenderAssets},
         render_phase::{
-            AddRenderCommand, DrawFunctions, PhaseItemExtraIndex, SetItemPipeline,
+            AddRenderCommand, BatchRange, DrawFunctions, PhaseItemExtraIndex, SetItemPipeline,
             SortedRenderPhase,
         },
         render_resource::{
@@ -394,7 +394,7 @@ pub fn queue_colored_mesh2d(
                     // in order to get correct transparency
                     sort_key: FloatOrd(mesh_z),
                     // This material is not batched
-                    batch_range: 0..1,
+                    batch_range: BatchRange::direct(0, 1),
                     extra_index: PhaseItemExtraIndex::NONE,
                 });
             }

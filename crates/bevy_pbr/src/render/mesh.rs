@@ -14,6 +14,7 @@ use bevy_ecs::{
 };
 use bevy_math::{Affine3, Rect, UVec2, Vec3, Vec4};
 use bevy_render::{
+    allocator::GpuAllocator,
     batching::{
         gpu_preprocessing::{
             self, GpuPreprocessingSupport, IndirectParameters, IndirectParametersBuffer,
@@ -1247,23 +1248,27 @@ fn get_batch_indirect_parameters_index(
     let mesh_instance = mesh_instances.get(&entity)?;
     let mesh = meshes.get(mesh_instance.mesh_asset_id)?;
 
+    let offset = mesh.vertex_buffer.offset();
+
     // Note that `IndirectParameters` covers both of these structures, even
     // though they actually have distinct layouts. See the comment above that
     // type for more information.
     let indirect_parameters = match mesh.buffer_info {
         GpuBufferInfo::Indexed {
-            count: index_count, ..
+            ref allocation,
+            count: index_count,
+            ..
         } => IndirectParameters {
             vertex_or_index_count: index_count,
             instance_count: 0,
-            first_vertex: 0,
-            base_vertex_or_first_instance: 0,
+            first_vertex: allocation.offset() as u32,
+            base_vertex_or_first_instance: offset as u32,
             first_instance: instance_index,
         },
         GpuBufferInfo::NonIndexed => IndirectParameters {
             vertex_or_index_count: mesh.vertex_count,
             instance_count: 0,
-            first_vertex: 0,
+            first_vertex: offset as u32,
             base_vertex_or_first_instance: instance_index,
             first_instance: instance_index,
         },
@@ -1988,6 +1993,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
         SRes<IndirectParametersBuffer>,
         SRes<PipelineCache>,
         Option<SRes<PreprocessPipelines>>,
+        SRes<GpuAllocator>,
     );
     type ViewQuery = Has<PreprocessBindGroup>;
     type ItemQuery = ();
@@ -1996,7 +2002,14 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
         item: &P,
         has_preprocess_bind_group: ROQueryItem<Self::ViewQuery>,
         _item_query: Option<()>,
-        (meshes, mesh_instances, indirect_parameters_buffer, pipeline_cache, preprocess_pipelines): SystemParamItem<'w, '_, Self::Param>,
+        (
+            meshes,
+            mesh_instances,
+            indirect_parameters_buffer,
+            pipeline_cache,
+            preprocess_pipelines,
+            allocator,
+        ): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         // If we're using GPU preprocessing, then we're dependent on that
@@ -2013,6 +2026,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
         let meshes = meshes.into_inner();
         let mesh_instances = mesh_instances.into_inner();
         let indirect_parameters_buffer = indirect_parameters_buffer.into_inner();
+        let allocator = allocator.into_inner();
 
         let Some(mesh_asset_id) = mesh_instances.mesh_asset_id(item.entity()) else {
             return RenderCommandResult::Failure;
@@ -2036,35 +2050,64 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
             },
         };
 
-        pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));
+        let (vertex_buffer, vertex_offset) =
+            allocator.get_buffer_and_offset(&gpu_mesh.vertex_buffer);
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
 
         let batch_range = item.batch_range();
 
         // Draw either directly or indirectly, as appropriate.
         match &gpu_mesh.buffer_info {
             GpuBufferInfo::Indexed {
-                buffer,
+                allocation,
                 index_format,
                 count,
             } => {
-                pass.set_index_buffer(buffer.slice(..), 0, *index_format);
+                let (index_buffer, index_offset) = allocator.get_buffer_and_offset(allocation);
+                pass.set_index_buffer(index_buffer.slice(..), 0, *index_format);
                 match indirect_parameters {
                     None => {
-                        pass.draw_indexed(0..*count, 0, batch_range.clone());
+                        pass.draw_indexed(
+                            (index_offset as u32)..(index_offset as u32 + *count),
+                            vertex_offset as _,
+                            batch_range.direct_start()..batch_range.direct_end(),
+                        );
                     }
-                    Some((indirect_parameters_offset, indirect_parameters_buffer)) => pass
-                        .draw_indexed_indirect(
+                    Some((indirect_parameters_offset, indirect_parameters_buffer))
+                        if batch_range.indirect_draw_count() == 1 =>
+                    {
+                        pass.draw_indexed_indirect(
                             indirect_parameters_buffer,
                             indirect_parameters_offset,
+                        );
+                    }
+                    Some((indirect_parameters_offset, indirect_parameters_buffer)) => pass
+                        .multi_draw_indexed_indirect(
+                            indirect_parameters_buffer,
+                            indirect_parameters_offset,
+                            batch_range.indirect_draw_count(),
                         ),
                 }
             }
+
             GpuBufferInfo::NonIndexed => match indirect_parameters {
                 None => {
-                    pass.draw(0..gpu_mesh.vertex_count, batch_range.clone());
+                    pass.draw(
+                        (vertex_offset as u32)..(vertex_offset as u32 + gpu_mesh.vertex_count),
+                        batch_range.direct_start()..batch_range.direct_end(),
+                    );
+                }
+                Some((indirect_parameters_offset, indirect_parameters_buffer))
+                    if batch_range.indirect_draw_count() == 1 =>
+                {
+                    pass.draw_indirect(indirect_parameters_buffer, indirect_parameters_offset);
                 }
                 Some((indirect_parameters_offset, indirect_parameters_buffer)) => {
-                    pass.draw_indirect(indirect_parameters_buffer, indirect_parameters_offset);
+                    pass.multi_draw_indirect(
+                        indirect_parameters_buffer,
+                        indirect_parameters_offset,
+                        batch_range.indirect_draw_count(),
+                    );
                 }
             },
         }

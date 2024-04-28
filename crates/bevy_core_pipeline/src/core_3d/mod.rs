@@ -39,8 +39,6 @@ pub mod graph {
 // PERF: vulkan docs recommend using 24 bit depth for better performance
 pub const CORE_3D_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
-use std::ops::Range;
-
 use bevy_asset::AssetId;
 use bevy_color::LinearRgba;
 pub use camera_3d::*;
@@ -57,9 +55,9 @@ use bevy_render::{
     prelude::Msaa,
     render_graph::{EmptyNode, RenderGraphApp, ViewNodeRunner},
     render_phase::{
-        sort_phase_system, BinnedPhaseItem, BinnedRenderPhase, CachedRenderPipelinePhaseItem,
-        DrawFunctionId, DrawFunctions, PhaseItem, PhaseItemExtraIndex, SortedPhaseItem,
-        SortedRenderPhase,
+        sort_phase_system, BatchRange, BinnedPhaseItem, BinnedRenderPhase,
+        CachedRenderPipelinePhaseItem, DrawFunctionId, DrawFunctions, PhaseItem,
+        PhaseItemExtraIndex, SortedPhaseItem, SortedRenderPhase,
     },
     render_resource::{
         BindGroupId, CachedRenderPipelineId, Extent3d, FilterMode, Sampler, SamplerDescriptor,
@@ -182,7 +180,7 @@ pub struct Opaque3d {
     /// applicable.
     pub representative_entity: Entity,
     /// The ranges of instances.
-    pub batch_range: Range<u32>,
+    pub batch_range: BatchRange,
     /// An extra index, which is either a dynamic offset or an index in the
     /// indirect parameters list.
     pub extra_index: PhaseItemExtraIndex,
@@ -197,9 +195,6 @@ pub struct Opaque3dBinKey {
     /// The function used to draw.
     pub draw_function: DrawFunctionId,
 
-    /// The mesh.
-    pub asset_id: AssetId<Mesh>,
-
     /// The ID of a bind group specific to the material.
     ///
     /// In the case of PBR, this is the `MaterialBindGroupId`.
@@ -207,6 +202,9 @@ pub struct Opaque3dBinKey {
 
     /// The lightmap, if present.
     pub lightmap_image: Option<AssetId<Image>>,
+
+    /// The mesh.
+    pub asset_id: AssetId<Mesh>,
 }
 
 impl PhaseItem for Opaque3d {
@@ -221,12 +219,12 @@ impl PhaseItem for Opaque3d {
     }
 
     #[inline]
-    fn batch_range(&self) -> &Range<u32> {
+    fn batch_range(&self) -> &BatchRange {
         &self.batch_range
     }
 
     #[inline]
-    fn batch_range_mut(&mut self) -> &mut Range<u32> {
+    fn batch_range_mut(&mut self) -> &mut BatchRange {
         &mut self.batch_range
     }
 
@@ -234,7 +232,7 @@ impl PhaseItem for Opaque3d {
         self.extra_index
     }
 
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
 }
@@ -246,7 +244,7 @@ impl BinnedPhaseItem for Opaque3d {
     fn new(
         key: Self::BinKey,
         representative_entity: Entity,
-        batch_range: Range<u32>,
+        batch_range: BatchRange,
         extra_index: PhaseItemExtraIndex,
     ) -> Self {
         Opaque3d {
@@ -255,6 +253,13 @@ impl BinnedPhaseItem for Opaque3d {
             batch_range,
             extra_index,
         }
+    }
+
+    fn keys_can_form_multibatch(key_a: &Self::BinKey, key_b: &Self::BinKey) -> bool {
+        // FIXME(pcwalton): This is wrong, check slab IDs.
+        key_a.draw_function == key_b.draw_function && key_a.lightmap_image ==
+        key_b.lightmap_image && key_a.material_bind_group_id ==
+        key_b.material_bind_group_id && key_a.pipeline == key_b.pipeline
     }
 }
 
@@ -268,7 +273,7 @@ impl CachedRenderPipelinePhaseItem for Opaque3d {
 pub struct AlphaMask3d {
     pub key: OpaqueNoLightmap3dBinKey,
     pub representative_entity: Entity,
-    pub batch_range: Range<u32>,
+    pub batch_range: BatchRange,
     pub extra_index: PhaseItemExtraIndex,
 }
 
@@ -284,12 +289,12 @@ impl PhaseItem for AlphaMask3d {
     }
 
     #[inline]
-    fn batch_range(&self) -> &Range<u32> {
+    fn batch_range(&self) -> &BatchRange {
         &self.batch_range
     }
 
     #[inline]
-    fn batch_range_mut(&mut self) -> &mut Range<u32> {
+    fn batch_range_mut(&mut self) -> &mut BatchRange {
         &mut self.batch_range
     }
 
@@ -299,7 +304,7 @@ impl PhaseItem for AlphaMask3d {
     }
 
     #[inline]
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
 }
@@ -311,7 +316,7 @@ impl BinnedPhaseItem for AlphaMask3d {
     fn new(
         key: Self::BinKey,
         representative_entity: Entity,
-        batch_range: Range<u32>,
+        batch_range: BatchRange,
         extra_index: PhaseItemExtraIndex,
     ) -> Self {
         Self {
@@ -335,7 +340,7 @@ pub struct Transmissive3d {
     pub pipeline: CachedRenderPipelineId,
     pub entity: Entity,
     pub draw_function: DrawFunctionId,
-    pub batch_range: Range<u32>,
+    pub batch_range: BatchRange,
     pub extra_index: PhaseItemExtraIndex,
 }
 
@@ -362,12 +367,12 @@ impl PhaseItem for Transmissive3d {
     }
 
     #[inline]
-    fn batch_range(&self) -> &Range<u32> {
+    fn batch_range(&self) -> &BatchRange {
         &self.batch_range
     }
 
     #[inline]
-    fn batch_range_mut(&mut self) -> &mut Range<u32> {
+    fn batch_range_mut(&mut self) -> &mut BatchRange {
         &mut self.batch_range
     }
 
@@ -377,7 +382,7 @@ impl PhaseItem for Transmissive3d {
     }
 
     #[inline]
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
 }
@@ -409,7 +414,7 @@ pub struct Transparent3d {
     pub pipeline: CachedRenderPipelineId,
     pub entity: Entity,
     pub draw_function: DrawFunctionId,
-    pub batch_range: Range<u32>,
+    pub batch_range: BatchRange,
     pub extra_index: PhaseItemExtraIndex,
 }
 
@@ -425,12 +430,12 @@ impl PhaseItem for Transparent3d {
     }
 
     #[inline]
-    fn batch_range(&self) -> &Range<u32> {
+    fn batch_range(&self) -> &BatchRange {
         &self.batch_range
     }
 
     #[inline]
-    fn batch_range_mut(&mut self) -> &mut Range<u32> {
+    fn batch_range_mut(&mut self) -> &mut BatchRange {
         &mut self.batch_range
     }
 
@@ -440,7 +445,7 @@ impl PhaseItem for Transparent3d {
     }
 
     #[inline]
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
 }

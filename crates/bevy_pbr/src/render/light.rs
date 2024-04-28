@@ -22,7 +22,7 @@ use bevy_transform::{components::GlobalTransform, prelude::Transform};
 #[cfg(feature = "trace")]
 use bevy_utils::tracing::info_span;
 use bevy_utils::tracing::{error, warn};
-use std::{hash::Hash, num::NonZeroU64, ops::Range};
+use std::{hash::Hash, num::NonZeroU64};
 
 use crate::*;
 
@@ -1732,7 +1732,7 @@ pub fn queue_shadows<M: Material>(
 pub struct Shadow {
     pub key: ShadowBinKey,
     pub representative_entity: Entity,
-    pub batch_range: Range<u32>,
+    pub batch_range: BatchRange,
     pub extra_index: PhaseItemExtraIndex,
 }
 
@@ -1760,12 +1760,12 @@ impl PhaseItem for Shadow {
     }
 
     #[inline]
-    fn batch_range(&self) -> &Range<u32> {
+    fn batch_range(&self) -> &BatchRange {
         &self.batch_range
     }
 
     #[inline]
-    fn batch_range_mut(&mut self) -> &mut Range<u32> {
+    fn batch_range_mut(&mut self) -> &mut BatchRange {
         &mut self.batch_range
     }
 
@@ -1775,7 +1775,7 @@ impl PhaseItem for Shadow {
     }
 
     #[inline]
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
 }
@@ -1787,7 +1787,7 @@ impl BinnedPhaseItem for Shadow {
     fn new(
         key: Self::BinKey,
         representative_entity: Entity,
-        batch_range: Range<u32>,
+        batch_range: BatchRange,
         extra_index: PhaseItemExtraIndex,
     ) -> Self {
         Shadow {

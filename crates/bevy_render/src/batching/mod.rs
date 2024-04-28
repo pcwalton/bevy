@@ -186,7 +186,7 @@ fn batch_and_prepare_sorted_render_phase<I, GBD>(
 
     items.reduce(|(start_range, prev_batch_meta), (range, batch_meta)| {
         if batch_meta.is_some() && prev_batch_meta == batch_meta {
-            start_range.end = range.end;
+            start_range.set_direct_end(range.direct_end());
             (start_range, prev_batch_meta)
         } else {
             (range, batch_meta)

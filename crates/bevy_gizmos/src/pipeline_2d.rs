@@ -19,7 +19,7 @@ use bevy_math::FloatOrd;
 use bevy_render::{
     render_asset::{prepare_assets, RenderAssets},
     render_phase::{
-        AddRenderCommand, DrawFunctions, PhaseItemExtraIndex, SetItemPipeline, SortedRenderPhase,
+        AddRenderCommand, BatchRange, DrawFunctions, PhaseItemExtraIndex, SetItemPipeline, SortedRenderPhase
     },
     render_resource::*,
     texture::BevyDefault,
@@ -294,7 +294,7 @@ fn queue_line_gizmos_2d(
                 draw_function,
                 pipeline,
                 sort_key: FloatOrd(f32::INFINITY),
-                batch_range: 0..1,
+                batch_range: BatchRange::direct(0, 1),
                 extra_index: PhaseItemExtraIndex::NONE,
             });
         }
@@ -352,7 +352,7 @@ fn queue_line_joint_gizmos_2d(
                 draw_function,
                 pipeline,
                 sort_key: FloatOrd(f32::INFINITY),
-                batch_range: 0..1,
+                batch_range: BatchRange::direct(0, 1),
                 extra_index: PhaseItemExtraIndex::NONE,
             });
         }

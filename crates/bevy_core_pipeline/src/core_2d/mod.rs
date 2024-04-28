@@ -24,8 +24,6 @@ pub mod graph {
     }
 }
 
-use std::ops::Range;
-
 pub use camera_2d::*;
 pub use main_pass_2d_node::*;
 
@@ -37,8 +35,8 @@ use bevy_render::{
     extract_component::ExtractComponentPlugin,
     render_graph::{EmptyNode, RenderGraphApp, ViewNodeRunner},
     render_phase::{
-        sort_phase_system, CachedRenderPipelinePhaseItem, DrawFunctionId, DrawFunctions, PhaseItem,
-        PhaseItemExtraIndex, SortedPhaseItem, SortedRenderPhase,
+        sort_phase_system, BatchRange, CachedRenderPipelinePhaseItem, DrawFunctionId,
+        DrawFunctions, PhaseItem, PhaseItemExtraIndex, SortedPhaseItem, SortedRenderPhase,
     },
     render_resource::CachedRenderPipelineId,
     Extract, ExtractSchedule, Render, RenderApp, RenderSet,
@@ -89,7 +87,7 @@ pub struct Transparent2d {
     pub entity: Entity,
     pub pipeline: CachedRenderPipelineId,
     pub draw_function: DrawFunctionId,
-    pub batch_range: Range<u32>,
+    pub batch_range: BatchRange,
     pub extra_index: PhaseItemExtraIndex,
 }
 
@@ -105,12 +103,12 @@ impl PhaseItem for Transparent2d {
     }
 
     #[inline]
-    fn batch_range(&self) -> &Range<u32> {
+    fn batch_range(&self) -> &BatchRange {
         &self.batch_range
     }
 
     #[inline]
-    fn batch_range_mut(&mut self) -> &mut Range<u32> {
+    fn batch_range_mut(&mut self) -> &mut BatchRange {
         &mut self.batch_range
     }
 
@@ -120,7 +118,7 @@ impl PhaseItem for Transparent2d {
     }
 
     #[inline]
-    fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
+    fn batch_range_and_extra_index_mut(&mut self) -> (&mut BatchRange, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
 }

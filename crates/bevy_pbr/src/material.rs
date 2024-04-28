@@ -709,7 +709,7 @@ pub fn queue_material_meshes<M: Material>(
                             draw_function: draw_transmissive_pbr,
                             pipeline: pipeline_id,
                             distance,
-                            batch_range: 0..1,
+                            batch_range: BatchRange::direct(0, 1),
                             extra_index: PhaseItemExtraIndex::NONE,
                         });
                     } else if material.properties.render_method == OpaqueRendererMethod::Forward {
@@ -733,7 +733,7 @@ pub fn queue_material_meshes<M: Material>(
                             draw_function: draw_transmissive_pbr,
                             pipeline: pipeline_id,
                             distance,
-                            batch_range: 0..1,
+                            batch_range: BatchRange::direct(0, 1),
                             extra_index: PhaseItemExtraIndex::NONE,
                         });
                     } else if material.properties.render_method == OpaqueRendererMethod::Forward {
@@ -758,7 +758,7 @@ pub fn queue_material_meshes<M: Material>(
                         draw_function: draw_transparent_pbr,
                         pipeline: pipeline_id,
                         distance,
-                        batch_range: 0..1,
+                        batch_range: BatchRange::direct(0, 1),
                         extra_index: PhaseItemExtraIndex::NONE,
                     });
                 }
