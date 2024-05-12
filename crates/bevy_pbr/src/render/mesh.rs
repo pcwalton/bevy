@@ -1070,7 +1070,6 @@ impl FromWorld for MeshPipeline {
         )> = SystemState::new(world);
         let (render_device, default_sampler, render_queue, view_layouts) =
             system_state.get_mut(world);
-
         let clustered_forward_buffer_binding_type = render_device
             .get_supported_read_only_binding_type(CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT);
 
@@ -1134,6 +1133,10 @@ impl MeshPipeline {
                 &self.dummy_white_gpu_image.sampler,
             ))
         }
+    }
+
+    pub fn get_view_layout(&self, layout_key: MeshPipelineViewLayoutKey) -> &BindGroupLayout {
+        self.view_layouts.get_view_layout(layout_key)
     }
 }
 
