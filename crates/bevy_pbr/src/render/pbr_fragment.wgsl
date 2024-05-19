@@ -257,6 +257,47 @@ fn pbr_input_from_standard_material(
 #endif  // PBR_MULTI_LAYER_MATERIAL_TEXTURES_SUPPORTED
 #endif  // VERTEX_UVS
 
+        // Sheen color
+        pbr_input.material.sheen_color = pbr_bindings::material.sheen_color;
+#ifdef VERTEX_UVS
+#ifdef PBR_MULTI_LAYER_MATERIAL_TEXTURES_SUPPORTED
+        if ((pbr_bindings::material.flags &
+                pbr_types::STANDARD_MATERIAL_FLAGS_SHEEN_COLOR_TEXTURE_BIT) != 0u) {
+            pbr_input.material.sheen_color *= pbr_functions::sample_texture(
+                pbr_bindings::sheen_color_texture,
+                pbr_bindings::sheen_color_sampler,
+#ifdef STANDARD_MATERIAL_SHEEN_COLOR_UV_B
+                uv_b,
+#else   // STANDARD_MATERIAL_SHEEN_COLOR_UV_B
+                uv,
+#endif  // STANDARD_MATERIAL_SHEEN_COLOR_UV_B
+                bias,
+            ).rgb;
+        }
+#endif  // PBR_MULTI_LAYER_MATERIAL_TEXTURES_SUPPORTED
+#endif  // VERTEX_UVS
+
+        // Sheen roughness
+        pbr_input.material.sheen_perceptual_roughness =
+            pbr_bindings::material.sheen_perceptual_roughness;
+#ifdef VERTEX_UVS
+#ifdef PBR_MULTI_LAYER_MATERIAL_TEXTURES_SUPPORTED
+        if ((pbr_bindings::material.flags &
+                pbr_types::STANDARD_MATERIAL_FLAGS_SHEEN_ROUGHNESS_TEXTURE_BIT) != 0u) {
+            pbr_input.material.sheen_perceptual_roughness *= pbr_functions::sample_texture(
+                pbr_bindings::sheen_roughness_texture,
+                pbr_bindings::sheen_roughness_sampler,
+#ifdef STANDARD_MATERIAL_SHEEN_ROUGHNESS_UV_B
+                uv_b,
+#else   // STANDARD_MATERIAL_SHEEN_ROUGHNESS_UV_B
+                uv,
+#endif  // STANDARD_MATERIAL_SHEEN_ROUGHNESS_UV_B
+                bias,
+            ).a;
+        }
+#endif  // PBR_MULTI_LAYER_MATERIAL_TEXTURES_SUPPORTED
+#endif  // VERTEX_UVS
+
         var specular_transmission: f32 = pbr_bindings::material.specular_transmission;
 #ifdef VERTEX_UVS
 #ifdef PBR_TRANSMISSION_TEXTURES_SUPPORTED

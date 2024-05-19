@@ -1022,6 +1022,9 @@ fn load_material(
         let anisotropy =
             AnisotropyExtension::parse(load_context, document, material).unwrap_or_default();
 
+        // Parse the `KHR_materials_sheen` extension data if necessary.
+        let sheen = SheenExtension::parse(load_context, document, material).unwrap_or_default();
+
         // We need to operate in the Linear color space and be willing to exceed 1.0 in our channels
         let base_emissive = LinearRgba::rgb(emissive[0], emissive[1], emissive[2]);
         let emissive = base_emissive * material.emissive_strength().unwrap_or(1.0);
@@ -1088,6 +1091,19 @@ fn load_material(
             anisotropy_rotation: anisotropy.anisotropy_rotation.unwrap_or_default() as f32,
             anisotropy_channel: anisotropy.anisotropy_channel,
             anisotropy_texture: anisotropy.anisotropy_texture,
+            sheen_color: match sheen.sheen_color_factor {
+                Some(color) => Color::linear_rgb(color[0], color[1], color[2]),
+                None => Color::NONE,
+            },
+            sheen_perceptual_roughness: sheen.sheen_roughness_factor.unwrap_or_default() as f32,
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_color_channel: sheen.sheen_color_channel,
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_color_texture: sheen.sheen_color_texture,
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_roughness_channel: sheen.sheen_roughness_channel,
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_roughness_texture: sheen.sheen_roughness_texture,
             ..Default::default()
         }
     })
@@ -1929,6 +1945,88 @@ impl AnisotropyExtension {
             anisotropy_rotation: extension.get("anisotropyRotation").and_then(Value::as_f64),
             anisotropy_channel: anisotropy_channel.unwrap_or_default(),
             anisotropy_texture,
+        })
+    }
+}
+
+/// Parsed data from the `KHR_materials_sheen` extension.
+///
+/// See the specification:
+/// <https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_sheen>
+#[derive(Default)]
+struct SheenExtension {
+    sheen_color_factor: Option<[f32; 3]>,
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    sheen_color_channel: UvChannel,
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    sheen_color_texture: Option<Handle<Image>>,
+    sheen_roughness_factor: Option<f64>,
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    sheen_roughness_channel: UvChannel,
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    sheen_roughness_texture: Option<Handle<Image>>,
+}
+
+impl SheenExtension {
+    #[allow(unused_variables)]
+    fn parse(
+        load_context: &mut LoadContext,
+        document: &Document,
+        material: &Material,
+    ) -> Option<SheenExtension> {
+        let extension = material
+            .extensions()?
+            .get("KHR_materials_sheen")?
+            .as_object()?;
+
+        let sheen_color_factor = extension
+            .get("sheenColorFactor")
+            .and_then(|value| value.as_array())
+            .and_then(|values| {
+                let mut color = vec![];
+                for value in values.iter().map(|value| value.as_f64()) {
+                    color.push(value? as f32);
+                }
+                color.try_into().ok()
+            });
+
+        #[cfg(feature = "pbr_multi_layer_material_textures")]
+        let (sheen_color_channel, sheen_color_texture) = extension
+            .get("sheenColorTexture")
+            .and_then(|value| value::from_value::<json::texture::Info>(value.clone()).ok())
+            .map(|json_info| {
+                (
+                    get_uv_channel(material, "sheen color", json_info.tex_coord),
+                    texture_handle_from_info(load_context, document, &json_info),
+                )
+            })
+            .unzip();
+
+        #[cfg(feature = "pbr_multi_layer_material_textures")]
+        let (sheen_roughness_channel, sheen_roughness_texture) = extension
+            .get("sheenRoughnessTexture")
+            .and_then(|value| value::from_value::<json::texture::Info>(value.clone()).ok())
+            .map(|json_info| {
+                (
+                    get_uv_channel(material, "sheen roughness", json_info.tex_coord),
+                    texture_handle_from_info(load_context, document, &json_info),
+                )
+            })
+            .unzip();
+
+        Some(SheenExtension {
+            sheen_color_factor,
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_color_channel: sheen_color_channel.unwrap_or_default(),
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_color_texture,
+            sheen_roughness_factor: extension
+                .get("sheenRoughnessFactor")
+                .and_then(Value::as_f64),
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_roughness_channel: sheen_roughness_channel.unwrap_or_default(),
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_roughness_texture,
         })
     }
 }

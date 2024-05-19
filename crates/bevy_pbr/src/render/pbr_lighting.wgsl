@@ -4,10 +4,29 @@
     mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
     mesh_view_bindings as view_bindings,
 }
-#import bevy_render::maths::PI
+#import bevy_render::maths::{PI, INV_PI_2}
 
 const LAYER_BASE: u32 = 0;
+
+#ifdef LAYER_CLEARCOAT_ONE
 const LAYER_CLEARCOAT: u32 = 1;
+#else ifdef LAYER_CLEARCOAT_TWO
+const LAYER_CLEARCOAT: u32 = 2;
+#endif
+
+#ifdef LAYER_SHEEN_ONE
+const LAYER_SHEEN: u32 = 1;
+#else ifdef LAYER_SHEEN_TWO
+const LAYER_SHEEN: u32 = 2;
+#endif
+
+#ifdef LAYER_COUNT_ONE
+const LAYER_COUNT: u32 = 1;
+#else ifdef LAYER_COUNT_TWO
+const LAYER_COUNT: u32 = 2;
+#else ifdef LAYER_COUNT_THREE
+const LAYER_COUNT: u32 = 3;
+#endif
 
 // From the Filament design doc
 // https://google.github.io/filament/Filament.html#table_symbols
@@ -43,8 +62,8 @@ const LAYER_CLEARCOAT: u32 = 1;
 //
 // The above integration needs to be approximated.
 
-// Input to a lighting function for a single layer (either the base layer or the
-// clearcoat layer).
+// Input to a lighting function for a single layer (the base layer, the
+// clearcoat layer, or the sheen layer).
 struct LayerLightingInput {
     // The normal vector.
     N: vec3<f32>,
@@ -62,11 +81,7 @@ struct LayerLightingInput {
 // Input to a lighting function (`point_light`, `spot_light`,
 // `directional_light`).
 struct LightingInput {
-#ifdef STANDARD_MATERIAL_CLEARCOAT
-    layers: array<LayerLightingInput, 2>,
-#else   // STANDARD_MATERIAL_CLEARCOAT
-    layers: array<LayerLightingInput, 1>,
-#endif  // STANDARD_MATERIAL_CLEARCOAT
+    layers: array<LayerLightingInput, LAYER_COUNT>,
 
     // The world-space position.
     P: vec3<f32>,
@@ -103,6 +118,10 @@ struct LightingInput {
     // the tangent direction.
     Ba: vec3<f32>,
 #endif  // STANDARD_MATERIAL_ANISOTROPY
+
+#ifdef STANDARD_MATERIAL_SHEEN
+    sheen_color: vec3<f32>,
+#endif  // STANDARD_MATERIAL_SHEEN
 }
 
 // Values derived from the `LightingInput` for both diffuse and specular lights.
@@ -169,6 +188,11 @@ fn D_GGX_anisotropic(at: f32, ab: f32, NdotH: f32, TdotH: f32, BdotH: f32) -> f3
     return d;
 }
 
+fn D_Charlie(alpha_g: f32, NdotH: f32) -> f32 {
+    let inv_r = 1.0 / alpha_g;
+    return (2.0 + inv_r) * pow(1.0 - NdotH * NdotH, inv_r * 0.5) * INV_PI_2;
+}
+
 // Visibility function (Specular G)
 // V(v,l,a) = G(v,l,α) / { 4 (n⋅v) (n⋅l) }
 // such that f_r becomes
@@ -209,6 +233,28 @@ fn V_Kelemen(LdotH: f32) -> f32 {
     return 0.25 / (LdotH * LdotH);
 }
 
+fn l_Charlie(x: f32, alpha_g: f32) -> f32 {
+    let one_minus_alpha_sq = (1.0 - alpha_g) * (1.0 - alpha_g);
+    let a = mix(21.5473, 25.3245, one_minus_alpha_sq);
+    let b = mix(3.82987, 3.32435, one_minus_alpha_sq);
+    let c = mix(0.19823, 0.16801, one_minus_alpha_sq);
+    let d = mix(-1.97760, -1.27393, one_minus_alpha_sq);
+    let e = mix(-4.32054, -4.85967, one_minus_alpha_sq);
+    return a / (1.0 + b * pow(x, c)) + d * x + e;
+}
+
+fn lambda_Charlie(cos_theta: f32, alpha_g: f32) -> f32 {
+    if (abs(cos_theta) < 0.5) {
+        return exp(l_Charlie(1.0 - cos_theta, alpha_g));
+    }
+    return exp(2.0 * l_Charlie(0.5, alpha_g) - l_Charlie(1.0 - cos_theta, alpha_g));
+}
+
+fn V_Charlie(alpha_g: f32, NdotL: f32, NdotV: f32) -> f32 {
+    return 1.0 / ((1.0 + lambda_Charlie(NdotV, alpha_g) + lambda_Charlie(NdotL, alpha_g)) *
+        (4.0 * NdotV * NdotL));
+}
+
 // Fresnel function
 // see https://google.github.io/filament/Filament.html#citation-schlick94
 // F_Schlick(v,h,f_0,f_90) = f_0 + (f_90 − f_0) (1 − v⋅h)^5
@@ -227,6 +273,15 @@ fn fresnel(f0: vec3<f32>, LdotH: f32) -> vec3<f32> {
     // see https://google.github.io/filament/Filament.html#lighting/occlusion
     let f90 = saturate(dot(f0, vec3<f32>(50.0 * 0.33)));
     return F_Schlick_vec(f0, f90, LdotH);
+}
+
+fn E_Charlie(cos_theta: f32, r_b: f32) -> f32 {
+    return 0.7546 * cos_theta * cos_theta +
+        -0.0529 * cos_theta * r_b +
+        -0.3688 * r_b * r_b +
+        -1.3575 * cos_theta +
+        0.6528 * r_b +
+        0.5519;
 }
 
 // Given distribution, visibility, and Fresnel term, calculates the final
@@ -317,6 +372,8 @@ fn specular(
     return Fr;
 }
 
+#ifdef STANDARD_MATERIAL_CLEARCOAT
+
 // Calculates the specular light for the clearcoat layer. Returns Fc, the
 // Fresnel term, in the first channel, and Frc, the specular clearcoat light, in
 // the second channel.
@@ -344,6 +401,8 @@ fn specular_clearcoat(
     let Frc = (specular_intensity * Dc * Vc) * Fc;
     return vec2(Fc, Frc);
 }
+
+#endif  // STANDARD_MATERIAL_CLEARCOAT
 
 #ifdef STANDARD_MATERIAL_ANISOTROPY
 
@@ -386,6 +445,52 @@ fn specular_anisotropy(
 }
 
 #endif  // STANDARD_MATERIAL_ANISOTROPY
+
+#ifdef STANDARD_MATERIAL_SHEEN
+
+fn specular_sheen(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+    L: vec3<f32>,
+    specular_intensity: f32,
+) -> vec3<f32> {
+    let alpha_g = (*input).layers[LAYER_SHEEN].roughness;
+    let NdotV = (*input).layers[LAYER_SHEEN].NdotV;
+    let F0 = (*input).F0_;
+    let NdotL = (*derived_input).NdotL;
+    let NdotH = (*derived_input).NdotH;
+    let LdotH = (*derived_input).LdotH;
+
+    let Ds = D_Charlie(alpha_g, NdotH);
+    let Vs = V_Charlie(alpha_g, NdotL, NdotV);
+    let Fs = fresnel(F0, LdotH);
+
+    // Calculate the specular light.
+    let Fr = specular_multiscatter(input, Ds, Vs, Fs, specular_intensity);
+    return Fr;
+}
+
+fn layer_sheen(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+    base_color: vec3<f32>,
+    sheen_brdf: vec3<f32>,
+) -> vec3<f32> {
+    let roughness_sheen = (*input).layers[LAYER_SHEEN].perceptual_roughness;
+    let NdotV = (*input).layers[LAYER_SHEEN].NdotV;
+    let NdotL = (*derived_input).NdotL;
+
+    let sheen_color = (*input).sheen_color;
+    let sheen_color_max = max(max(sheen_color.r, sheen_color.g), sheen_color.b);
+    let sheen_albedo_scaling = min(
+        1.0 - sheen_color_max * E_Charlie(NdotV, roughness_sheen),
+        1.0 - sheen_color_max * E_Charlie(NdotL, roughness_sheen),
+    );
+
+    return sheen_color * sheen_brdf + base_color * sheen_albedo_scaling;
+}
+
+#endif  // STANDARD_MATERIAL_SHEEN
 
 // Diffuse BRDF
 // https://google.github.io/filament/Filament.html#materialsystem/diffusebrdf
@@ -575,12 +680,14 @@ fn directional_light(light_id: u32, input: ptr<function, LightingInput>) -> vec3
 
     let diffuse = diffuse_color * Fd_Burley(input, &derived_input);
 
+    // Handle anisotropy.
 #ifdef STANDARD_MATERIAL_ANISOTROPY
     let specular_light = specular_anisotropy(input, &derived_input, L, 1.0);
 #else   // STANDARD_MATERIAL_ANISOTROPY
     let specular_light = specular(input, &derived_input, 1.0);
 #endif  // STANDARD_MATERIAL_ANISOTROPY
 
+    // Calculate the clearcoat contribution.
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     let clearcoat_N = (*input).layers[LAYER_CLEARCOAT].N;
     let clearcoat_strength = (*input).clearcoat_strength;
@@ -596,15 +703,32 @@ fn directional_light(light_id: u32, input: ptr<function, LightingInput>) -> vec3
     let Frc = Fc_Frc.g;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
-    var color: vec3<f32>;
+#ifdef STANDARD_MATERIAL_SHEEN
+    // Derived lighting input only depends on N, V, and L, which are identical
+    // for the base and sheen layers, so we can just reuse the base layer's
+    // derived input.
+    let specular_sheen_light = specular_sheen(input, &derived_input, L, 1.0);
+#endif  // STANDARD_MATERIAL_SHEEN
+
+    // Calculate the base color.
+    var color = (diffuse + specular_light) * derived_input.NdotL;
+
+    // Layer sheen on top.
+    //
+    // Per the `KHR_materials_sheen` spec, clearcoat must go on top of sheen.
+#ifdef STANDARD_MATERIAL_SHEEN
+    color = layer_sheen(input, &derived_input, color, specular_sheen_light);
+#endif  // STANDARD_MATERIAL_SHEEN
+
+    // Calculate the final color.
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     // Account for the Fresnel term from the clearcoat darkening the main layer.
     //
     // <https://google.github.io/filament/Filament.html#materialsystem/clearcoatmodel/integrationinthesurfaceresponse>
+    //
+    // TODO: Fix this to take sheen into account! Use algebra
     color = (diffuse + specular_light * inv_Fc) * inv_Fc * derived_input.NdotL +
         Frc * derived_clearcoat_input.NdotL;
-#else   // STANDARD_MATERIAL_CLEARCOAT
-    color = (diffuse + specular_light) * derived_input.NdotL;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
     return color * (*light).color.rgb;

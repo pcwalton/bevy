@@ -32,4 +32,8 @@
 @group(2) @binding(24) var clearcoat_roughness_sampler: sampler;
 @group(2) @binding(25) var clearcoat_normal_texture: texture_2d<f32>;
 @group(2) @binding(26) var clearcoat_normal_sampler: sampler;
+@group(2) @binding(27) var sheen_color_texture: texture_2d<f32>;
+@group(2) @binding(28) var sheen_color_sampler: sampler;
+@group(2) @binding(29) var sheen_roughness_texture: texture_2d<f32>;
+@group(2) @binding(30) var sheen_roughness_sampler: sampler;
 #endif

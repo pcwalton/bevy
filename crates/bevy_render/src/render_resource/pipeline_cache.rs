@@ -935,7 +935,24 @@ impl PipelineCache {
                 PipelineCacheError::ProcessShaderError(err) => {
                     let error_detail =
                         err.emit_to_string(&self.shader_cache.lock().unwrap().composer);
-                    error!("failed to process shader:\n{}", error_detail);
+                    let shader_description = match cached_pipeline.descriptor {
+                        PipelineDescriptor::RenderPipelineDescriptor(ref descriptor) => {
+                            match &descriptor.label {
+                                Some(ref label) => format!(" for render pipeline \"{}\"", label),
+                                None => "".to_owned(),
+                            }
+                        }
+                        PipelineDescriptor::ComputePipelineDescriptor(ref descriptor) => {
+                            match &descriptor.label {
+                                Some(ref label) => format!(" for compute pipeline \"{}\"", label),
+                                None => "".to_owned(),
+                            }
+                        }
+                    };
+                    error!(
+                        "failed to process shader{}:\n{}",
+                        shader_description, error_detail
+                    );
                     return;
                 }
                 PipelineCacheError::CreateShaderModule(description) => {

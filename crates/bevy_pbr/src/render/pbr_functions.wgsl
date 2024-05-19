@@ -6,7 +6,7 @@
     mesh_view_bindings as view_bindings,
     mesh_view_types,
     lighting,
-    lighting::{LAYER_BASE, LAYER_CLEARCOAT},
+    lighting::{LAYER_BASE, LAYER_CLEARCOAT, LAYER_SHEEN},
     transmission,
     clustered_forward as clustering,
     shadows,
@@ -324,6 +324,12 @@ fn apply_pbr_lighting(
     let clearcoat_R = reflect(-in.V, clearcoat_N);
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
+#ifdef STANDARD_MATERIAL_SHEEN
+    let sheen_color = in.material.sheen_color.rgb;
+    let sheen_perceptual_roughness = in.material.sheen_perceptual_roughness;
+    let sheen_roughness = lighting::perceptualRoughnessToRoughness(sheen_perceptual_roughness);
+#endif  // STANDARD_MATERIAL_SHEEN
+
     let diffuse_color = calculate_diffuse_color(
         output_color.rgb,
         metallic,
@@ -365,6 +371,14 @@ fn apply_pbr_lighting(
     lighting_input.layers[LAYER_CLEARCOAT].roughness = clearcoat_roughness;
     lighting_input.clearcoat_strength = clearcoat;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
+#ifdef STANDARD_MATERIAL_SHEEN
+    lighting_input.layers[LAYER_SHEEN].NdotV = NdotV;
+    lighting_input.layers[LAYER_SHEEN].N = in.N;
+    lighting_input.layers[LAYER_SHEEN].R = R;
+    lighting_input.layers[LAYER_SHEEN].perceptual_roughness = sheen_perceptual_roughness;
+    lighting_input.layers[LAYER_SHEEN].roughness = sheen_roughness;
+    lighting_input.sheen_color = sheen_color;
+#endif  // STANDARD_MATERIAL_SHEEN
 #ifdef STANDARD_MATERIAL_ANISOTROPY
     lighting_input.anisotropy = in.anisotropy_strength;
     lighting_input.Ta = in.anisotropy_T;
@@ -392,6 +406,14 @@ fn apply_pbr_lighting(
     transmissive_lighting_input.layers[LAYER_CLEARCOAT].roughness = 0.0;
     transmissive_lighting_input.clearcoat_strength = 0.0;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
+#ifdef STANDARD_MATERIAL_SHEEN
+    transmissive_lighting_input.layers[LAYER_SHEEN].NdotV = 0.0;
+    transmissive_lighting_input.layers[LAYER_SHEEN].N = vec3(0.0);
+    transmissive_lighting_input.layers[LAYER_SHEEN].R = vec3(0.0);
+    transmissive_lighting_input.layers[LAYER_SHEEN].perceptual_roughness = 0.0;
+    transmissive_lighting_input.layers[LAYER_SHEEN].roughness = 0.0;
+    transmissive_lighting_input.clearcoat_strength = 0.0;
+#endif  // STANDARD_MATERIAL_SHEEN
 #ifdef STANDARD_MATERIAL_ANISOTROPY
     lighting_input.anisotropy = in.anisotropy_strength;
     lighting_input.Ta = in.anisotropy_T;
@@ -647,6 +669,15 @@ fn apply_pbr_lighting(
     transmissive_environment_light_input.layers[LAYER_CLEARCOAT].perceptual_roughness = 0.0;
     transmissive_environment_light_input.layers[LAYER_CLEARCOAT].roughness = 0.0;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
+#ifdef STANDARD_MATERIAL_SHEEN
+    // No sheen.
+    transmissive_environment_light_input.clearcoat_strength = 0.0;
+    transmissive_environment_light_input.layers[LAYER_SHEEN].NdotV = 0.0;
+    transmissive_environment_light_input.layers[LAYER_SHEEN].N = in.N;
+    transmissive_environment_light_input.layers[LAYER_SHEEN].R = vec3(0.0);
+    transmissive_environment_light_input.layers[LAYER_SHEEN].perceptual_roughness = 0.0;
+    transmissive_environment_light_input.layers[LAYER_SHEEN].roughness = 0.0;
+#endif  // STANDARD_MATERIAL_SHEEN
 
     let transmitted_environment_light =
         environment_map::environment_map_light(&transmissive_environment_light_input, false);

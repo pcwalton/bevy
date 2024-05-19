@@ -19,6 +19,8 @@ struct StandardMaterial {
     clearcoat_perceptual_roughness: f32,
     anisotropy_strength: f32,
     anisotropy_rotation: vec2<f32>,
+    sheen_color: vec3<f32>,
+    sheen_perceptual_roughness: f32,
     // 'flags' is a bit field indicating various options. u32 is 32 bits so we have up to 32 options.
     flags: u32,
     alpha_cutoff: f32,
@@ -52,6 +54,8 @@ const STANDARD_MATERIAL_FLAGS_CLEARCOAT_TEXTURE_BIT: u32          = 16384u;
 const STANDARD_MATERIAL_FLAGS_CLEARCOAT_ROUGHNESS_TEXTURE_BIT: u32 = 32768u;
 const STANDARD_MATERIAL_FLAGS_CLEARCOAT_NORMAL_TEXTURE_BIT: u32   = 65536u;
 const STANDARD_MATERIAL_FLAGS_ANISOTROPY_TEXTURE_BIT: u32         = 131072u;
+const STANDARD_MATERIAL_FLAGS_SHEEN_COLOR_TEXTURE_BIT: u32        = 262144u;
+const STANDARD_MATERIAL_FLAGS_SHEEN_ROUGHNESS_TEXTURE_BIT: u32    = 524288u;
 const STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS: u32       = 3758096384u; // (0b111u32 << 29)
 const STANDARD_MATERIAL_FLAGS_ALPHA_MODE_OPAQUE: u32              = 0u;          // (0u32 << 29)
 const STANDARD_MATERIAL_FLAGS_ALPHA_MODE_MASK: u32                = 536870912u;  // (1u32 << 29)

@@ -540,6 +540,26 @@ pub struct StandardMaterial {
     #[sampler(14)]
     pub anisotropy_texture: Option<Handle<Image>>,
 
+    pub sheen_color: Color,
+
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    pub sheen_color_channel: UvChannel,
+
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    #[texture(27)]
+    #[sampler(28)]
+    pub sheen_color_texture: Option<Handle<Image>>,
+
+    pub sheen_perceptual_roughness: f32,
+
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    pub sheen_roughness_channel: UvChannel,
+
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    #[texture(29)]
+    #[sampler(30)]
+    pub sheen_roughness_texture: Option<Handle<Image>>,
+
     /// Support two-sided lighting by automatically flipping the normals for "back" faces
     /// within the PBR lighting shader.
     ///
@@ -811,6 +831,16 @@ impl Default for StandardMaterial {
             anisotropy_rotation: 0.0,
             anisotropy_channel: UvChannel::Uv0,
             anisotropy_texture: None,
+            sheen_color: Color::NONE,
+            sheen_perceptual_roughness: 0.0,
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_color_channel: UvChannel::Uv0,
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_color_texture: None,
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_roughness_channel: UvChannel::Uv0,
+            #[cfg(feature = "pbr_multi_layer_material_textures")]
+            sheen_roughness_texture: None,
             flip_normal_map_y: false,
             double_sided: false,
             cull_mode: Some(Face::Back),
@@ -877,6 +907,8 @@ bitflags::bitflags! {
         const CLEARCOAT_ROUGHNESS_TEXTURE = 1 << 15;
         const CLEARCOAT_NORMAL_TEXTURE   = 1 << 16;
         const ANISOTROPY_TEXTURE         = 1 << 17;
+        const SHEEN_COLOR_TEXTURE        = 1 << 18;
+        const SHEEN_ROUGHNESS_TEXTURE    = 1 << 19;
         const ALPHA_MODE_RESERVED_BITS   = Self::ALPHA_MODE_MASK_BITS << Self::ALPHA_MODE_SHIFT_BITS; // ← Bitmask reserving bits for the `AlphaMode`
         const ALPHA_MODE_OPAQUE          = 0 << Self::ALPHA_MODE_SHIFT_BITS;                          // ← Values are just sequential values bitshifted into
         const ALPHA_MODE_MASK            = 1 << Self::ALPHA_MODE_SHIFT_BITS;                          //   the bitmask, and can range from 0 to 7.
@@ -930,6 +962,8 @@ pub struct StandardMaterialUniform {
     pub clearcoat_perceptual_roughness: f32,
     pub anisotropy_strength: f32,
     pub anisotropy_rotation: Vec2,
+    pub sheen_color: Vec3,
+    pub sheen_perceptual_roughness: f32,
     /// The [`StandardMaterialFlags`] accessible in the `wgsl` shader.
     pub flags: u32,
     /// When the alpha mode mask flag is set, any base color alpha above this cutoff means fully opaque,
@@ -981,6 +1015,7 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
         if self.depth_map.is_some() {
             flags |= StandardMaterialFlags::DEPTH_MAP;
         }
+
         #[cfg(feature = "pbr_transmission_textures")]
         {
             if self.specular_transmission_texture.is_some() {
@@ -1008,6 +1043,12 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
             }
             if self.clearcoat_normal_texture.is_some() {
                 flags |= StandardMaterialFlags::CLEARCOAT_NORMAL_TEXTURE;
+            }
+            if self.sheen_color_texture.is_some() {
+                flags |= StandardMaterialFlags::SHEEN_COLOR_TEXTURE;
+            }
+            if self.sheen_roughness_texture.is_some() {
+                flags |= StandardMaterialFlags::SHEEN_ROUGHNESS_TEXTURE;
             }
         }
 
@@ -1070,6 +1111,8 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
             clearcoat_perceptual_roughness: self.clearcoat_perceptual_roughness,
             anisotropy_strength: self.anisotropy_strength,
             anisotropy_rotation,
+            sheen_color: LinearRgba::from(self.sheen_color).to_vec3(),
+            sheen_perceptual_roughness: self.sheen_perceptual_roughness,
             diffuse_transmission: self.diffuse_transmission,
             specular_transmission: self.specular_transmission,
             thickness: self.thickness,
@@ -1103,18 +1146,20 @@ bitflags! {
         const CLEARCOAT                = 0x000040;
         const CLEARCOAT_NORMAL_MAP     = 0x000080;
         const ANISOTROPY               = 0x000100;
-        const BASE_COLOR_UV            = 0x000200;
-        const EMISSIVE_UV              = 0x000400;
-        const METALLIC_ROUGHNESS_UV    = 0x000800;
-        const OCCLUSION_UV             = 0x001000;
-        const SPECULAR_TRANSMISSION_UV = 0x002000;
-        const THICKNESS_UV             = 0x004000;
-        const DIFFUSE_TRANSMISSION_UV  = 0x008000;
-        const NORMAL_MAP_UV            = 0x010000;
-        const ANISOTROPY_UV            = 0x020000;
-        const CLEARCOAT_UV             = 0x040000;
-        const CLEARCOAT_ROUGHNESS_UV   = 0x080000;
-        const CLEARCOAT_NORMAL_UV      = 0x100000;
+        const SHEEN                    = 0x000200;
+        const BASE_COLOR_UV            = 0x000400;
+        const EMISSIVE_UV              = 0x000800;
+        const METALLIC_ROUGHNESS_UV    = 0x001000;
+        const OCCLUSION_UV             = 0x002000;
+        const SPECULAR_TRANSMISSION_UV = 0x004000;
+        const THICKNESS_UV             = 0x008000;
+        const DIFFUSE_TRANSMISSION_UV  = 0x010000;
+        const NORMAL_MAP_UV            = 0x020000;
+        const ANISOTROPY_UV            = 0x040000;
+        const CLEARCOAT_UV             = 0x080000;
+        const CLEARCOAT_ROUGHNESS_UV   = 0x100000;
+        const CLEARCOAT_NORMAL_UV      = 0x200000;
+        const SHEEN_ROUGHNESS_UV       = 0x400000;
         const DEPTH_BIAS               = 0xffffffff_00000000;
     }
 }
@@ -1163,6 +1208,11 @@ impl From<&StandardMaterial> for StandardMaterialKey {
         key.set(
             StandardMaterialKey::ANISOTROPY,
             material.anisotropy_strength > 0.0,
+        );
+
+        key.set(
+            StandardMaterialKey::SHEEN,
+            material.sheen_color.alpha() > 0.0,
         );
 
         key.set(
@@ -1296,8 +1346,26 @@ impl Material for StandardMaterial {
         _layout: &MeshVertexBufferLayoutRef,
         key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        let mut pbr_layer_shader_defs = vec![];
+        let mut pbr_layer_count = 1;
+        if key.bind_group_data.contains(StandardMaterialKey::CLEARCOAT) {
+            pbr_layer_shader_defs
+                .push(format!("LAYER_CLEARCOAT_{}", spell_out(pbr_layer_count)).into());
+            pbr_layer_count += 1;
+        }
+        if key.bind_group_data.contains(StandardMaterialKey::SHEEN) {
+            pbr_layer_shader_defs
+                .push(format!("LAYER_SHEEN_{}", spell_out(pbr_layer_count)).into());
+            pbr_layer_count += 1;
+        }
+        pbr_layer_shader_defs.push(format!("LAYER_COUNT_{}", spell_out(pbr_layer_count)).into());
+        println!("pbr_layer_shader_defs={:?}", pbr_layer_shader_defs);
+
         if let Some(fragment) = descriptor.fragment.as_mut() {
             let shader_defs = &mut fragment.shader_defs;
+            shader_defs.extend(pbr_layer_shader_defs.iter().cloned());
+
+            shader_defs.push("WHATEVER".into());
 
             for (flags, shader_def) in [
                 (
@@ -1326,6 +1394,7 @@ impl Material for StandardMaterial {
                     StandardMaterialKey::CLEARCOAT_NORMAL_MAP,
                     "STANDARD_MATERIAL_CLEARCOAT_NORMAL_MAP",
                 ),
+                (StandardMaterialKey::SHEEN, "STANDARD_MATERIAL_SHEEN"),
                 (
                     StandardMaterialKey::ANISOTROPY,
                     "STANDARD_MATERIAL_ANISOTROPY",
@@ -1378,12 +1447,18 @@ impl Material for StandardMaterial {
                     StandardMaterialKey::ANISOTROPY_UV,
                     "STANDARD_MATERIAL_ANISOTROPY_UV",
                 ),
+                (
+                    StandardMaterialKey::SHEEN_ROUGHNESS_UV,
+                    "STANDARD_MATERIAL_SHEEN_ROUGHNESS_UV_B",
+                ),
             ] {
                 if key.bind_group_data.intersects(flags) {
                     shader_defs.push(shader_def.into());
                 }
             }
         }
+
+        descriptor.vertex.shader_defs.extend(pbr_layer_shader_defs);
 
         descriptor.primitive.cull_mode = if key
             .bind_group_data
@@ -1404,5 +1479,14 @@ impl Material for StandardMaterial {
                 (key.bind_group_data.bits() >> STANDARD_MATERIAL_KEY_DEPTH_BIAS_SHIFT) as i32;
         }
         Ok(())
+    }
+}
+
+fn spell_out(number: u32) -> &'static str {
+    match number {
+        1 => "ONE",
+        2 => "TWO",
+        3 => "THREE",
+        _ => panic!("`number` must be between [1, 3]"),
     }
 }
