@@ -292,7 +292,7 @@ impl Plugin for PbrPlugin {
             .register_type::<FogSettings>()
             .register_type::<ShadowFilteringMethod>()
             .init_resource::<AmbientLight>()
-            .init_resource::<GlobalVisiblePointLights>()
+            .init_resource::<GlobalVisibleClusterables>()
             .init_resource::<DirectionalLightShadowMap>()
             .init_resource::<PointLightShadowMap>()
             .register_type::<DefaultOpaqueRendererMethod>()
@@ -332,7 +332,11 @@ impl Plugin for PbrPlugin {
                 PostUpdate,
                 (
                     add_clusters.in_set(SimulationLightSystems::AddClusters),
-                    assign_lights_to_clusters
+                    update_clusterable_components_for_point_lights
+                        .in_set(SimulationLightSystems::UpdateClusterableComponents),
+                    update_clusterable_components_for_spot_lights
+                        .in_set(SimulationLightSystems::UpdateClusterableComponents),
+                    assign_clusters
                         .in_set(SimulationLightSystems::AssignLightsToClusters)
                         .after(TransformSystem::TransformPropagate)
                         .after(VisibilitySystems::CheckVisibility)

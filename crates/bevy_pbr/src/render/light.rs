@@ -71,13 +71,13 @@ pub struct GpuPointLight {
 
 #[derive(ShaderType)]
 pub struct GpuPointLightsUniform {
-    data: Box<[GpuPointLight; MAX_UNIFORM_BUFFER_POINT_LIGHTS]>,
+    data: Box<[GpuPointLight; MAX_UNIFORM_BUFFER_CLUSTERABLES]>,
 }
 
 impl Default for GpuPointLightsUniform {
     fn default() -> Self {
         Self {
-            data: Box::new([GpuPointLight::default(); MAX_UNIFORM_BUFFER_POINT_LIGHTS]),
+            data: Box::new([GpuPointLight::default(); MAX_UNIFORM_BUFFER_CLUSTERABLES]),
         }
     }
 }
@@ -112,7 +112,7 @@ impl GpuPointLights {
     fn set(&mut self, mut lights: Vec<GpuPointLight>) {
         match self {
             GpuPointLights::Uniform(buffer) => {
-                let len = lights.len().min(MAX_UNIFORM_BUFFER_POINT_LIGHTS);
+                let len = lights.len().min(MAX_UNIFORM_BUFFER_CLUSTERABLES);
                 let src = &lights[..len];
                 let dst = &mut buffer.get_mut().data[..len];
                 dst.copy_from_slice(src);
@@ -205,7 +205,7 @@ pub struct GpuLights {
 }
 
 // NOTE: this must be kept in sync with the same constants in pbr.frag
-pub const MAX_UNIFORM_BUFFER_POINT_LIGHTS: usize = 256;
+pub const MAX_UNIFORM_BUFFER_CLUSTERABLES: usize = 256;
 
 //NOTE: When running bevy on Adreno GPU chipsets in WebGL, any value above 1 will result in a crash
 // when loading the wgsl "pbr_functions.wgsl" in the function apply_fog.
@@ -290,9 +290,9 @@ pub fn extract_clusters(
             continue;
         }
 
-        let num_entities: usize = clusters.lights.iter().map(|l| l.entities.len()).sum();
-        let mut data = Vec::with_capacity(clusters.lights.len() + num_entities);
-        for cluster_lights in &clusters.lights {
+        let num_entities: usize = clusters.clusterables.iter().map(|l| l.entities.len()).sum();
+        let mut data = Vec::with_capacity(clusters.clusterables.len() + num_entities);
+        for cluster_lights in &clusters.clusterables {
             data.push(ExtractedClustersPointLightsElement::ClusterHeader(
                 cluster_lights.point_light_count as u32,
                 cluster_lights.spot_light_count as u32,
@@ -318,7 +318,7 @@ pub fn extract_lights(
     mut commands: Commands,
     point_light_shadow_map: Extract<Res<PointLightShadowMap>>,
     directional_light_shadow_map: Extract<Res<DirectionalLightShadowMap>>,
-    global_point_lights: Extract<Res<GlobalVisiblePointLights>>,
+    global_point_lights: Extract<Res<GlobalVisibleClusterables>>,
     point_lights: Extract<
         Query<(
             &PointLight,
