@@ -402,7 +402,7 @@ impl Plugin for PbrPlugin {
             .add_systems(
                 Render,
                 (
-                    prepare_lights
+                    prepare_clusterables
                         .in_set(RenderSet::ManageViews)
                         .after(prepare_assets::<GpuImage>),
                     prepare_clusters.in_set(RenderSet::PrepareResources),
