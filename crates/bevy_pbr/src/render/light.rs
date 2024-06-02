@@ -1,3 +1,5 @@
+//! Clustered lighting.
+
 use bevy_asset::AssetId;
 use bevy_core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
 use bevy_ecs::entity::EntityHashSet;
@@ -23,6 +25,7 @@ use bevy_transform::{components::GlobalTransform, prelude::Transform};
 #[cfg(feature = "trace")]
 use bevy_utils::tracing::info_span;
 use bevy_utils::tracing::{error, warn};
+use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 use std::mem;
 use std::{hash::Hash, num::NonZeroU64, ops::Range};
@@ -210,6 +213,35 @@ pub const MAX_CASCADES_PER_LIGHT: usize = 1;
 pub struct ShadowSamplers {
     pub point_light_sampler: Sampler,
     pub directional_light_sampler: Sampler,
+}
+
+struct LightLimits {
+    max_texture_array_layers: usize,
+    max_texture_cubes: usize,
+}
+
+/// An internal helper structure used during [`prepare_lights`] that counts
+/// various resources.
+#[derive(Default)]
+struct LightCounts {
+    /// The number of visible point lights.
+    point_light_count: usize,
+    /// The number of shadow maps we need for point lights.
+    point_light_shadow_maps_count: usize,
+    /// The number of directional lights that interact with volumetric fog.
+    directional_volumetric_count: usize,
+    /// The number of directional lights with shadows enabled.
+    directional_shadow_enabled_count: usize,
+    /// The number of shadow maps we need for spot lights.
+    spot_light_shadow_maps_count: usize,
+}
+
+bitflags! {
+    #[derive(Default)]
+    pub struct LightWarnings: u8 {
+        const MAX_DIRECTIONAL_LIGHTS_EXCEEDED = 0x1;
+        const MAX_CASCADES_PER_LIGHT_EXCEEDED = 0x2;
+    }
 }
 
 // TODO: this pattern for initializing the shaders / pipeline isn't ideal. this should be handled by the asset system
@@ -686,6 +718,7 @@ pub(crate) fn spot_light_projection_matrix(angle: f32) -> Mat4 {
     Mat4::perspective_infinite_reverse_rh(angle * 2.0, 1.0, POINT_LIGHT_NEAR_Z)
 }
 
+/// Performs the light clustering, assigning lights to frustum slices.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_lights(
     mut commands: Commands,
@@ -704,8 +737,7 @@ pub fn prepare_lights(
     point_light_shadow_map: Res<PointLightShadowMap>,
     directional_light_shadow_map: Res<DirectionalLightShadowMap>,
     mut shadow_render_phases: ResMut<ViewBinnedRenderPhases<Shadow>>,
-    mut max_directional_lights_warning_emitted: Local<bool>,
-    mut max_cascades_per_light_warning_emitted: Local<bool>,
+    mut warnings: Local<LightWarnings>,
     point_lights: Query<(
         Entity,
         &ExtractedPointLight,
@@ -737,75 +769,16 @@ pub fn prepare_lights(
     let mut point_lights: Vec<_> = point_lights.iter().collect::<Vec<_>>();
     let mut directional_lights: Vec<_> = directional_lights.iter().collect::<Vec<_>>();
 
-    #[cfg(any(
-        not(feature = "webgl"),
-        not(target_arch = "wasm32"),
-        feature = "webgpu"
-    ))]
-    let max_texture_array_layers = render_device.limits().max_texture_array_layers as usize;
-    #[cfg(any(
-        not(feature = "webgl"),
-        not(target_arch = "wasm32"),
-        feature = "webgpu"
-    ))]
-    let max_texture_cubes = max_texture_array_layers / 6;
-    #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
-    let max_texture_array_layers = 1;
-    #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
-    let max_texture_cubes = 1;
+    let limits = LightLimits::get(&render_device);
+    warnings.emit(&directional_lights);
 
-    if !*max_directional_lights_warning_emitted && directional_lights.len() > MAX_DIRECTIONAL_LIGHTS
-    {
-        warn!(
-            "The amount of directional lights of {} is exceeding the supported limit of {}.",
-            directional_lights.len(),
-            MAX_DIRECTIONAL_LIGHTS
-        );
-        *max_directional_lights_warning_emitted = true;
-    }
-
-    if !*max_cascades_per_light_warning_emitted
-        && directional_lights
+    let counts = LightCounts::new(
+        &limits,
+        point_lights.iter().map(|(_, point_light, _)| *point_light),
+        directional_lights
             .iter()
-            .any(|(_, light)| light.cascade_shadow_config.bounds.len() > MAX_CASCADES_PER_LIGHT)
-    {
-        warn!(
-            "The number of cascades configured for a directional light exceeds the supported limit of {}.",
-            MAX_CASCADES_PER_LIGHT
-        );
-        *max_cascades_per_light_warning_emitted = true;
-    }
-
-    let point_light_count = point_lights
-        .iter()
-        .filter(|light| light.1.spot_light_angles.is_none())
-        .count();
-
-    let point_light_shadow_maps_count = point_lights
-        .iter()
-        .filter(|light| light.1.shadows_enabled && light.1.spot_light_angles.is_none())
-        .count()
-        .min(max_texture_cubes);
-
-    let directional_volumetric_enabled_count = directional_lights
-        .iter()
-        .take(MAX_DIRECTIONAL_LIGHTS)
-        .filter(|(_, light)| light.volumetric)
-        .count()
-        .min(max_texture_array_layers / MAX_CASCADES_PER_LIGHT);
-
-    let directional_shadow_enabled_count = directional_lights
-        .iter()
-        .take(MAX_DIRECTIONAL_LIGHTS)
-        .filter(|(_, light)| light.shadows_enabled)
-        .count()
-        .min(max_texture_array_layers / MAX_CASCADES_PER_LIGHT);
-
-    let spot_light_shadow_maps_count = point_lights
-        .iter()
-        .filter(|(_, light, _)| light.shadows_enabled && light.spot_light_angles.is_some())
-        .count()
-        .min(max_texture_array_layers - directional_shadow_enabled_count * MAX_CASCADES_PER_LIGHT);
+            .map(|(_, directional_light)| *directional_light),
+    );
 
     // Sort lights by
     // - point-light vs spot-light, so that we can iterate point lights and spot lights in contiguous blocks in the fragment shader,
@@ -852,9 +825,9 @@ pub fn prepare_lights(
     for (index, &(entity, light, _)) in point_lights.iter().enumerate() {
         // Lights are sorted, shadow enabled lights are first
         let shadows_enabled = light.shadows_enabled
-            && (index < point_light_shadow_maps_count
+            && (index < counts.point_light_shadow_maps_count
                 || (light.spot_light_angles.is_some()
-                    && index - point_light_count < spot_light_shadow_maps_count));
+                    && index - counts.point_light_count < counts.spot_light_shadow_maps_count));
 
         let color_inverse_square_range = (Vec4::from_slice(&light.color.to_f32_array())
             * light.intensity)
@@ -929,12 +902,12 @@ pub fn prepare_lights(
         // Lights are sorted, volumetric and shadow enabled lights are first
         if light.volumetric
             && light.shadows_enabled
-            && (index < directional_volumetric_enabled_count)
+            && (index < counts.directional_volumetric_count)
         {
             flags |= DirectionalLightFlags::VOLUMETRIC;
         }
         // Shadow enabled lights are second
-        if light.shadows_enabled && (index < directional_shadow_enabled_count) {
+        if light.shadows_enabled && (index < counts.directional_shadow_enabled_count) {
             flags |= DirectionalLightFlags::SHADOWS_ENABLED;
         }
 
@@ -960,7 +933,7 @@ pub fn prepare_lights(
             cascades_overlap_proportion: light.cascade_shadow_config.overlap_proportion,
             depth_texture_base_index: num_directional_cascades_enabled as u32,
         };
-        if index < directional_shadow_enabled_count {
+        if index < counts.directional_shadow_enabled_count {
             num_directional_cascades_enabled += num_cascades;
         }
     }
@@ -978,7 +951,7 @@ pub fn prepare_lights(
                 size: Extent3d {
                     width: point_light_shadow_map.size as u32,
                     height: point_light_shadow_map.size as u32,
-                    depth_or_array_layers: point_light_shadow_maps_count.max(1) as u32 * 6,
+                    depth_or_array_layers: counts.point_light_shadow_maps_count.max(1) as u32 * 6,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
@@ -998,7 +971,7 @@ pub fn prepare_lights(
                     height: (directional_light_shadow_map.size as u32)
                         .min(render_device.limits().max_texture_dimension_2d),
                     depth_or_array_layers: (num_directional_cascades_enabled
-                        + spot_light_shadow_maps_count)
+                        + counts.spot_light_shadow_maps_count)
                         .max(1) as u32,
                 },
                 mip_level_count: 1,
@@ -1038,14 +1011,14 @@ pub fn prepare_lights(
             // the spot lights themselves start in the light array at point_light_count. so to go from light
             // index to shadow map index, we need to subtract point light count and add directional shadowmap count.
             spot_light_shadowmap_offset: num_directional_cascades_enabled as i32
-                - point_light_count as i32,
+                - counts.point_light_count as i32,
         };
 
         // TODO: this should select lights based on relevance to the view instead of the first ones that show up in a query
         for &(light_entity, light, (point_light_frusta, _)) in point_lights
             .iter()
             // Lights are sorted, shadow enabled lights are first
-            .take(point_light_shadow_maps_count)
+            .take(counts.point_light_shadow_maps_count)
             .filter(|(_, light, _)| light.shadows_enabled)
         {
             let light_index = *global_light_meta
@@ -1116,8 +1089,8 @@ pub fn prepare_lights(
         // spot lights
         for (light_index, &(light_entity, light, (_, spot_light_frustum))) in point_lights
             .iter()
-            .skip(point_light_count)
-            .take(spot_light_shadow_maps_count)
+            .skip(counts.point_light_count)
+            .take(counts.spot_light_shadow_maps_count)
             .enumerate()
         {
             let spot_view_matrix = spot_light_view_matrix(&light.transform);
@@ -1973,5 +1946,106 @@ impl Node for ShadowPassNode {
         time_span.end(render_context.command_encoder());
 
         Ok(())
+    }
+}
+
+impl LightLimits {
+    fn get(render_device: &RenderDevice) -> Self {
+        #[cfg(any(
+            not(feature = "webgl"),
+            not(target_arch = "wasm32"),
+            feature = "webgpu"
+        ))]
+        let max_texture_array_layers = render_device.limits().max_texture_array_layers as usize;
+        #[cfg(any(
+            not(feature = "webgl"),
+            not(target_arch = "wasm32"),
+            feature = "webgpu"
+        ))]
+        let max_texture_cubes = max_texture_array_layers / 6;
+        #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
+        let max_texture_array_layers = 1;
+        #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
+        let max_texture_cubes = 1;
+
+        LightLimits {
+            max_texture_array_layers,
+            max_texture_cubes,
+        }
+    }
+}
+
+impl LightCounts {
+    fn new<'a>(
+        limits: &LightLimits,
+        point_and_spot_lights: impl Iterator<Item = &'a ExtractedPointLight>,
+        directional_lights: impl Iterator<Item = &'a ExtractedDirectionalLight>,
+    ) -> LightCounts {
+        let mut light_counts = LightCounts::default();
+
+        for directional_light in directional_lights {
+            if directional_light.volumetric
+                && light_counts.directional_volumetric_count
+                    < limits.max_texture_array_layers / MAX_CASCADES_PER_LIGHT
+            {
+                light_counts.directional_volumetric_count += 1;
+            }
+            if directional_light.shadows_enabled
+                && light_counts.directional_shadow_enabled_count
+                    < limits.max_texture_array_layers / MAX_CASCADES_PER_LIGHT
+            {
+                light_counts.directional_shadow_enabled_count += 1;
+            }
+        }
+
+        for point_or_spot_light in point_and_spot_lights {
+            if point_or_spot_light.spot_light_angles.is_none() {
+                light_counts.point_light_count += 1;
+            }
+            if point_or_spot_light.shadows_enabled
+                && point_or_spot_light.spot_light_angles.is_none()
+                && light_counts.point_light_shadow_maps_count < limits.max_texture_cubes
+            {
+                light_counts.point_light_shadow_maps_count += 1;
+            }
+            if point_or_spot_light.shadows_enabled
+                && point_or_spot_light.spot_light_angles.is_some()
+                && light_counts.spot_light_shadow_maps_count
+                    < limits.max_texture_array_layers
+                        - light_counts.directional_shadow_enabled_count * MAX_CASCADES_PER_LIGHT
+            {
+                light_counts.spot_light_shadow_maps_count += 1;
+            }
+        }
+
+        light_counts
+    }
+}
+
+impl LightWarnings {
+    fn emit(&mut self, directional_lights: &[(Entity, &ExtractedDirectionalLight)]) {
+        if !self.contains(LightWarnings::MAX_DIRECTIONAL_LIGHTS_EXCEEDED)
+            && directional_lights.len() > MAX_DIRECTIONAL_LIGHTS
+        {
+            warn!(
+                "The amount of directional lights of {} is exceeding the supported limit of {}.",
+                directional_lights.len(),
+                MAX_DIRECTIONAL_LIGHTS
+            );
+            self.insert(LightWarnings::MAX_DIRECTIONAL_LIGHTS_EXCEEDED);
+        }
+
+        if !self.contains(LightWarnings::MAX_CASCADES_PER_LIGHT_EXCEEDED)
+            && directional_lights
+                .iter()
+                .any(|(_, light)| light.cascade_shadow_config.bounds.len() > MAX_CASCADES_PER_LIGHT)
+        {
+            warn!(
+                "The number of cascades configured for a directional light exceeds the supported \
+                 limit of {}.",
+                MAX_CASCADES_PER_LIGHT
+            );
+            self.insert(LightWarnings::MAX_CASCADES_PER_LIGHT_EXCEEDED);
+        }
     }
 }
