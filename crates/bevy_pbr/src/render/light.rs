@@ -281,6 +281,51 @@ bitflags! {
     }
 }
 
+static POINT_LIGHT_DEPTH_TEXTURE_VIEW_DESCRIPTOR: TextureViewDescriptor = TextureViewDescriptor {
+    label: Some("point_light_shadow_map_array_texture_view"),
+    format: None,
+    // NOTE: iOS Simulator is missing CubeArray support so we use Cube instead.
+    // See https://github.com/bevyengine/bevy/pull/12052 - remove if support is added.
+    #[cfg(all(
+        not(feature = "ios_simulator"),
+        any(
+            not(feature = "webgl"),
+            not(target_arch = "wasm32"),
+            feature = "webgpu"
+        )
+    ))]
+    dimension: Some(TextureViewDimension::CubeArray),
+    #[cfg(any(
+        feature = "ios_simulator",
+        all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu"))
+    ))]
+    dimension: Some(TextureViewDimension::Cube),
+    aspect: TextureAspect::DepthOnly,
+    base_mip_level: 0,
+    mip_level_count: None,
+    base_array_layer: 0,
+    array_layer_count: None,
+};
+
+static DIRECTIONAL_LIGHT_DEPTH_TEXTURE_VIEW_DESCRIPTOR: TextureViewDescriptor =
+    TextureViewDescriptor {
+        label: Some("directional_light_shadow_map_array_texture_view"),
+        format: None,
+        #[cfg(any(
+            not(feature = "webgl"),
+            not(target_arch = "wasm32"),
+            feature = "webgpu"
+        ))]
+        dimension: Some(TextureViewDimension::D2Array),
+        #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
+        dimension: Some(TextureViewDimension::D2),
+        aspect: TextureAspect::DepthOnly,
+        base_mip_level: 0,
+        mip_level_count: None,
+        base_array_layer: 0,
+        array_layer_count: None,
+    };
+
 // TODO: this pattern for initializing the shaders / pipeline isn't ideal. this should be handled by the asset system
 impl FromWorld for ShadowSamplers {
     fn from_world(world: &mut World) -> Self {
@@ -1987,6 +2032,47 @@ impl<'a> ViewLightDataBuilder<'a> {
         }
 
         // directional lights
+        self.build_directional_lights(
+            &mut gpu_lights,
+            &mut view_lights,
+            &directional_light_depth_texture,
+            commands,
+            shadow_render_phases,
+            live_shadow_mapping_lights,
+        );
+
+        let point_light_depth_texture_view = point_light_depth_texture
+            .texture
+            .create_view(&POINT_LIGHT_DEPTH_TEXTURE_VIEW_DESCRIPTOR);
+        let directional_light_depth_texture_view = directional_light_depth_texture
+            .texture
+            .create_view(&DIRECTIONAL_LIGHT_DEPTH_TEXTURE_VIEW_DESCRIPTOR);
+
+        commands.entity(self.view_entity).insert((
+            ViewShadowBindings {
+                point_light_depth_texture: point_light_depth_texture.texture,
+                point_light_depth_texture_view,
+                directional_light_depth_texture: directional_light_depth_texture.texture,
+                directional_light_depth_texture_view,
+            },
+            ViewLightEntities {
+                lights: view_lights,
+            },
+            ViewLightsUniformOffset {
+                offset: view_gpu_lights_writer.write(&gpu_lights),
+            },
+        ));
+    }
+
+    fn build_directional_lights(
+        &self,
+        gpu_lights: &mut GpuLights,
+        view_lights: &mut Vec<Entity>,
+        directional_light_depth_texture: &CachedTexture,
+        commands: &mut Commands,
+        shadow_render_phases: &mut ViewBinnedRenderPhases<Shadow>,
+        live_shadow_mapping_lights: &mut EntityHashSet,
+    ) {
         let mut directional_depth_texture_array_index = 0u32;
         let view_layers = self.maybe_layers.unwrap_or_default();
         for (light_index, &(light_entity, light)) in self
@@ -2086,68 +2172,5 @@ impl<'a> ViewLightDataBuilder<'a> {
                 live_shadow_mapping_lights.insert(view_light_entity);
             }
         }
-
-        let point_light_depth_texture_view =
-            point_light_depth_texture
-                .texture
-                .create_view(&TextureViewDescriptor {
-                    label: Some("point_light_shadow_map_array_texture_view"),
-                    format: None,
-                    // NOTE: iOS Simulator is missing CubeArray support so we use Cube instead.
-                    // See https://github.com/bevyengine/bevy/pull/12052 - remove if support is added.
-                    #[cfg(all(
-                        not(feature = "ios_simulator"),
-                        any(
-                            not(feature = "webgl"),
-                            not(target_arch = "wasm32"),
-                            feature = "webgpu"
-                        )
-                    ))]
-                    dimension: Some(TextureViewDimension::CubeArray),
-                    #[cfg(any(
-                        feature = "ios_simulator",
-                        all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu"))
-                    ))]
-                    dimension: Some(TextureViewDimension::Cube),
-                    aspect: TextureAspect::DepthOnly,
-                    base_mip_level: 0,
-                    mip_level_count: None,
-                    base_array_layer: 0,
-                    array_layer_count: None,
-                });
-        let directional_light_depth_texture_view = directional_light_depth_texture
-            .texture
-            .create_view(&TextureViewDescriptor {
-                label: Some("directional_light_shadow_map_array_texture_view"),
-                format: None,
-                #[cfg(any(
-                    not(feature = "webgl"),
-                    not(target_arch = "wasm32"),
-                    feature = "webgpu"
-                ))]
-                dimension: Some(TextureViewDimension::D2Array),
-                #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
-                dimension: Some(TextureViewDimension::D2),
-                aspect: TextureAspect::DepthOnly,
-                base_mip_level: 0,
-                mip_level_count: None,
-                base_array_layer: 0,
-                array_layer_count: None,
-            });
-
-        commands.entity(self.view_entity).insert((
-            ViewShadowBindings {
-                point_light_depth_texture: point_light_depth_texture.texture,
-                point_light_depth_texture_view,
-                directional_light_depth_texture: directional_light_depth_texture.texture,
-                directional_light_depth_texture_view,
-            },
-            ViewLightEntities {
-                lights: view_lights,
-            },
-            ViewLightsUniformOffset {
-                offset: view_gpu_lights_writer.write(&gpu_lights),
-            },
-        ));
     }
 }
