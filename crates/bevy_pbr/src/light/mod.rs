@@ -1497,138 +1497,179 @@ impl<'a> ViewClusterBuilder<'a> {
             } else {
                 Some(cluster_coordinates.y)
             };
-            for z in min_cluster.z..=max_cluster.z {
-                let mut z_light = view_light_sphere.clone();
-                if z_center.is_none() || z != z_center.unwrap() {
-                    // The z plane closer to the light has the larger radius circle where the
-                    // light sphere intersects the z plane.
-                    let z_plane = if z_center.is_some() && z < z_center.unwrap() {
-                        cluster_bounds.z_planes[(z + 1) as usize]
+
+            self.assign_light_to_clusters_in_aabb(
+                light,
+                min_cluster,
+                max_cluster,
+                y_center,
+                z_center,
+                spot_light_dir_sin_cos,
+                clusters,
+                cluster_aabb_spheres,
+                cluster_bounds,
+                inverse_projection,
+                &view_light_sphere,
+                view_inv_scale_max,
+                screen_size,
+                first_slice_depth,
+                far_z,
+                is_orthographic,
+            );
+        }
+    }
+
+    fn assign_light_to_clusters_in_aabb(
+        &self,
+        light: &PointLightAssignmentData,
+        min_cluster: UVec3,
+        max_cluster: UVec3,
+        y_center: Option<u32>,
+        z_center: Option<u32>,
+        spot_light_dir_sin_cos: Option<(Vec3, f32, f32)>,
+        clusters: &mut Clusters,
+        cluster_aabb_spheres: &mut Vec<Option<Sphere>>,
+        cluster_bounds: &ClusterBounds,
+        inverse_projection: &Mat4,
+        view_light_sphere: &Sphere,
+        view_inv_scale_max: f32,
+        screen_size: UVec2,
+        first_slice_depth: f32,
+        far_z: f32,
+        is_orthographic: bool,
+    ) {
+        for z in min_cluster.z..=max_cluster.z {
+            let mut z_light = view_light_sphere.clone();
+            if z_center.is_none() || z != z_center.unwrap() {
+                // The z plane closer to the light has the larger radius circle where the
+                // light sphere intersects the z plane.
+                let z_plane = if z_center.is_some() && z < z_center.unwrap() {
+                    cluster_bounds.z_planes[(z + 1) as usize]
+                } else {
+                    cluster_bounds.z_planes[z as usize]
+                };
+                // Project the sphere to this z plane and use its radius as the radius of a
+                // new, refined sphere.
+                if let Some(projected) = project_to_plane_z(z_light, z_plane) {
+                    z_light = projected;
+                } else {
+                    continue;
+                }
+            }
+            for y in min_cluster.y..=max_cluster.y {
+                let mut y_light = z_light.clone();
+                if y_center.is_none() || y != y_center.unwrap() {
+                    // The y plane closer to the light has the larger radius circle where the
+                    // light sphere intersects the y plane.
+                    let y_plane = if y_center.is_some() && y < y_center.unwrap() {
+                        cluster_bounds.y_planes[(y + 1) as usize]
                     } else {
-                        cluster_bounds.z_planes[z as usize]
+                        cluster_bounds.y_planes[y as usize]
                     };
-                    // Project the sphere to this z plane and use its radius as the radius of a
-                    // new, refined sphere.
-                    if let Some(projected) = project_to_plane_z(z_light, z_plane) {
-                        z_light = projected;
+                    // Project the refined sphere to this y plane and use its radius as the
+                    // radius of a new, even more refined sphere.
+                    if let Some(projected) = project_to_plane_y(y_light, y_plane, is_orthographic) {
+                        y_light = projected;
                     } else {
                         continue;
                     }
                 }
-                for y in min_cluster.y..=max_cluster.y {
-                    let mut y_light = z_light.clone();
-                    if y_center.is_none() || y != y_center.unwrap() {
-                        // The y plane closer to the light has the larger radius circle where the
-                        // light sphere intersects the y plane.
-                        let y_plane = if y_center.is_some() && y < y_center.unwrap() {
-                            cluster_bounds.y_planes[(y + 1) as usize]
-                        } else {
-                            cluster_bounds.y_planes[y as usize]
-                        };
-                        // Project the refined sphere to this y plane and use its radius as the
-                        // radius of a new, even more refined sphere.
-                        if let Some(projected) =
-                            project_to_plane_y(y_light, y_plane, is_orthographic)
-                        {
-                            y_light = projected;
-                        } else {
-                            continue;
-                        }
-                    }
-                    // Loop from the left to find the first affected cluster
-                    let mut min_x = min_cluster.x;
-                    loop {
-                        if min_x >= max_cluster.x
-                            || -get_distance_x(
-                                cluster_bounds.x_planes[(min_x + 1) as usize],
-                                y_light.center,
-                                is_orthographic,
-                            ) + y_light.radius
-                                > 0.0
-                        {
-                            break;
-                        }
-                        min_x += 1;
-                    }
-                    // Loop from the right to find the last affected cluster
-                    let mut max_x = max_cluster.x;
-                    loop {
-                        if max_x <= min_x
-                            || get_distance_x(
-                                cluster_bounds.x_planes[max_x as usize],
-                                y_light.center,
-                                is_orthographic,
-                            ) + y_light.radius
-                                > 0.0
-                        {
-                            break;
-                        }
-                        max_x -= 1;
-                    }
-                    let mut cluster_index =
-                        ((y * clusters.dimensions.x + min_x) * clusters.dimensions.z + z) as usize;
-
-                    if let Some((view_light_direction, angle_sin, angle_cos)) =
-                        spot_light_dir_sin_cos
+                // Loop from the left to find the first affected cluster
+                let mut min_x = min_cluster.x;
+                loop {
+                    if min_x >= max_cluster.x
+                        || -get_distance_x(
+                            cluster_bounds.x_planes[(min_x + 1) as usize],
+                            y_light.center,
+                            is_orthographic,
+                        ) + y_light.radius
+                            > 0.0
                     {
-                        for x in min_x..=max_x {
-                            // further culling for spot lights
-                            // get or initialize cluster bounding sphere
-                            let cluster_aabb_sphere = &mut cluster_aabb_spheres[cluster_index];
-                            let cluster_aabb_sphere = if let Some(sphere) = cluster_aabb_sphere {
-                                &*sphere
-                            } else {
-                                let aabb = compute_aabb_for_cluster(
-                                    first_slice_depth,
-                                    far_z,
-                                    clusters.tile_size.as_vec2(),
-                                    screen_size.as_vec2(),
-                                    *inverse_projection,
-                                    is_orthographic,
-                                    clusters.dimensions,
-                                    UVec3::new(x, y, z),
-                                );
-                                let sphere = Sphere {
-                                    center: aabb.center,
-                                    radius: aabb.half_extents.length(),
-                                };
-                                *cluster_aabb_sphere = Some(sphere);
-                                cluster_aabb_sphere.as_ref().unwrap()
+                        break;
+                    }
+                    min_x += 1;
+                }
+                // Loop from the right to find the last affected cluster
+                let mut max_x = max_cluster.x;
+                loop {
+                    if max_x <= min_x
+                        || get_distance_x(
+                            cluster_bounds.x_planes[max_x as usize],
+                            y_light.center,
+                            is_orthographic,
+                        ) + y_light.radius
+                            > 0.0
+                    {
+                        break;
+                    }
+                    max_x -= 1;
+                }
+                let mut cluster_index =
+                    ((y * clusters.dimensions.x + min_x) * clusters.dimensions.z + z) as usize;
+
+                if let Some((view_light_direction, angle_sin, angle_cos)) = spot_light_dir_sin_cos {
+                    for x in min_x..=max_x {
+                        // further culling for spot lights
+                        // get or initialize cluster bounding sphere
+                        let cluster_aabb_sphere = &mut cluster_aabb_spheres[cluster_index];
+                        let cluster_aabb_sphere = if let Some(sphere) = cluster_aabb_sphere {
+                            &*sphere
+                        } else {
+                            let aabb = compute_aabb_for_cluster(
+                                first_slice_depth,
+                                far_z,
+                                clusters.tile_size.as_vec2(),
+                                screen_size.as_vec2(),
+                                *inverse_projection,
+                                is_orthographic,
+                                clusters.dimensions,
+                                UVec3::new(x, y, z),
+                            );
+                            let sphere = Sphere {
+                                center: aabb.center,
+                                radius: aabb.half_extents.length(),
                             };
+                            *cluster_aabb_sphere = Some(sphere);
+                            cluster_aabb_sphere.as_ref().unwrap()
+                        };
 
-                            // test -- based on https://bartwronski.com/2017/04/13/cull-that-cone/
-                            let spot_light_offset =
-                                Vec3::from(view_light_sphere.center - cluster_aabb_sphere.center);
-                            let spot_light_dist_sq = spot_light_offset.length_squared();
-                            let v1_len = spot_light_offset.dot(view_light_direction);
+                        // test -- based on https://bartwronski.com/2017/04/13/cull-that-cone/
+                        let spot_light_offset =
+                            Vec3::from(view_light_sphere.center - cluster_aabb_sphere.center);
+                        let spot_light_dist_sq = spot_light_offset.length_squared();
+                        let v1_len = spot_light_offset.dot(view_light_direction);
 
-                            let distance_closest_point = (angle_cos
-                                * (spot_light_dist_sq - v1_len * v1_len).sqrt())
-                                - v1_len * angle_sin;
-                            let angle_cull = distance_closest_point > cluster_aabb_sphere.radius;
+                        let distance_closest_point = (angle_cos
+                            * (spot_light_dist_sq - v1_len * v1_len).sqrt())
+                            - v1_len * angle_sin;
+                        let angle_cull = distance_closest_point > cluster_aabb_sphere.radius;
 
-                            let front_cull = v1_len
-                                > cluster_aabb_sphere.radius + light.range * view_inv_scale_max;
-                            let back_cull = v1_len < -cluster_aabb_sphere.radius;
+                        let front_cull =
+                            v1_len > cluster_aabb_sphere.radius + light.range * view_inv_scale_max;
+                        let back_cull = v1_len < -cluster_aabb_sphere.radius;
 
-                            if !angle_cull && !front_cull && !back_cull {
-                                // this cluster is affected by the spot light
-                                clusters.lights[cluster_index].entities.push(light.entity);
-                                clusters.lights[cluster_index].spot_light_count += 1;
-                            }
-                            cluster_index += clusters.dimensions.z as usize;
-                        }
-                    } else {
-                        for _ in min_x..=max_x {
-                            // all clusters within range are affected by point lights
+                        if !angle_cull && !front_cull && !back_cull {
+                            // this cluster is affected by the spot light
                             clusters.lights[cluster_index].entities.push(light.entity);
-                            clusters.lights[cluster_index].point_light_count += 1;
-                            cluster_index += clusters.dimensions.z as usize;
+                            clusters.lights[cluster_index].spot_light_count += 1;
                         }
+                        cluster_index += clusters.dimensions.z as usize;
+                    }
+                } else {
+                    for _ in min_x..=max_x {
+                        // all clusters within range are affected by point lights
+                        clusters.lights[cluster_index].entities.push(light.entity);
+                        clusters.lights[cluster_index].point_light_count += 1;
+                        cluster_index += clusters.dimensions.z as usize;
                     }
                 }
             }
         }
+    }
+
+    /// Assigns a clusterable to a single row of clusters.
+    fn assign_light_to_cluster_strip(&self) {
+        // TODO
     }
 }
 
