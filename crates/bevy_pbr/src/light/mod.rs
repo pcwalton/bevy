@@ -1143,7 +1143,7 @@ pub(crate) fn assign_lights_to_clusters(
         clustered_forward_buffer_binding_type,
         BufferBindingType::Storage { .. }
     );
-    if lights.len() > MAX_UNIFORM_BUFFER_POINT_LIGHTS && !supports_storage_buffers {
+    if lights.len() > MAX_UNIFORM_BUFFER_CLUSTERABLES && !supports_storage_buffers {
         lights.sort_by(|light_1, light_2| {
             point_light_order(
                 (
@@ -1167,7 +1167,7 @@ pub(crate) fn assign_lights_to_clusters(
         let mut lights_in_view_count = 0;
         lights.retain(|light| {
             // take one extra light to check if we should emit the warning
-            if lights_in_view_count == MAX_UNIFORM_BUFFER_POINT_LIGHTS + 1 {
+            if lights_in_view_count == MAX_UNIFORM_BUFFER_CLUSTERABLES + 1 {
                 false
             } else {
                 let light_sphere = light.sphere();
@@ -1183,15 +1183,15 @@ pub(crate) fn assign_lights_to_clusters(
             }
         });
 
-        if lights.len() > MAX_UNIFORM_BUFFER_POINT_LIGHTS && !*max_point_lights_warning_emitted {
+        if lights.len() > MAX_UNIFORM_BUFFER_CLUSTERABLES && !*max_point_lights_warning_emitted {
             warn!(
                 "MAX_UNIFORM_BUFFER_POINT_LIGHTS ({}) exceeded",
-                MAX_UNIFORM_BUFFER_POINT_LIGHTS
+                MAX_UNIFORM_BUFFER_CLUSTERABLES
             );
             *max_point_lights_warning_emitted = true;
         }
 
-        lights.truncate(MAX_UNIFORM_BUFFER_POINT_LIGHTS);
+        lights.truncate(MAX_UNIFORM_BUFFER_CLUSTERABLES);
     }
 
     for (

@@ -10,6 +10,12 @@
    maths::PI_2,
 }
 
+struct ClusterableIndices {
+    first_point_light_index: u32,
+    first_spot_light_index: u32,
+    last_clusterable_index: u32,
+}
+
 // NOTE: Keep in sync with bevy_pbr/src/light.rs
 fn view_z_to_z_slice(view_z: f32, is_orthographic: bool) -> u32 {
     var z_slice: u32 = 0u;
@@ -38,28 +44,42 @@ fn fragment_cluster_index(frag_coord: vec2<f32>, view_z: f32, is_orthographic: b
 
 // this must match CLUSTER_COUNT_SIZE in light.rs
 const CLUSTER_COUNT_SIZE = 9u;
-fn unpack_offset_and_counts(cluster_index: u32) -> vec3<u32> {
+fn unpack_clusterable_indices(cluster_index: u32) -> ClusterableIndices {
 #if AVAILABLE_STORAGE_BUFFER_BINDINGS >= 3
-    return bindings::cluster_offsets_and_counts.data[cluster_index].xyz;
+    let packed = bindings::cluster_offsets_and_counts.data[cluster_index];
+    let first_point_light_index = packed.x;
+    let first_spot_light_index = first_point_light_index + (packed.y & 0xffffu);
+    let last_clusterable_index = first_point_light_index + (packed.y >> 16u);
+    return ClusterableIndices(
+        first_point_light_index,
+        first_spot_light_index,
+        last_clusterable_index,
+    );
 #else
     let offset_and_counts = bindings::cluster_offsets_and_counts.data[cluster_index >> 2u][cluster_index & ((1u << 2u) - 1u)];
-    //  [ 31     ..     18 | 17      ..      9 | 8       ..     0 ]
-    //  [      offset      | point light count | spot light count ]
-    return vec3<u32>(
-        (offset_and_counts >> (CLUSTER_COUNT_SIZE * 2u)) & ((1u << (32u - (CLUSTER_COUNT_SIZE * 2u))) - 1u),
-        (offset_and_counts >> CLUSTER_COUNT_SIZE)        & ((1u << CLUSTER_COUNT_SIZE) - 1u),
-        offset_and_counts                                & ((1u << CLUSTER_COUNT_SIZE) - 1u),
+    //  [ 31     ..     18 | 17        ..         9 | 8         ..         0 ]
+    //  [      offset      | first spot light index | last clusterable index ]
+    let first_point_light_index = (offset_and_counts >> (CLUSTER_COUNT_SIZE * 2u)) &
+        ((1u << (32u - (CLUSTER_COUNT_SIZE * 2u))) - 1u);
+    let first_spot_light_index = first_point_light_index +
+        ((offset_and_counts >> CLUSTER_COUNT_SIZE) & ((1u << CLUSTER_COUNT_SIZE) - 1u));
+    let last_clusterable_index = first_point_light_index +
+        (offset_and_counts & ((1u << CLUSTER_COUNT_SIZE) - 1u));
+    return ClusterableIndices(
+        first_point_light_index,
+        first_spot_light_index,
+        last_clusterable_index,
     );
 #endif
 }
 
 fn get_light_id(index: u32) -> u32 {
 #if AVAILABLE_STORAGE_BUFFER_BINDINGS >= 3
-    return bindings::cluster_light_index_lists.data[index];
+    return bindings::cluster_index_lists.data[index];
 #else
     // The index is correct but in cluster_light_index_lists we pack 4 u8s into a u32
     // This means the index into cluster_light_index_lists is index / 4
-    let indices = bindings::cluster_light_index_lists.data[index >> 4u][(index >> 2u) & ((1u << 2u) - 1u)];
+    let indices = bindings::cluster_index_lists.data[index >> 4u][(index >> 2u) & ((1u << 2u) - 1u)];
     // And index % 4 gives the sub-index of the u8 within the u32 so we shift by 8 * sub-index
     return (indices >> (8u * (index & ((1u << 2u) - 1u)))) & ((1u << 8u) - 1u);
 #endif
@@ -69,7 +89,7 @@ fn cluster_debug_visualization(
     input_color: vec4<f32>,
     view_z: f32,
     is_orthographic: bool,
-    offset_and_counts: vec3<u32>,
+    clusterable_indices: ptr<function, ClusterableIndices>,
     cluster_index: u32,
 ) -> vec4<f32> {
     var output_color = input_color;
@@ -93,14 +113,27 @@ fn cluster_debug_visualization(
         output_color.a
     );
 #endif // CLUSTERED_FORWARD_DEBUG_Z_SLICES
+
 #ifdef CLUSTERED_FORWARD_DEBUG_CLUSTER_LIGHT_COMPLEXITY
     // NOTE: This debug mode visualises the number of lights within the cluster that contains
     // the fragment. It shows a sort of lighting complexity measure.
     let cluster_overlay_alpha = 0.1;
     let max_light_complexity_per_cluster = 64.0;
-    output_color.r = (1.0 - cluster_overlay_alpha) * output_color.r + cluster_overlay_alpha * smoothStep(0.0, max_light_complexity_per_cluster, f32(offset_and_counts[1] + offset_and_counts[2]));
-    output_color.g = (1.0 - cluster_overlay_alpha) * output_color.g + cluster_overlay_alpha * (1.0 - smoothStep(0.0, max_light_complexity_per_cluster, f32(offset_and_counts[1] + offset_and_counts[2])));
+    let light_complexity = f32(clusterable_indices.last_clusterable_index -
+        clusterable_indices.first_point_light_index);
+    output_color.r = (1.0 - cluster_overlay_alpha) * output_color.r +
+        cluster_overlay_alpha * smoothStep(
+            0.0,
+            max_light_complexity_per_cluster,
+            light_complexity,
+        );
+    output_color.g = (1.0 - cluster_overlay_alpha) * output_color.g +
+        cluster_overlay_alpha * (1.0 - smoothStep(
+            0.0,
+            max_light_complexity_per_cluster,
+            light_complexity));
 #endif // CLUSTERED_FORWARD_DEBUG_CLUSTER_LIGHT_COMPLEXITY
+
 #ifdef CLUSTERED_FORWARD_DEBUG_CLUSTER_COHERENCY
     // NOTE: Visualizes the cluster to which the fragment belongs
     let cluster_overlay_alpha = 0.1;

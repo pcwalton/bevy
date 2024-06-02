@@ -5,6 +5,7 @@
     pbr_bindings,
     mesh_view_bindings as view_bindings,
     mesh_view_types,
+    mesh_view_types::{PointLight, SpotLight},
     lighting,
     lighting::{LAYER_BASE, LAYER_CLEARCOAT},
     transmission,
@@ -238,6 +239,43 @@ fn calculate_F0(base_color: vec3<f32>, metallic: f32, reflectance: f32) -> vec3<
     return 0.16 * reflectance * reflectance * (1.0 - metallic) + base_color * metallic;
 }
 
+fn get_point_light(index: u32) -> PointLight {
+    let vec_0 = bitcast<vec4<f32>>(view_bindings::clusterables.data[index].data[0]);
+    let vec_1 = bitcast<vec4<f32>>(view_bindings::clusterables.data[index].data[1]);
+    let vec_2 = bitcast<vec4<f32>>(view_bindings::clusterables.data[index].data[2]);
+    let vec_3 = bitcast<vec2<f32>>(view_bindings::clusterables.data[index].data[3].xy);
+    let uint_0 = view_bindings::clusterables.data[index].data[3].z;
+
+    var point_light: PointLight;
+    point_light.projection_matrix_lower_right = mat2x2(vec_0.xy, vec_0.zw);
+    point_light.color_inverse_square_range = vec_1;
+    point_light.position_radius = vec_2;
+    point_light.shadow_depth_bias = vec_3.x;
+    point_light.shadow_normal_bias = vec_3.y;
+    point_light.flags = uint_0;
+    return point_light;
+}
+
+fn get_spot_light(index: u32) -> SpotLight {
+    let vec_0 = bitcast<vec4<f32>>(view_bindings::clusterables.data[index].data[0]);
+    let vec_1 = bitcast<vec4<f32>>(view_bindings::clusterables.data[index].data[1]);
+    let vec_2 = bitcast<vec4<f32>>(view_bindings::clusterables.data[index].data[2]);
+    let vec_3 = bitcast<vec3<f32>>(view_bindings::clusterables.data[index].data[3].xyz);
+    let uint_0 = view_bindings::clusterables.data[index].data[3].w;
+
+    var spot_light: SpotLight;
+    spot_light.direction_xz = vec_0.xy;
+    spot_light.spot_scale = vec_0.z;
+    spot_light.spot_offset = vec_0.w;
+    spot_light.color_inverse_square_range = vec_1;
+    spot_light.position_radius = vec_2;
+    spot_light.shadow_depth_bias = vec_3.x;
+    spot_light.shadow_normal_bias = vec_3.y;
+    spot_light.spot_light_tan_angle = vec_3.z;
+    spot_light.flags = uint_0;
+    return spot_light;
+}
+
 #ifndef PREPASS_FRAGMENT
 fn apply_pbr_lighting(
     in: pbr_types::PbrInput,
@@ -348,18 +386,27 @@ fn apply_pbr_lighting(
         view_bindings::view.inverse_view[3].z
     ), in.world_position);
     let cluster_index = clustering::fragment_cluster_index(in.frag_coord.xy, view_z, in.is_orthographic);
-    let offset_and_counts = clustering::unpack_offset_and_counts(cluster_index);
+    var clusterable_indices = clustering::unpack_clusterable_indices(cluster_index);
 
     // Point lights (direct)
-    for (var i: u32 = offset_and_counts[0]; i < offset_and_counts[0] + offset_and_counts[1]; i = i + 1u) {
+    for (var i: u32 = clusterable_indices.first_point_light_index;
+            i < clusterable_indices.first_spot_light_index;
+            i += 1u) {
         let light_id = clustering::get_light_id(i);
+        var point_light = get_point_light(light_id);
+
         var shadow: f32 = 1.0;
         if ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
-                && (view_bindings::point_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-            shadow = shadows::fetch_point_shadow(light_id, in.world_position, in.world_normal);
+                && (point_light.flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+            shadow = shadows::fetch_point_shadow(
+                &point_light,
+                light_id,
+                in.world_position,
+                in.world_normal,
+            );
         }
 
-        let light_contrib = lighting::point_light(light_id, &lighting_input);
+        let light_contrib = lighting::point_light(&point_light, &lighting_input);
         direct_light += light_contrib * shadow;
 
 #ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
@@ -374,27 +421,40 @@ fn apply_pbr_lighting(
         // F0 = vec3<f32>(0.0)
         var transmitted_shadow: f32 = 1.0;
         if ((in.flags & (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)) == (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)
-                && (view_bindings::point_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-            transmitted_shadow = shadows::fetch_point_shadow(light_id, diffuse_transmissive_lobe_world_position, -in.world_normal);
+                && (point_light.flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+            transmitted_shadow = shadows::fetch_point_shadow(
+                &point_light,
+                light_id,
+                diffuse_transmissive_lobe_world_position,
+                -in.world_normal,
+            );
         }
 
         let transmitted_light_contrib =
-            lighting::point_light(light_id, &transmissive_lighting_input);
+            lighting::point_light(&point_light, &transmissive_lighting_input);
         transmitted_light += transmitted_light_contrib * transmitted_shadow;
 #endif
     }
 
     // Spot lights (direct)
-    for (var i: u32 = offset_and_counts[0] + offset_and_counts[1]; i < offset_and_counts[0] + offset_and_counts[1] + offset_and_counts[2]; i = i + 1u) {
+    for (var i: u32 = clusterable_indices.first_spot_light_index;
+            i < clusterable_indices.last_clusterable_index;
+            i += 1u) {
         let light_id = clustering::get_light_id(i);
+        var spot_light = get_spot_light(light_id);
 
         var shadow: f32 = 1.0;
         if ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
-                && (view_bindings::point_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-            shadow = shadows::fetch_spot_shadow(light_id, in.world_position, in.world_normal);
+                && (spot_light.flags & mesh_view_types::SPOT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+            shadow = shadows::fetch_spot_shadow(
+                &spot_light,
+                light_id,
+                in.world_position,
+                in.world_normal,
+            );
         }
 
-        let light_contrib = lighting::spot_light(light_id, &lighting_input);
+        let light_contrib = lighting::spot_light(&spot_light, &lighting_input);
         direct_light += light_contrib * shadow;
 
 #ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
@@ -409,12 +469,17 @@ fn apply_pbr_lighting(
         // F0 = vec3<f32>(0.0)
         var transmitted_shadow: f32 = 1.0;
         if ((in.flags & (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)) == (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)
-                && (view_bindings::point_lights.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-            transmitted_shadow = shadows::fetch_spot_shadow(light_id, diffuse_transmissive_lobe_world_position, -in.world_normal);
+                && (spot_light.flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+            transmitted_shadow = shadows::fetch_spot_shadow(
+                &spot_light,
+                light_id,
+                diffuse_transmissive_lobe_world_position
+                 -in.world_normal,
+            );
         }
 
         let transmitted_light_contrib =
-            lighting::spot_light(light_id, &transmissive_lighting_input);
+            lighting::spot_light(&spot_light, &transmissive_lighting_input);
         transmitted_light += transmitted_light_contrib * transmitted_shadow;
 #endif
     }
@@ -632,7 +697,7 @@ fn apply_pbr_lighting(
         output_color,
         view_z,
         in.is_orthographic,
-        offset_and_counts,
+        &clusterable_indices,
         cluster_index,
     );
 

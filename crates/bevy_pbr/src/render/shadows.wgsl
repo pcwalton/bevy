@@ -1,7 +1,7 @@
 #define_import_path bevy_pbr::shadows
 
 #import bevy_pbr::{
-    mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    mesh_view_types::{SPOT_LIGHT_FLAGS_Y_NEGATIVE_BIT, PointLight, SpotLight},
     mesh_view_bindings as view_bindings,
     shadow_sampling::{SPOT_SHADOW_TEXEL_SIZE, sample_shadow_cubemap, sample_shadow_map}
 }
@@ -13,9 +13,12 @@
 
 const flip_z: vec3<f32> = vec3<f32>(1.0, 1.0, -1.0);
 
-fn fetch_point_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>) -> f32 {
-    let light = &view_bindings::point_lights.data[light_id];
-
+fn fetch_point_shadow(
+    light: ptr<function, PointLight>,
+    light_id: u32,
+    frag_position: vec4<f32>,
+    surface_normal: vec3<f32>,
+) -> f32 {
     // because the shadow maps align with the axes and the frustum planes are at 45 degrees
     // we can get the worldspace depth by taking the largest absolute axis
     let surface_to_light = (*light).position_radius.xyz - frag_position.xyz;
@@ -38,7 +41,8 @@ fn fetch_point_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: v
     // projection * vec4(0, 0, -major_axis_magnitude, 1.0)
     // and keeping only the terms that have any impact on the depth.
     // Projection-agnostic approach:
-    let zw = -major_axis_magnitude * (*light).light_custom_data.xy + (*light).light_custom_data.zw;
+    let zw = -major_axis_magnitude * (*light).projection_matrix_lower_right[0] +
+        (*light).projection_matrix_lower_right[1];
     let depth = zw.x / zw.y;
 
     // Do the lookup, using HW PCF and comparison. Cubemaps assume a left-handed coordinate space,
@@ -46,16 +50,19 @@ fn fetch_point_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: v
     return sample_shadow_cubemap(frag_ls * flip_z, distance_to_light, depth, light_id);
 }
 
-fn fetch_spot_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>) -> f32 {
-    let light = &view_bindings::point_lights.data[light_id];
-
+fn fetch_spot_shadow(
+    light: ptr<function, SpotLight>,
+    light_id: u32,
+    frag_position: vec4<f32>,
+    surface_normal: vec3<f32>,
+) -> f32 {
     let surface_to_light = (*light).position_radius.xyz - frag_position.xyz;
 
     // construct the light view matrix
-    var spot_dir = vec3<f32>((*light).light_custom_data.x, 0.0, (*light).light_custom_data.y);
+    var spot_dir = vec3<f32>((*light).direction_xz.x, 0.0, (*light).direction_xz.y);
     // reconstruct spot dir from x/z and y-direction flag
     spot_dir.y = sqrt(max(0.0, 1.0 - spot_dir.x * spot_dir.x - spot_dir.z * spot_dir.z));
-    if (((*light).flags & POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE) != 0u) {
+    if (((*light).flags & SPOT_LIGHT_FLAGS_Y_NEGATIVE_BIT) != 0u) {
         spot_dir.y = -spot_dir.y;
     }
 

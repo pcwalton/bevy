@@ -3,7 +3,7 @@ use bevy_core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
 use bevy_ecs::entity::EntityHashSet;
 use bevy_ecs::prelude::*;
 use bevy_ecs::{entity::EntityHashMap, system::lifetimeless::Read};
-use bevy_math::{Mat4, UVec3, UVec4, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
+use bevy_math::{uvec4, Mat2, Mat4, UVec3, UVec4, Vec2, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use bevy_render::mesh::Mesh;
 use bevy_render::{
     camera::Camera,
@@ -23,6 +23,8 @@ use bevy_transform::{components::GlobalTransform, prelude::Transform};
 #[cfg(feature = "trace")]
 use bevy_utils::tracing::info_span;
 use bevy_utils::tracing::{error, warn};
+use bytemuck::{Pod, Zeroable};
+use std::mem;
 use std::{hash::Hash, num::NonZeroU64, ops::Range};
 
 use crate::*;
@@ -56,93 +58,65 @@ pub struct ExtractedDirectionalLight {
     pub render_layers: RenderLayers,
 }
 
-#[derive(Copy, Clone, ShaderType, Default, Debug)]
+#[derive(Copy, Clone, Pod, Zeroable, Default, Debug)]
+#[repr(C)]
+pub struct GpuClusterable {
+    data: [UVec4; 4],
+}
+
+#[derive(Copy, Clone, Pod, Zeroable, Default, Debug)]
+#[repr(C)]
 pub struct GpuPointLight {
-    // For point lights: the lower-right 2x2 values of the projection matrix [2][2] [2][3] [3][2] [3][3]
-    // For spot lights: 2 components of the direction (x,z), spot_scale and spot_offset
-    light_custom_data: Vec4,
+    projection_matrix_lower_right: Mat2,
     color_inverse_square_range: Vec4,
     position_radius: Vec4,
+    shadow_depth_bias: f32,
+    shadow_normal_bias: f32,
+    // 'flags' is a bit field indicating various options. u32 is 32 bits so we have up to 32 options.
     flags: u32,
+    unused: u32,
+}
+
+#[derive(Copy, Clone, Pod, Zeroable, Default, Debug)]
+#[repr(C)]
+pub struct GpuSpotLight {
+    // 2 components of the direction (x,z)
+    direction_xz: Vec2,
+    spot_scale: f32,
+    spot_offset: f32,
+    color_inverse_square_range: Vec4,
+    position_radius: Vec4,
     shadow_depth_bias: f32,
     shadow_normal_bias: f32,
     spot_light_tan_angle: f32,
+    // 'flags' is a bit field indicating various options. u32 is 32 bits so we have up to 32 options.
+    flags: u32,
 }
 
-#[derive(ShaderType)]
-pub struct GpuPointLightsUniform {
-    data: Box<[GpuPointLight; MAX_UNIFORM_BUFFER_POINT_LIGHTS]>,
+pub struct GpuClusterables {
+    pub(crate) data: RawBufferVec<GpuClusterable>,
+    binding_type: BufferBindingType,
 }
 
-impl Default for GpuPointLightsUniform {
-    fn default() -> Self {
+impl GpuClusterables {
+    fn new(binding_type: BufferBindingType) -> Self {
+        let buffer_usages = match binding_type {
+            BufferBindingType::Uniform => BufferUsages::UNIFORM,
+            BufferBindingType::Storage { .. } => BufferUsages::STORAGE,
+        };
+
         Self {
-            data: Box::new([GpuPointLight::default(); MAX_UNIFORM_BUFFER_POINT_LIGHTS]),
-        }
-    }
-}
-
-#[derive(ShaderType, Default)]
-pub struct GpuPointLightsStorage {
-    #[size(runtime)]
-    data: Vec<GpuPointLight>,
-}
-
-pub enum GpuPointLights {
-    Uniform(UniformBuffer<GpuPointLightsUniform>),
-    Storage(StorageBuffer<GpuPointLightsStorage>),
-}
-
-impl GpuPointLights {
-    fn new(buffer_binding_type: BufferBindingType) -> Self {
-        match buffer_binding_type {
-            BufferBindingType::Storage { .. } => Self::storage(),
-            BufferBindingType::Uniform => Self::uniform(),
+            data: RawBufferVec::new(buffer_usages),
+            binding_type,
         }
     }
 
-    fn uniform() -> Self {
-        Self::Uniform(UniformBuffer::default())
-    }
-
-    fn storage() -> Self {
-        Self::Storage(StorageBuffer::default())
-    }
-
-    fn set(&mut self, mut lights: Vec<GpuPointLight>) {
-        match self {
-            GpuPointLights::Uniform(buffer) => {
-                let len = lights.len().min(MAX_UNIFORM_BUFFER_POINT_LIGHTS);
-                let src = &lights[..len];
-                let dst = &mut buffer.get_mut().data[..len];
-                dst.copy_from_slice(src);
-            }
-            GpuPointLights::Storage(buffer) => {
-                buffer.get_mut().data.clear();
-                buffer.get_mut().data.append(&mut lights);
-            }
-        }
-    }
-
-    fn write_buffer(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
-        match self {
-            GpuPointLights::Uniform(buffer) => buffer.write_buffer(render_device, render_queue),
-            GpuPointLights::Storage(buffer) => buffer.write_buffer(render_device, render_queue),
-        }
-    }
-
-    pub fn binding(&self) -> Option<BindingResource> {
-        match self {
-            GpuPointLights::Uniform(buffer) => buffer.binding(),
-            GpuPointLights::Storage(buffer) => buffer.binding(),
-        }
-    }
-
-    pub fn min_size(buffer_binding_type: BufferBindingType) -> NonZeroU64 {
-        match buffer_binding_type {
-            BufferBindingType::Storage { .. } => GpuPointLightsStorage::min_size(),
-            BufferBindingType::Uniform => GpuPointLightsUniform::min_size(),
-        }
+    pub(crate) fn min_size(buffer_binding_type: BufferBindingType) -> Option<NonZeroU64> {
+        let count = match buffer_binding_type {
+            BufferBindingType::Uniform => MAX_UNIFORM_BUFFER_CLUSTERABLES as u64,
+            BufferBindingType::Storage { .. } => 1,
+        };
+        NonZeroU64::try_from(mem::size_of::<GpuClusterable>() as u64 * count).ok()
     }
 }
 
@@ -150,10 +124,16 @@ impl GpuPointLights {
 bitflags::bitflags! {
     #[repr(transparent)]
     struct PointLightFlags: u32 {
-        const SHADOWS_ENABLED            = 1 << 0;
-        const SPOT_LIGHT_Y_NEGATIVE      = 1 << 1;
-        const NONE                       = 0;
-        const UNINITIALIZED              = 0xFFFF;
+        const SHADOWS_ENABLED   = 1 << 0;
+    }
+}
+
+// NOTE: These must match the bit flags in bevy_pbr/src/render/mesh_view_types.wgsl!
+bitflags::bitflags! {
+    #[repr(transparent)]
+    struct SpotLightFlags: u32 {
+        const SHADOWS_ENABLED   = 1 << 0;
+        const Y_NEGATIVE        = 1 << 1;
     }
 }
 
@@ -204,8 +184,8 @@ pub struct GpuLights {
     spot_light_shadowmap_offset: i32,
 }
 
-// NOTE: this must be kept in sync with the same constants in pbr.frag
-pub const MAX_UNIFORM_BUFFER_POINT_LIGHTS: usize = 256;
+// NOTE: this must be kept in sync with `mesh_view_types.wgsl`
+pub const MAX_UNIFORM_BUFFER_CLUSTERABLES: usize = 256;
 
 //NOTE: When running bevy on Adreno GPU chipsets in WebGL, any value above 1 will result in a crash
 // when loading the wgsl "pbr_functions.wgsl" in the function apply_fog.
@@ -272,7 +252,10 @@ pub struct ExtractedClusterConfig {
 }
 
 enum ExtractedClustersPointLightsElement {
-    ClusterHeader(u32, u32),
+    ClusterHeader {
+        first_spot_light_index: u32,
+        last_clusterable_index: u32,
+    },
     LightEntity(Entity),
 }
 
@@ -293,10 +276,11 @@ pub fn extract_clusters(
         let num_entities: usize = clusters.lights.iter().map(|l| l.entities.len()).sum();
         let mut data = Vec::with_capacity(clusters.lights.len() + num_entities);
         for cluster_lights in &clusters.lights {
-            data.push(ExtractedClustersPointLightsElement::ClusterHeader(
-                cluster_lights.point_light_count as u32,
-                cluster_lights.spot_light_count as u32,
-            ));
+            data.push(ExtractedClustersPointLightsElement::ClusterHeader {
+                first_spot_light_index: cluster_lights.point_light_count as u32,
+                last_clusterable_index: cluster_lights.point_light_count as u32
+                    + cluster_lights.spot_light_count as u32,
+            });
             for l in &cluster_lights.entities {
                 data.push(ExtractedClustersPointLightsElement::LightEntity(*l));
             }
@@ -590,7 +574,7 @@ pub const CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT: u32 = 3;
 
 #[derive(Resource)]
 pub struct GlobalLightMeta {
-    pub gpu_point_lights: GpuPointLights,
+    pub gpu_clusterables: GpuClusterables,
     pub entity_to_index: EntityHashMap<usize>,
 }
 
@@ -607,9 +591,30 @@ impl FromWorld for GlobalLightMeta {
 impl GlobalLightMeta {
     pub fn new(buffer_binding_type: BufferBindingType) -> Self {
         Self {
-            gpu_point_lights: GpuPointLights::new(buffer_binding_type),
+            gpu_clusterables: GpuClusterables::new(buffer_binding_type),
             entity_to_index: EntityHashMap::default(),
         }
+    }
+
+    fn upload_to_gpu(
+        &mut self,
+        render_device: &RenderDevice,
+        render_queue: &RenderQueue,
+        data: &[GpuClusterable],
+    ) {
+        self.gpu_clusterables.data.clear();
+        self.gpu_clusterables.data.extend(data.iter().cloned());
+
+        // If we're uploading to a UBO, make sure to pad it out to the required length.
+        if self.gpu_clusterables.binding_type == BufferBindingType::Uniform {
+            while self.gpu_clusterables.data.len() < MAX_UNIFORM_BUFFER_CLUSTERABLES {
+                self.gpu_clusterables.data.push(GpuClusterable::default());
+            }
+        }
+
+        self.gpu_clusterables
+            .data
+            .write_buffer(render_device, render_queue);
     }
 }
 
@@ -843,65 +848,72 @@ pub fn prepare_lights(
             .reserve(point_lights.len());
     }
 
-    let mut gpu_point_lights = Vec::new();
+    let mut gpu_clusterables: Vec<GpuClusterable> = Vec::new();
     for (index, &(entity, light, _)) in point_lights.iter().enumerate() {
-        let mut flags = PointLightFlags::NONE;
-
         // Lights are sorted, shadow enabled lights are first
-        if light.shadows_enabled
+        let shadows_enabled = light.shadows_enabled
             && (index < point_light_shadow_maps_count
                 || (light.spot_light_angles.is_some()
-                    && index - point_light_count < spot_light_shadow_maps_count))
-        {
-            flags |= PointLightFlags::SHADOWS_ENABLED;
-        }
+                    && index - point_light_count < spot_light_shadow_maps_count));
 
-        let (light_custom_data, spot_light_tan_angle) = match light.spot_light_angles {
+        let color_inverse_square_range = (Vec4::from_slice(&light.color.to_f32_array())
+            * light.intensity)
+            .xyz()
+            .extend(1.0 / (light.range * light.range));
+        let position_radius = light.transform.translation().extend(light.radius);
+
+        let clusterable = match light.spot_light_angles {
             Some((inner, outer)) => {
+                // Spot light.
+
                 let light_direction = light.transform.forward();
-                if light_direction.y.is_sign_negative() {
-                    flags |= PointLightFlags::SPOT_LIGHT_Y_NEGATIVE;
-                }
+
+                let mut flags = SpotLightFlags::empty();
+                flags.set(SpotLightFlags::SHADOWS_ENABLED, shadows_enabled);
+                flags.set(
+                    SpotLightFlags::Y_NEGATIVE,
+                    light_direction.y.is_sign_negative(),
+                );
 
                 let cos_outer = outer.cos();
                 let spot_scale = 1.0 / f32::max(inner.cos() - cos_outer, 1e-4);
                 let spot_offset = -cos_outer * spot_scale;
 
-                (
-                    // For spot lights: the direction (x,z), spot_scale and spot_offset
-                    light_direction.xz().extend(spot_scale).extend(spot_offset),
-                    outer.tan(),
-                )
+                bytemuck::cast(GpuSpotLight {
+                    flags: flags.bits(),
+                    shadow_depth_bias: light.shadow_depth_bias,
+                    shadow_normal_bias: light.shadow_normal_bias,
+                    spot_light_tan_angle: outer.tan(),
+                    direction_xz: light_direction.xz(),
+                    spot_scale,
+                    spot_offset,
+                    color_inverse_square_range,
+                    position_radius,
+                })
             }
+
             None => {
-                (
-                    // For point lights: the lower-right 2x2 values of the projection matrix [2][2] [2][3] [3][2] [3][3]
-                    Vec4::new(
-                        cube_face_projection.z_axis.z,
-                        cube_face_projection.z_axis.w,
-                        cube_face_projection.w_axis.z,
-                        cube_face_projection.w_axis.w,
+                // Point light.
+
+                let mut flags = PointLightFlags::empty();
+                flags.set(PointLightFlags::SHADOWS_ENABLED, shadows_enabled);
+
+                bytemuck::cast(GpuPointLight {
+                    flags: flags.bits(),
+                    shadow_depth_bias: light.shadow_depth_bias,
+                    shadow_normal_bias: light.shadow_normal_bias,
+                    projection_matrix_lower_right: Mat2::from_cols(
+                        cube_face_projection.z_axis.zw(),
+                        cube_face_projection.w_axis.zw(),
                     ),
-                    // unused
-                    0.0,
-                )
+                    unused: 0,
+                    color_inverse_square_range,
+                    position_radius,
+                })
             }
         };
 
-        gpu_point_lights.push(GpuPointLight {
-            light_custom_data,
-            // premultiply color by intensity
-            // we don't use the alpha at all, so no reason to multiply only [0..3]
-            color_inverse_square_range: (Vec4::from_slice(&light.color.to_f32_array())
-                * light.intensity)
-                .xyz()
-                .extend(1.0 / (light.range * light.range)),
-            position_radius: light.transform.translation().extend(light.radius),
-            flags: flags.bits(),
-            shadow_depth_bias: light.shadow_depth_bias,
-            shadow_normal_bias: light.shadow_normal_bias,
-            spot_light_tan_angle,
-        });
+        gpu_clusterables.push(clusterable);
         global_light_meta.entity_to_index.insert(entity, index);
     }
 
@@ -953,10 +965,8 @@ pub fn prepare_lights(
         }
     }
 
-    global_light_meta.gpu_point_lights.set(gpu_point_lights);
-    global_light_meta
-        .gpu_point_lights
-        .write_buffer(&render_device, &render_queue);
+    // Upload the data to the GPU.
+    global_light_meta.upload_to_gpu(&render_device, &render_queue, &gpu_clusterables);
 
     live_shadow_mapping_lights.clear();
 
@@ -1334,36 +1344,43 @@ const CLUSTER_COUNT_SIZE: u32 = 9;
 const CLUSTER_OFFSET_MASK: u32 = (1 << (32 - (CLUSTER_COUNT_SIZE * 2))) - 1;
 const CLUSTER_COUNT_MASK: u32 = (1 << CLUSTER_COUNT_SIZE) - 1;
 
-// NOTE: With uniform buffer max binding size as 16384 bytes
-// that means we can fit 256 point lights in one uniform
-// buffer, which means the count can be at most 256 so it
-// needs 9 bits.
-// The array of indices can also use u8 and that means the
-// offset in to the array of indices needs to be able to address
-// 16384 values. log2(16384) = 14 bits.
-// We use 32 bits to store the offset and counts so
-// we pack the offset into the upper 14 bits of a u32,
-// the point light count into bits 9-17, and the spot light count into bits 0-8.
-//  [ 31     ..     18 | 17      ..      9 | 8       ..     0 ]
-//  [      offset      | point light count | spot light count ]
+// NOTE: With uniform buffer max binding size as 16384 bytes that means we can
+// fit 256 clusterable objects in one uniform buffer, which means the count can
+// be at most 256 so it needs 9 bits.
+//
+// The array of indices can also use u8 and that means the offset in to the
+// array of indices needs to be able to address 16384 values. log2(16384) = 14
+// bits.
+//
+// We use 32 bits to store the offset and counts so we pack the offset into the
+// upper 14 bits of a u32, the spot light count into bits 9-17, and the total
+// count of clusterable objects into bits 0-8.
+//
+//  [ 31     ..     18 | 17        ..         9 | 8         ..         0 ]
+//  [      offset      | first spot light index | last clusterable index ]
+//
 // NOTE: This assumes CPU and GPU endianness are the same which is true
 // for all common and tested x86/ARM CPUs and AMD/NVIDIA/Intel/Apple/etc GPUs
-fn pack_offset_and_counts(offset: usize, point_count: usize, spot_count: usize) -> u32 {
+fn pack_offset_and_counts(
+    offset: usize,
+    first_spot_light_index: u16,
+    last_clusterable_index: u16,
+) -> u32 {
     ((offset as u32 & CLUSTER_OFFSET_MASK) << (CLUSTER_COUNT_SIZE * 2))
-        | (point_count as u32 & CLUSTER_COUNT_MASK) << CLUSTER_COUNT_SIZE
-        | (spot_count as u32 & CLUSTER_COUNT_MASK)
+        | (first_spot_light_index as u32 & CLUSTER_COUNT_MASK) << CLUSTER_COUNT_SIZE
+        | (last_clusterable_index as u32 & CLUSTER_COUNT_MASK)
 }
 
 #[derive(ShaderType)]
-struct GpuClusterLightIndexListsUniform {
+struct GpuClusterIndexListsUniform {
     data: Box<[UVec4; ViewClusterBindings::MAX_UNIFORM_ITEMS]>,
 }
 
-// NOTE: Assert at compile time that GpuClusterLightIndexListsUniform
+// NOTE: Assert at compile time that GpuClusterIndexListsUniform
 // fits within the maximum uniform buffer binding size
-const _: () = assert!(GpuClusterLightIndexListsUniform::SHADER_SIZE.get() <= 16384);
+const _: () = assert!(GpuClusterIndexListsUniform::SHADER_SIZE.get() <= 16384);
 
-impl Default for GpuClusterLightIndexListsUniform {
+impl Default for GpuClusterIndexListsUniform {
     fn default() -> Self {
         Self {
             data: Box::new([UVec4::ZERO; ViewClusterBindings::MAX_UNIFORM_ITEMS]),
@@ -1399,7 +1416,7 @@ struct GpuClusterOffsetsAndCountsStorage {
 enum ViewClusterBuffers {
     Uniform {
         // NOTE: UVec4 is because all arrays in Std140 layout have 16-byte alignment
-        cluster_light_index_lists: UniformBuffer<GpuClusterLightIndexListsUniform>,
+        cluster_light_index_lists: UniformBuffer<GpuClusterIndexListsUniform>,
         // NOTE: UVec4 is because all arrays in Std140 layout have 16-byte alignment
         cluster_offsets_and_counts: UniformBuffer<GpuClusterOffsetsAndCountsUniform>,
     },
@@ -1472,7 +1489,12 @@ impl ViewClusterBindings {
         }
     }
 
-    pub fn push_offset_and_counts(&mut self, offset: usize, point_count: usize, spot_count: usize) {
+    pub fn push_offset_and_counts(
+        &mut self,
+        offset: usize,
+        first_spot_light_index: u16,
+        last_clusterable_index: u16,
+    ) {
         match &mut self.buffers {
             ViewClusterBuffers::Uniform {
                 cluster_offsets_and_counts,
@@ -1484,18 +1506,20 @@ impl ViewClusterBindings {
                     return;
                 }
                 let component = self.n_offsets & ((1 << 2) - 1);
-                let packed = pack_offset_and_counts(offset, point_count, spot_count);
+                let packed =
+                    pack_offset_and_counts(offset, first_spot_light_index, last_clusterable_index);
 
                 cluster_offsets_and_counts.get_mut().data[array_index][component] = packed;
             }
+
             ViewClusterBuffers::Storage {
                 cluster_offsets_and_counts,
                 ..
             } => {
-                cluster_offsets_and_counts.get_mut().data.push(UVec4::new(
+                cluster_offsets_and_counts.get_mut().data.push(uvec4(
                     offset as u32,
-                    point_count as u32,
-                    spot_count as u32,
+                    (first_spot_light_index as u32) | ((last_clusterable_index as u32) << 16),
+                    0,
                     0,
                 ));
             }
@@ -1583,7 +1607,7 @@ impl ViewClusterBindings {
     ) -> NonZeroU64 {
         match buffer_binding_type {
             BufferBindingType::Storage { .. } => GpuClusterLightIndexListsStorage::min_size(),
-            BufferBindingType::Uniform => GpuClusterLightIndexListsUniform::min_size(),
+            BufferBindingType::Uniform => GpuClusterIndexListsUniform::min_size(),
         }
     }
 
@@ -1617,15 +1641,15 @@ pub fn prepare_clusters(
 
         for record in &extracted_clusters.data {
             match record {
-                ExtractedClustersPointLightsElement::ClusterHeader(
-                    point_light_count,
-                    spot_light_count,
-                ) => {
+                ExtractedClustersPointLightsElement::ClusterHeader {
+                    first_spot_light_index,
+                    last_clusterable_index,
+                } => {
                     let offset = view_clusters_bindings.n_indices();
                     view_clusters_bindings.push_offset_and_counts(
                         offset,
-                        *point_light_count as usize,
-                        *spot_light_count as usize,
+                        *first_spot_light_index as u16,
+                        *last_clusterable_index as u16,
                     );
                 }
                 ExtractedClustersPointLightsElement::LightEntity(entity) => {

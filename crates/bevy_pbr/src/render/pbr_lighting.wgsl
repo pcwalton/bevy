@@ -1,7 +1,10 @@
 #define_import_path bevy_pbr::lighting
 
 #import bevy_pbr::{
-    mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    mesh_view_types::{
+        POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT, SPOT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+        SPOT_LIGHT_FLAGS_Y_NEGATIVE_BIT, PointLight, SpotLight,
+    },
     mesh_view_bindings as view_bindings,
 }
 #import bevy_render::maths::PI
@@ -328,17 +331,23 @@ fn perceptualRoughnessToRoughness(perceptualRoughness: f32) -> f32 {
     return clampedPerceptualRoughness * clampedPerceptualRoughness;
 }
 
-fn point_light(light_id: u32, input: ptr<function, LightingInput>) -> vec3<f32> {
+// Lighting common to both point and spot lights.
+fn point_or_spot_light(
+    position: vec3<f32>,
+    radius: f32,
+    light_color: vec3<f32>,
+    inverse_square_range: f32,
+    input: ptr<function, LightingInput>,
+) -> vec3<f32> {
     // Unpack.
     let diffuse_color = (*input).diffuse_color;
     let P = (*input).P;
     let N = (*input).layers[LAYER_BASE].N;
     let V = (*input).V;
 
-    let light = &view_bindings::point_lights.data[light_id];
-    let light_to_frag = (*light).position_radius.xyz - P;
+    let light_to_frag = position - P;
     let distance_square = dot(light_to_frag, light_to_frag);
-    let rangeAttenuation = getDistanceAttenuation(distance_square, (*light).color_inverse_square_range.w);
+    let rangeAttenuation = getDistanceAttenuation(distance_square, inverse_square_range);
 
     // Base layer
 
@@ -347,7 +356,7 @@ fn point_light(light_id: u32, input: ptr<function, LightingInput>) -> vec3<f32> 
         LAYER_BASE,
         V,
         light_to_frag,
-        (*light).position_radius.w,
+        radius,
     );
     var specular_derived_input = derive_lighting_input(N, V, specular_L_intensity.xyz);
 
@@ -369,7 +378,7 @@ fn point_light(light_id: u32, input: ptr<function, LightingInput>) -> vec3<f32> 
         LAYER_CLEARCOAT,
         V,
         light_to_frag,
-        (*light).position_radius.w,
+        radius,
     );
     var clearcoat_specular_derived_input =
         derive_lighting_input(clearcoat_N, V, clearcoat_specular_L_intensity.xyz);
@@ -403,7 +412,7 @@ fn point_light(light_id: u32, input: ptr<function, LightingInput>) -> vec3<f32> 
     // I = Φ / 4 π
     // The derivation of this can be seen here: https://google.github.io/filament/Filament.html#mjx-eqn-pointLightLuminousPower
 
-    // NOTE: (*light).color.rgb is premultiplied with (*light).intensity / 4 π (which would be the luminous intensity) on the CPU
+    // NOTE: color.rgb is premultiplied with intensity / 4 π (which would be the luminous intensity) on the CPU
 
     var color: vec3<f32>;
 #ifdef STANDARD_MATERIAL_CLEARCOAT
@@ -415,20 +424,33 @@ fn point_light(light_id: u32, input: ptr<function, LightingInput>) -> vec3<f32> 
     color = diffuse + specular_light;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
-    return color * (*light).color_inverse_square_range.rgb *
-        (rangeAttenuation * derived_input.NdotL);
+    return color * light_color * (rangeAttenuation * derived_input.NdotL);
 }
 
-fn spot_light(light_id: u32, input: ptr<function, LightingInput>) -> vec3<f32> {
-    // reuse the point light calculations
-    let point_light = point_light(light_id, input);
+fn point_light(light: ptr<function, PointLight>, input: ptr<function, LightingInput>) -> vec3<f32> {
+    return point_or_spot_light(
+        (*light).position_radius.xyz,
+        (*light).position_radius.w,
+        (*light).color_inverse_square_range.xyz,
+        (*light).color_inverse_square_range.w,
+        input,
+    );
+}
 
-    let light = &view_bindings::point_lights.data[light_id];
+fn spot_light(light: ptr<function, SpotLight>, input: ptr<function, LightingInput>) -> vec3<f32> {
+    // reuse the point light calculations
+    let point_light = point_or_spot_light(
+        (*light).position_radius.xyz,
+        (*light).position_radius.w,
+        (*light).color_inverse_square_range.xyz,
+        (*light).color_inverse_square_range.w,
+        input,
+    );
 
     // reconstruct spot dir from x/z and y-direction flag
-    var spot_dir = vec3<f32>((*light).light_custom_data.x, 0.0, (*light).light_custom_data.y);
+    var spot_dir = vec3<f32>((*light).direction_xz.x, 0.0, (*light).direction_xz.y);
     spot_dir.y = sqrt(max(0.0, 1.0 - spot_dir.x * spot_dir.x - spot_dir.z * spot_dir.z));
-    if ((*light).flags & POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE) != 0u {
+    if ((*light).flags & SPOT_LIGHT_FLAGS_Y_NEGATIVE_BIT) != 0u {
         spot_dir.y = -spot_dir.y;
     }
     let light_to_frag = (*light).position_radius.xyz - (*input).P.xyz;
@@ -437,7 +459,7 @@ fn spot_light(light_id: u32, input: ptr<function, LightingInput>) -> vec3<f32> {
     // spot_scale and spot_offset have been precomputed
     // note we normalize here to get "l" from the filament listing. spot_dir is already normalized
     let cd = dot(-spot_dir, normalize(light_to_frag));
-    let attenuation = saturate(cd * (*light).light_custom_data.z + (*light).light_custom_data.w);
+    let attenuation = saturate(cd * (*light).spot_scale + (*light).spot_offset);
     let spot_attenuation = attenuation * attenuation;
 
     return point_light * spot_attenuation;
