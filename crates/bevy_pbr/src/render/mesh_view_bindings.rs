@@ -44,7 +44,7 @@ use crate::{
     prepass, FogMeta, GlobalLightMeta, GpuClusterables, GpuFog, GpuLights, LightMeta,
     LightProbesBuffer, LightProbesUniform, MeshPipeline, MeshPipelineKey, RenderViewLightProbes,
     ScreenSpaceAmbientOcclusionTextures, ScreenSpaceReflectionsBuffer,
-    ScreenSpaceReflectionsUniform, ShadowSamplers, ViewClusterBindings, ViewShadowBindings,
+    ScreenSpaceReflectionsUniform, ShadowSamplers, ViewClusterBindings, ViewShadowTextures,
     CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT,
 };
 
@@ -449,7 +449,7 @@ pub fn prepare_mesh_view_bind_groups(
     view_uniforms: Res<ViewUniforms>,
     views: Query<(
         Entity,
-        &ViewShadowBindings,
+        &ViewShadowTextures,
         &ViewClusterBindings,
         Option<&ScreenSpaceAmbientOcclusionTextures>,
         Option<&ViewPrepassTextures>,
@@ -522,7 +522,7 @@ pub fn prepare_mesh_view_bind_groups(
             let mut entries = DynamicBindGroupEntries::new_with_indices((
                 (0, view_binding.clone()),
                 (1, light_binding.clone()),
-                (2, &shadow_bindings.point_light_depth_texture_view),
+                (2, &shadow_bindings.point_and_spot_light_depth_texture_view),
                 (3, &shadow_samplers.point_light_sampler),
                 (4, &shadow_bindings.directional_light_depth_texture_view),
                 (5, &shadow_samplers.directional_light_sampler),

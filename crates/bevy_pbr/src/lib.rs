@@ -398,11 +398,12 @@ impl Plugin for PbrPlugin {
 
         // Extract the required data from the main world
         render_app
+            .init_resource::<PointLightCubemapTransforms>()
             .add_systems(ExtractSchedule, (extract_clusters, extract_lights))
             .add_systems(
                 Render,
                 (
-                    prepare_clusterables
+                    prepare_lights
                         .in_set(RenderSet::ManageViews)
                         .after(prepare_assets::<GpuImage>),
                     prepare_clusters.in_set(RenderSet::PrepareResources),

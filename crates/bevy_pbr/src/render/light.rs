@@ -27,7 +27,8 @@ use bevy_utils::tracing::info_span;
 use bevy_utils::tracing::{error, warn};
 use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
-use std::mem;
+use std::f32::consts::FRAC_PI_2;
+use std::{array, mem};
 use std::{hash::Hash, num::NonZeroU64, ops::Range};
 
 use crate::*;
@@ -130,7 +131,7 @@ pub struct GpuDirectionalLights {
 }
 
 impl GpuDirectionalLights {
-    fn new(visible_lights: &VisibleLights, counts: &VisibleClusterableCounts) -> Self {
+    fn new(visible_lights: &VisibleLights, counts: &VisibleLightCounts) -> Self {
         let mut gpu_directional_lights = GpuDirectionalLights::default();
 
         for (index, (_light_entity, light)) in visible_lights
@@ -285,7 +286,7 @@ struct LightLimits {
 /// An internal helper structure used during [`prepare_lights`] that counts
 /// various resources.
 #[derive(Default)]
-struct VisibleClusterableCounts {
+struct VisibleLightCounts {
     /// The number of visible point lights.
     point_light_count: usize,
     /// The number of shadow maps we need for point lights.
@@ -307,15 +308,15 @@ struct VisibleLights<'a> {
     directional: Vec<(Entity, &'a ExtractedDirectionalLight)>,
 }
 
-/// Constructs the light data for a single view.
-struct ViewClusterableDataBuilder<'a> {
+/// Constructs the rendering light data for a single view.
+struct ViewLightRenderDataBuilder<'a> {
     view_entity: Entity,
     extracted_view: &'a ExtractedView,
     clusters: &'a ExtractedClusterConfig,
     maybe_layers: Option<&'a RenderLayers>,
 
     visible_lights: &'a VisibleLights<'a>,
-    counts: &'a VisibleClusterableCounts,
+    counts: &'a VisibleLightCounts,
 
     render_device: &'a RenderDevice,
 
@@ -328,9 +329,7 @@ struct ViewClusterableDataBuilder<'a> {
 
     gpu_directional_lights: &'a GpuDirectionalLights,
 
-    // TODO: These should be a Resource
-    cube_face_projection: &'a Mat4,
-    cube_face_rotations: &'a [Transform],
+    point_light_cubemap_transforms: &'a PointLightCubemapTransforms,
 }
 
 bitflags! {
@@ -386,6 +385,16 @@ static DIRECTIONAL_LIGHT_DEPTH_TEXTURE_VIEW_DESCRIPTOR: TextureViewDescriptor =
         array_layer_count: None,
     };
 
+/// Cached static transforms for the cubemaps that point light shadow maps use.
+///
+/// We compute these once during startup and cache them so that they don't have
+/// to be computed again.
+#[derive(Resource)]
+pub struct PointLightCubemapTransforms {
+    face_projection: Mat4,
+    face_rotations: [Transform; 6],
+}
+
 // TODO: this pattern for initializing the shaders / pipeline isn't ideal. this should be handled by the asset system
 impl FromWorld for ShadowSamplers {
     fn from_world(world: &mut World) -> Self {
@@ -412,6 +421,21 @@ impl FromWorld for ShadowSamplers {
                 compare: Some(CompareFunction::GreaterEqual),
                 ..Default::default()
             }),
+        }
+    }
+}
+
+impl Default for PointLightCubemapTransforms {
+    fn default() -> Self {
+        let face_projection =
+            Mat4::perspective_infinite_reverse_rh(FRAC_PI_2, 1.0, POINT_LIGHT_NEAR_Z);
+        let face_rotations = array::from_fn(|face_index| {
+            let CubeMapFace { target, up } = CUBE_MAP_FACES[face_index];
+            Transform::IDENTITY.looking_at(target, up)
+        });
+        Self {
+            face_projection,
+            face_rotations,
         }
     }
 }
@@ -724,16 +748,28 @@ pub struct ShadowView {
     pub pass_name: String,
 }
 
+/// Contains the shadow map textures for each view.
 #[derive(Component)]
-pub struct ViewShadowBindings {
-    pub point_light_depth_texture: Texture,
-    pub point_light_depth_texture_view: TextureView,
-    pub directional_light_depth_texture: Texture,
+pub struct ViewShadowTextures {
+    /// The texture holding the shadow maps for all point and spot lights visible from this view.
+    pub point_and_spot_light_depth_texture: CachedTexture,
+
+    /// A view of [`ViewShadowTextures::point_and_spot_light_depth_texture`]
+    /// suitable for attaching to a PBR shader.
+    pub point_and_spot_light_depth_texture_view: TextureView,
+
+    /// The texture holding the shadow maps for all directional lights.
+    pub directional_light_depth_texture: CachedTexture,
+
+    /// A view of [`ViewShadowTextures::directional_light_depth_texture`]
+    /// suitable for attaching to a PBR shader.
     pub directional_light_depth_texture_view: TextureView,
 }
 
-#[derive(Component)]
+/// Contains a list of the entity IDs of all lights visible from each view.
+#[derive(Component, Default)]
 pub struct ViewLightEntities {
+    /// All lights visible from this view.
     pub lights: Vec<Entity>,
 }
 
@@ -788,8 +824,8 @@ impl GlobalLightMeta {
     fn gather_visible(
         &mut self,
         visible_lights: &VisibleLights,
-        counts: &VisibleClusterableCounts,
-        cube_face_projection: &Mat4,
+        counts: &VisibleLightCounts,
+        point_light_cubemap_transforms: &PointLightCubemapTransforms,
     ) {
         // Clear out our data.
         self.entity_to_index.clear();
@@ -856,8 +892,8 @@ impl GlobalLightMeta {
                         shadow_depth_bias: light.shadow_depth_bias,
                         shadow_normal_bias: light.shadow_normal_bias,
                         projection_matrix_lower_right: Mat2::from_cols(
-                            cube_face_projection.z_axis.zw(),
-                            cube_face_projection.w_axis.zw(),
+                            point_light_cubemap_transforms.face_projection.z_axis.zw(),
+                            point_light_cubemap_transforms.face_projection.w_axis.zw(),
                         ),
                         unused: 0,
                         color_inverse_square_range,
@@ -940,9 +976,9 @@ pub(crate) fn spot_light_projection_matrix(angle: f32) -> Mat4 {
     Mat4::perspective_infinite_reverse_rh(angle * 2.0, 1.0, POINT_LIGHT_NEAR_Z)
 }
 
-/// Performs the light clustering, assigning clusterables to frustum slices.
+/// Performs non-clustering-related light preparation.
 #[allow(clippy::too_many_arguments)]
-pub fn prepare_clusterables(
+pub fn prepare_lights(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
     render_device: Res<RenderDevice>,
@@ -967,24 +1003,15 @@ pub fn prepare_clusterables(
     )>,
     directional_lights: Query<(Entity, &ExtractedDirectionalLight)>,
     mut live_shadow_mapping_lights: Local<EntityHashSet>,
+    point_light_cubemap_transforms: Res<PointLightCubemapTransforms>,
 ) {
-    let views_iter = views.iter();
-    let views_count = views_iter.len();
     let Some(mut view_gpu_lights_writer) =
         light_meta
             .view_gpu_lights
-            .get_writer(views_count, &render_device, &render_queue)
+            .get_writer(views.iter().len(), &render_device, &render_queue)
     else {
         return;
     };
-
-    // Pre-calculate for PointLights
-    let cube_face_projection =
-        Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_2, 1.0, POINT_LIGHT_NEAR_Z);
-    let cube_face_rotations = CUBE_MAP_FACES
-        .iter()
-        .map(|CubeMapFace { target, up }| Transform::IDENTITY.looking_at(*target, *up))
-        .collect::<Vec<_>>();
 
     let mut visible_lights =
         VisibleLights::new(point_and_spot_lights.iter(), directional_lights.iter());
@@ -993,10 +1020,10 @@ pub fn prepare_clusterables(
     warnings.emit(&visible_lights.directional);
 
     // Count the clusterable objects, and sort them into the proper order.
-    let counts = VisibleClusterableCounts::new(&limits, &visible_lights);
+    let counts = VisibleLightCounts::new(&limits, &visible_lights);
     visible_lights.sort();
 
-    global_light_meta.gather_visible(&visible_lights, &counts, &cube_face_projection);
+    global_light_meta.gather_visible(&visible_lights, &counts, &point_light_cubemap_transforms);
 
     // Gather up all the directional lights.
     let gpu_directional_lights = GpuDirectionalLights::new(&visible_lights, &counts);
@@ -1008,7 +1035,7 @@ pub fn prepare_clusterables(
 
     // set up light data for each view
     for (view_entity, extracted_view, clusters, maybe_layers) in &views {
-        ViewClusterableDataBuilder {
+        ViewLightRenderDataBuilder {
             view_entity,
             extracted_view,
             clusters,
@@ -1021,8 +1048,7 @@ pub fn prepare_clusterables(
             global_light_meta: &global_light_meta,
             ambient_light: &ambient_light,
             gpu_directional_lights: &gpu_directional_lights,
-            cube_face_projection: &cube_face_projection,
-            cube_face_rotations: &cube_face_rotations,
+            point_light_cubemap_transforms: &point_light_cubemap_transforms,
         }
         .build(
             &mut commands,
@@ -1701,9 +1727,9 @@ impl LightLimits {
     }
 }
 
-impl VisibleClusterableCounts {
-    fn new(limits: &LightLimits, lights: &VisibleLights) -> VisibleClusterableCounts {
-        let mut light_counts = VisibleClusterableCounts::default();
+impl VisibleLightCounts {
+    fn new(limits: &LightLimits, lights: &VisibleLights) -> VisibleLightCounts {
+        let mut light_counts = VisibleLightCounts::default();
 
         for (_, directional_light) in &lights.directional {
             if directional_light.volumetric
@@ -1829,7 +1855,7 @@ impl<'a> VisibleLights<'a> {
     }
 }
 
-impl<'a> ViewClusterableDataBuilder<'a> {
+impl<'a> ViewLightRenderDataBuilder<'a> {
     fn build(
         &self,
         commands: &mut Commands,
@@ -1838,65 +1864,32 @@ impl<'a> ViewClusterableDataBuilder<'a> {
         view_gpu_lights_writer: &mut DynamicUniformBufferWriter<GpuLights>,
         texture_cache: &mut TextureCache,
     ) {
-        let point_light_depth_texture = texture_cache.get(
+        // Create the shadow map textures.
+        let view_shadow_bindings = ViewShadowTextures::new(
+            self.point_light_shadow_map,
+            self.directional_light_shadow_map,
+            self.gpu_directional_lights,
+            self.counts,
             self.render_device,
-            TextureDescriptor {
-                size: Extent3d {
-                    width: self.point_light_shadow_map.size as u32,
-                    height: self.point_light_shadow_map.size as u32,
-                    depth_or_array_layers: self.counts.point_light_shadow_maps_count.max(1) as u32
-                        * 6,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: CORE_3D_DEPTH_FORMAT,
-                label: Some("point_light_shadow_map_texture"),
-                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-        );
-        let directional_light_depth_texture = texture_cache.get(
-            self.render_device,
-            TextureDescriptor {
-                size: Extent3d {
-                    width: (self.directional_light_shadow_map.size as u32)
-                        .min(self.render_device.limits().max_texture_dimension_2d),
-                    height: (self.directional_light_shadow_map.size as u32)
-                        .min(self.render_device.limits().max_texture_dimension_2d),
-                    depth_or_array_layers: (self
-                        .gpu_directional_lights
-                        .num_directional_cascades_enabled
-                        + self.counts.spot_light_shadow_maps_count)
-                        .max(1) as u32,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: CORE_3D_DEPTH_FORMAT,
-                label: Some("directional_light_shadow_map_texture"),
-                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
+            texture_cache,
         );
 
-        // Build the clustered lights.
+        // Create the list of lights for this view.
+        let mut view_lights = ViewLightEntities::new();
 
-        let mut view_lights = vec![];
-
-        // Build point lights.
-        self.build_point_lights(
+        // Build shadow maps for point lights.
+        self.build_shadow_maps_for_point_lights(
             &mut view_lights,
-            &point_light_depth_texture,
+            &view_shadow_bindings.point_and_spot_light_depth_texture,
             commands,
             shadow_render_phases,
             live_shadow_mapping_lights,
         );
 
-        // Build spot lights.
-        self.build_spot_lights(
+        // Build shadow maps for spot lights.
+        self.build_shadow_maps_for_spot_lights(
             &mut view_lights,
-            &directional_light_depth_texture,
+            &view_shadow_bindings.directional_light_depth_texture,
             commands,
             shadow_render_phases,
             live_shadow_mapping_lights,
@@ -1907,44 +1900,32 @@ impl<'a> ViewClusterableDataBuilder<'a> {
         self.build_directional_lights(
             &mut gpu_lights,
             &mut view_lights,
-            &directional_light_depth_texture,
+            &view_shadow_bindings.directional_light_depth_texture,
             commands,
             shadow_render_phases,
             live_shadow_mapping_lights,
         );
 
-        let point_light_depth_texture_view = point_light_depth_texture
-            .texture
-            .create_view(&POINT_LIGHT_DEPTH_TEXTURE_VIEW_DESCRIPTOR);
-        let directional_light_depth_texture_view = directional_light_depth_texture
-            .texture
-            .create_view(&DIRECTIONAL_LIGHT_DEPTH_TEXTURE_VIEW_DESCRIPTOR);
-
+        // Insert the components.
         commands.entity(self.view_entity).insert((
-            ViewShadowBindings {
-                point_light_depth_texture: point_light_depth_texture.texture,
-                point_light_depth_texture_view,
-                directional_light_depth_texture: directional_light_depth_texture.texture,
-                directional_light_depth_texture_view,
-            },
-            ViewLightEntities {
-                lights: view_lights,
-            },
+            view_shadow_bindings,
+            view_lights,
             ViewLightsUniformOffset {
                 offset: view_gpu_lights_writer.write(&gpu_lights),
             },
         ));
     }
 
-    fn build_point_lights(
+    fn build_shadow_maps_for_point_lights(
         &self,
-        view_lights: &mut Vec<Entity>,
+        view_lights: &mut ViewLightEntities,
         point_light_depth_texture: &CachedTexture,
         commands: &mut Commands,
         shadow_render_phases: &mut ViewBinnedRenderPhases<Shadow>,
         live_shadow_mapping_lights: &mut EntityHashSet,
     ) {
-        // TODO: this should select lights based on relevance to the view instead of the first ones that show up in a query
+        // TODO: this should select lights based on relevance to the view
+        // instead of the first ones that show up in a query
         for &(light_entity, light, (point_light_frusta, _)) in self
             .visible_lights
             .point_and_spot_lights
@@ -1964,7 +1945,8 @@ impl<'a> ViewClusterableDataBuilder<'a> {
             let view_translation = GlobalTransform::from_translation(light.transform.translation());
 
             for (face_index, (view_rotation, frustum)) in self
-                .cube_face_rotations
+                .point_light_cubemap_transforms
+                .face_rotations
                 .iter()
                 .zip(&point_light_frusta.unwrap().frusta)
                 .enumerate()
@@ -2002,7 +1984,7 @@ impl<'a> ViewClusterableDataBuilder<'a> {
                             ),
                             transform: view_translation * *view_rotation,
                             view_projection: None,
-                            projection: *self.cube_face_projection,
+                            projection: self.point_light_cubemap_transforms.face_projection,
                             hdr: false,
                             color_grading: Default::default(),
                         },
@@ -2013,7 +1995,7 @@ impl<'a> ViewClusterableDataBuilder<'a> {
                         },
                     ))
                     .id();
-                view_lights.push(view_light_entity);
+                view_lights.lights.push(view_light_entity);
 
                 shadow_render_phases.insert_or_clear(view_light_entity);
                 live_shadow_mapping_lights.insert(view_light_entity);
@@ -2021,9 +2003,9 @@ impl<'a> ViewClusterableDataBuilder<'a> {
         }
     }
 
-    fn build_spot_lights(
+    fn build_shadow_maps_for_spot_lights(
         &self,
-        view_lights: &mut Vec<Entity>,
+        view_lights: &mut ViewLightEntities,
         directional_light_depth_texture: &CachedTexture,
         commands: &mut Commands,
         shadow_render_phases: &mut ViewBinnedRenderPhases<Shadow>,
@@ -2085,7 +2067,7 @@ impl<'a> ViewClusterableDataBuilder<'a> {
                 ))
                 .id();
 
-            view_lights.push(view_light_entity);
+            view_lights.lights.push(view_light_entity);
 
             shadow_render_phases.insert_or_clear(view_light_entity);
             live_shadow_mapping_lights.insert(view_light_entity);
@@ -2095,7 +2077,7 @@ impl<'a> ViewClusterableDataBuilder<'a> {
     fn build_directional_lights(
         &self,
         gpu_lights: &mut GpuLights,
-        view_lights: &mut Vec<Entity>,
+        view_lights: &mut ViewLightEntities,
         directional_light_depth_texture: &CachedTexture,
         commands: &mut Commands,
         shadow_render_phases: &mut ViewBinnedRenderPhases<Shadow>,
@@ -2194,7 +2176,7 @@ impl<'a> ViewClusterableDataBuilder<'a> {
                         },
                     ))
                     .id();
-                view_lights.push(view_light_entity);
+                view_lights.lights.push(view_light_entity);
 
                 shadow_render_phases.insert_or_clear(view_light_entity);
                 live_shadow_mapping_lights.insert(view_light_entity);
@@ -2242,5 +2224,76 @@ impl<'a> ViewClusterableDataBuilder<'a> {
                 .num_directional_cascades_enabled as i32
                 - self.counts.point_light_count as i32,
         }
+    }
+}
+
+impl ViewShadowTextures {
+    fn new(
+        point_light_shadow_map: &PointLightShadowMap,
+        directional_light_shadow_map: &DirectionalLightShadowMap,
+        gpu_directional_lights: &GpuDirectionalLights,
+        counts: &VisibleLightCounts,
+        render_device: &RenderDevice,
+        texture_cache: &mut TextureCache,
+    ) -> Self {
+        let point_light_depth_texture = texture_cache.get(
+            render_device,
+            TextureDescriptor {
+                size: Extent3d {
+                    width: point_light_shadow_map.size as u32,
+                    height: point_light_shadow_map.size as u32,
+                    depth_or_array_layers: counts.point_light_shadow_maps_count.max(1) as u32 * 6,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: CORE_3D_DEPTH_FORMAT,
+                label: Some("point_light_shadow_map_texture"),
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+
+        let directional_light_shadow_map_size = (directional_light_shadow_map.size as u32)
+            .min(render_device.limits().max_texture_dimension_2d);
+        let directional_light_depth_texture = texture_cache.get(
+            render_device,
+            TextureDescriptor {
+                size: Extent3d {
+                    width: directional_light_shadow_map_size,
+                    height: directional_light_shadow_map_size,
+                    depth_or_array_layers: (gpu_directional_lights.num_directional_cascades_enabled
+                        + counts.spot_light_shadow_maps_count)
+                        .max(1) as u32,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: CORE_3D_DEPTH_FORMAT,
+                label: Some("directional_light_shadow_map_texture"),
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+
+        let point_light_depth_texture_view = point_light_depth_texture
+            .texture
+            .create_view(&POINT_LIGHT_DEPTH_TEXTURE_VIEW_DESCRIPTOR);
+        let directional_light_depth_texture_view = directional_light_depth_texture
+            .texture
+            .create_view(&DIRECTIONAL_LIGHT_DEPTH_TEXTURE_VIEW_DESCRIPTOR);
+
+        ViewShadowTextures {
+            point_and_spot_light_depth_texture: point_light_depth_texture,
+            point_and_spot_light_depth_texture_view: point_light_depth_texture_view,
+            directional_light_depth_texture,
+            directional_light_depth_texture_view,
+        }
+    }
+}
+
+impl ViewLightEntities {
+    fn new() -> Self {
+        Self::default()
     }
 }
