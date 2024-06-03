@@ -337,7 +337,7 @@ impl Plugin for PbrPlugin {
                 PostUpdate,
                 (
                     add_clusters.in_set(SimulationLightSystems::AddClusters),
-                    assign_lights_to_clusters
+                    assign_objects_to_clusters
                         .in_set(SimulationLightSystems::AssignLightsToClusters)
                         .after(TransformSystem::TransformPropagate)
                         .after(VisibilitySystems::CheckVisibility)
