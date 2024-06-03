@@ -296,7 +296,7 @@ impl Plugin for PbrPlugin {
             .register_type::<FogSettings>()
             .register_type::<ShadowFilteringMethod>()
             .init_resource::<AmbientLight>()
-            .init_resource::<GlobalVisiblePointLights>()
+            .init_resource::<GlobalVisibleClusterables>()
             .init_resource::<DirectionalLightShadowMap>()
             .init_resource::<PointLightShadowMap>()
             .register_type::<DefaultOpaqueRendererMethod>()

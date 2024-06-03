@@ -471,9 +471,9 @@ pub fn extract_clusters(
             continue;
         }
 
-        let num_entities: usize = clusters.lights.iter().map(|l| l.entities.len()).sum();
-        let mut data = Vec::with_capacity(clusters.lights.len() + num_entities);
-        for cluster_lights in &clusters.lights {
+        let num_entities: usize = clusters.clusterables.iter().map(|l| l.entities.len()).sum();
+        let mut data = Vec::with_capacity(clusters.clusterables.len() + num_entities);
+        for cluster_lights in &clusters.clusterables {
             data.push(ExtractedClustersPointLightsElement::ClusterHeader {
                 first_spot_light_index: cluster_lights.point_light_count as u32,
                 last_clusterable_index: cluster_lights.point_light_count as u32
@@ -500,7 +500,7 @@ pub fn extract_lights(
     mut commands: Commands,
     point_light_shadow_map: Extract<Res<PointLightShadowMap>>,
     directional_light_shadow_map: Extract<Res<DirectionalLightShadowMap>>,
-    global_point_lights: Extract<Res<GlobalVisiblePointLights>>,
+    global_point_lights: Extract<Res<GlobalVisibleClusterables>>,
     point_lights: Extract<
         Query<(
             &PointLight,
@@ -1823,7 +1823,7 @@ impl<'a> VisibleLights<'a> {
         // - then by entity as a stable key to ensure that a consistent set of lights are chosen if the light count limit is exceeded.
         self.point_and_spot_lights
             .sort_by(|(entity_1, light_1, _), (entity_2, light_2, _)| {
-                point_light_order(
+                clusterable_order(
                     (
                         entity_1,
                         &light_1.shadows_enabled,
