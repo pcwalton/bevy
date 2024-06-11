@@ -16,19 +16,14 @@
 
 #define_import_path bevy_pbr::raymarch
 
-#import bevy_pbr::mesh_view_bindings::depth_prepass_texture
+#import bevy_pbr::mesh_view_bindings
+#import bevy_pbr::mesh_view_bindings::{depth_linear_sampler, depth_nearest_sampler}
 #import bevy_pbr::view_transformations::{
     direction_world_to_clip,
     ndc_to_uv,
     perspective_camera_near,
     position_world_to_ndc,
 }
-
-// Allows us to sample from the depth buffer with bilinear filtering.
-@group(1) @binding(2) var depth_linear_sampler: sampler;
-
-// Allows us to sample from the depth buffer with nearest-neighbor filtering.
-@group(1) @binding(3) var depth_nearest_sampler: sampler;
 
 // Main code
 
@@ -241,10 +236,33 @@ fn depth_raymarch_distance_fn_evaluate(
     // * The false occlusions due to duplo land are rejected because the ray stays above the smooth surface.
     // * The shrink-wrap surface is no longer continuous, so it's possible for rays to miss it.
 
-    let linear_depth =
-        1.0 / textureSampleLevel(depth_prepass_texture, depth_linear_sampler, interp_uv, 0.0);
-    let unfiltered_depth =
-        1.0 / textureSampleLevel(depth_prepass_texture, depth_nearest_sampler, interp_uv, 0.0);
+#ifdef MULTISAMPLED
+    let linear_depth = 1.0 / textureSampleLevel(
+        mesh_view_bindings::single_sampled_depth_prepass_texture,
+        depth_linear_sampler,
+        interp_uv,
+        0.0,
+    );
+    let unfiltered_depth = 1.0 / textureSampleLevel(
+        mesh_view_bindings::single_sampled_depth_prepass_texture,
+        depth_nearest_sampler,
+        interp_uv,
+        0.0,
+    );
+#else   // MULTISAMPLED
+    let linear_depth = 1.0 / textureSampleLevel(
+        mesh_view_bindings::depth_prepass_texture,
+        depth_linear_sampler,
+        interp_uv,
+        0.0,
+    );
+    let unfiltered_depth = 1.0 / textureSampleLevel(
+        mesh_view_bindings::depth_prepass_texture,
+        depth_nearest_sampler,
+        interp_uv,
+        0.0,
+    );
+#endif  // MULTISAMPLED
 
     var max_depth: f32;
     var min_depth: f32;

@@ -412,7 +412,9 @@ fn apply_pbr_lighting(
         let light_id = clustering::get_clusterable_object_id(i);
         var shadow: f32 = 1.0;
         if ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
-                && (view_bindings::clusterable_objects.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+                && (view_bindings::clusterable_objects.data[light_id].flags &
+                    (mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT |
+                     mesh_view_types::POINT_LIGHT_FLAGS_CONTACT_SHADOWS_BIT)) != 0u) {
             shadow = shadows::fetch_point_shadow(light_id, in.world_position, in.world_normal);
         }
 
@@ -431,7 +433,9 @@ fn apply_pbr_lighting(
         // F0 = vec3<f32>(0.0)
         var transmitted_shadow: f32 = 1.0;
         if ((in.flags & (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)) == (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)
-                && (view_bindings::clusterable_objects.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+                && (view_bindings::clusterable_objects.data[light_id].flags &
+                    (mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT |
+                     mesh_view_types::POINT_LIGHT_FLAGS_CONTACT_SHADOWS_BIT)) != 0u) {
             transmitted_shadow = shadows::fetch_point_shadow(light_id, diffuse_transmissive_lobe_world_position, -in.world_normal);
         }
 
@@ -447,7 +451,9 @@ fn apply_pbr_lighting(
 
         var shadow: f32 = 1.0;
         if ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
-                && (view_bindings::clusterable_objects.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+                && (view_bindings::clusterable_objects.data[light_id].flags &
+                    (mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT |
+                     mesh_view_types::POINT_LIGHT_FLAGS_CONTACT_SHADOWS_BIT)) != 0u) {
             shadow = shadows::fetch_spot_shadow(light_id, in.world_position, in.world_normal);
         }
 
@@ -466,7 +472,9 @@ fn apply_pbr_lighting(
         // F0 = vec3<f32>(0.0)
         var transmitted_shadow: f32 = 1.0;
         if ((in.flags & (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)) == (MESH_FLAGS_SHADOW_RECEIVER_BIT | MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT)
-                && (view_bindings::clusterable_objects.data[light_id].flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+                && (view_bindings::clusterable_objects.data[light_id].flags &
+                    (mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT |
+                     mesh_view_types::POINT_LIGHT_FLAGS_CONTACT_SHADOWS_BIT)) != 0u) {
             transmitted_shadow = shadows::fetch_spot_shadow(light_id, diffuse_transmissive_lobe_world_position, -in.world_normal);
         }
 
@@ -488,7 +496,9 @@ fn apply_pbr_lighting(
 
         var shadow: f32 = 1.0;
         if ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
-                && (view_bindings::lights.directional_lights[i].flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+                && (view_bindings::lights.directional_lights[i].flags & (
+                    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT |
+                    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_CONTACT_SHADOWS_BIT)) != 0u) {
             shadow = shadows::fetch_directional_shadow(i, in.world_position, in.world_normal, view_z);
         }
 

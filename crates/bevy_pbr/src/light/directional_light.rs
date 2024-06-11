@@ -63,6 +63,7 @@ pub struct DirectionalLight {
     /// A bias applied along the direction of the fragment's surface normal. It is scaled to the
     /// shadow map's texel size so that it is automatically adjusted to the orthographic projection.
     pub shadow_normal_bias: f32,
+    pub contact_shadows: bool,
 }
 
 impl Default for DirectionalLight {
@@ -73,6 +74,7 @@ impl Default for DirectionalLight {
             shadows_enabled: false,
             shadow_depth_bias: Self::DEFAULT_SHADOW_DEPTH_BIAS,
             shadow_normal_bias: Self::DEFAULT_SHADOW_NORMAL_BIAS,
+            contact_shadows: false,
         }
     }
 }

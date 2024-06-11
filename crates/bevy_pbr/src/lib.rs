@@ -24,6 +24,7 @@ pub mod experimental {
 
 mod bundle;
 mod cluster;
+mod contact_shadows;
 pub mod deferred;
 mod extended_material;
 mod fog;
@@ -44,6 +45,7 @@ use std::marker::PhantomData;
 
 pub use bundle::*;
 pub use cluster::*;
+pub use contact_shadows::*;
 pub use extended_material::*;
 pub use fog::*;
 pub use light::*;
@@ -94,6 +96,7 @@ pub mod graph {
         GpuPreprocess,
         /// Label for the screen space reflections pass.
         ScreenSpaceReflections,
+        ContactShadowsInit,
     }
 }
 
@@ -319,14 +322,17 @@ impl Plugin for PbrPlugin {
                 ExtractComponentPlugin::<ShadowFilteringMethod>::default(),
                 LightmapPlugin,
                 LightProbePlugin,
-                PbrProjectionPlugin::<Projection>::default(),
-                PbrProjectionPlugin::<PerspectiveProjection>::default(),
-                PbrProjectionPlugin::<OrthographicProjection>::default(),
+                (
+                    PbrProjectionPlugin::<Projection>::default(),
+                    PbrProjectionPlugin::<PerspectiveProjection>::default(),
+                    PbrProjectionPlugin::<OrthographicProjection>::default(),
+                ),
                 GpuMeshPreprocessPlugin {
                     use_gpu_instance_buffer_builder: self.use_gpu_instance_buffer_builder,
                 },
                 VolumetricFogPlugin,
                 ScreenSpaceReflectionsPlugin,
+                ContactShadowsPlugin,
             ))
             .configure_sets(
                 PostUpdate,

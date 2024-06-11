@@ -3204,6 +3204,17 @@ description = "Displays an example model with anisotropy"
 category = "3D Rendering"
 wasm = false
 
+[[example]]
+name = "contact_shadows"
+path = "examples/3d/contact_shadows.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.contact_shadows]
+name = "Contact shadows"
+description = "Demonstrates contact shadows, also known as screen-space shadows"
+category = "3D Rendering"
+wasm = false
+
 [profile.wasm-release]
 inherits = "release"
 opt-level = "z"

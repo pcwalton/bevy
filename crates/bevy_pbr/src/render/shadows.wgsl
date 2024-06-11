@@ -1,9 +1,22 @@
 #define_import_path bevy_pbr::shadows
 
 #import bevy_pbr::{
-    mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    mesh_view_types::{
+        DIRECTIONAL_LIGHT_FLAGS_CONTACT_SHADOWS_BIT,
+        DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+        POINT_LIGHT_FLAGS_CONTACT_SHADOWS_BIT,
+        POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+        POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    },
     mesh_view_bindings as view_bindings,
+    raymarch::{
+        depth_ray_march_from_cs,
+        depth_ray_march_march,
+        depth_ray_march_new_from_depth,
+        depth_ray_march_to_ws_dir,
+    },
     shadow_sampling::{SPOT_SHADOW_TEXEL_SIZE, sample_shadow_cubemap, sample_shadow_map}
+    view_transformations,
 }
 
 #import bevy_render::{
@@ -13,7 +26,34 @@
 
 const flip_z: vec3<f32> = vec3<f32>(1.0, 1.0, -1.0);
 
-fn fetch_point_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>) -> f32 {
+// `direction_to_light` is in world space.
+fn calculate_contact_shadow(frag_position: vec3<f32>, direction_to_light: vec3<f32>) -> f32 {
+    let depth_size = vec2<f32>(textureDimensions(view_bindings::depth_prepass_texture));
+
+    var raymarch = depth_ray_march_new_from_depth(depth_size);
+    let clip_position = view_transformations::position_world_to_ndc(frag_position);
+    depth_ray_march_from_cs(&raymarch, clip_position);
+    depth_ray_march_to_ws_dir(&raymarch, direction_to_light);
+    raymarch.linear_steps = 64u; // FIXME: Make this customizable on camera
+    raymarch.bisection_steps = 8u;
+    raymarch.use_secant = false;
+    raymarch.depth_thickness_linear_z = 0.5;
+    raymarch.jitter = 1.0;  // Disable for now.
+    raymarch.march_behind_surfaces = true;
+
+    let raymarch_result = depth_ray_march_march(&raymarch);
+    if (raymarch_result.hit) {
+        return smoothstep(1.0, 0.5, raymarch_result.hit_penetration_frac);
+    }
+
+    return 1.0;
+}
+
+fn fetch_point_shadow_map(
+    light_id: u32,
+    frag_position: vec4<f32>,
+    surface_normal: vec3<f32>,
+) -> f32 {
     let light = &view_bindings::clusterable_objects.data[light_id];
 
     // because the shadow maps align with the axes and the frustum planes are at 45 degrees
@@ -46,7 +86,27 @@ fn fetch_point_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: v
     return sample_shadow_cubemap(frag_ls * flip_z, distance_to_light, depth, light_id);
 }
 
-fn fetch_spot_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>) -> f32 {
+fn fetch_point_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>) -> f32 {
+    var shadow = 1.0;
+
+    // Shadow mapping
+    let light = &view_bindings::clusterable_objects.data[light_id];
+    if (((*light).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+        shadow = fetch_point_shadow_map(light_id, frag_position, surface_normal);
+    }
+    if (shadow == 0.0) {
+        return shadow;
+    }
+
+    // Contact shadows
+    if (((*light).flags & POINT_LIGHT_FLAGS_CONTACT_SHADOWS_BIT) == 0u) {
+        let direction_to_light = normalize((*light).position_radius.xyz - frag_position.xyz);
+        shadow *= calculate_contact_shadow(frag_position.xyz, direction_to_light);
+    }
+    return shadow;
+}
+
+fn fetch_spot_shadow_map(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>) -> f32 {
     let light = &view_bindings::clusterable_objects.data[light_id];
 
     let surface_to_light = (*light).position_radius.xyz - frag_position.xyz;
@@ -100,6 +160,26 @@ fn fetch_spot_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: ve
         i32(light_id) + view_bindings::lights.spot_light_shadowmap_offset,
         SPOT_SHADOW_TEXEL_SIZE
     );
+}
+
+fn fetch_spot_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>) -> f32 {
+    var shadow = 1.0;
+
+    // Shadow mapping
+    let light = &view_bindings::clusterable_objects.data[light_id];
+    if (((*light).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+        shadow = fetch_spot_shadow_map(light_id, frag_position, surface_normal);
+    }
+    if (shadow == 0.0) {
+        return shadow;
+    }
+
+    // Contact shadows
+    if (((*light).flags & POINT_LIGHT_FLAGS_CONTACT_SHADOWS_BIT) == 0u) {
+        let direction_to_light = normalize((*light).position_radius.xyz - frag_position.xyz);
+        shadow *= calculate_contact_shadow(frag_position.xyz, direction_to_light);
+    }
+    return shadow;
 }
 
 fn get_cascade_index(light_id: u32, view_z: f32) -> u32 {
@@ -164,7 +244,7 @@ fn sample_directional_cascade(light_id: u32, cascade_index: u32, frag_position: 
     return sample_shadow_map(light_local.xy, light_local.z, array_index, (*cascade).texel_size);
 }
 
-fn fetch_directional_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>, view_z: f32) -> f32 {
+fn fetch_directional_shadow_map(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>, view_z: f32) -> f32 {
     let light = &view_bindings::lights.directional_lights[light_id];
     let cascade_index = get_cascade_index(light_id, view_z);
 
@@ -185,6 +265,26 @@ fn fetch_directional_shadow(light_id: u32, frag_position: vec4<f32>, surface_nor
         }
     }
     return shadow;
+}
+
+// `frag_position` is the world space position.
+fn fetch_directional_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>, view_z: f32) -> f32 {
+    var shadow = 1.0;
+
+    // Shadow mapping
+    let light = &view_bindings::lights.directional_lights[light_id];
+    if (((*light).flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+        shadow = fetch_directional_shadow_map(light_id, frag_position, surface_normal, view_z);
+    }
+    if (shadow == 0.0) {
+        return shadow;
+    }
+
+    // Contact shadows
+    if (((*light).flags & DIRECTIONAL_LIGHT_FLAGS_CONTACT_SHADOWS_BIT) == 0u) {
+        return shadow;
+    }
+    return shadow * calculate_contact_shadow(frag_position.xyz, (*light).direction_to_light);
 }
 
 fn cascade_debug_visualization(

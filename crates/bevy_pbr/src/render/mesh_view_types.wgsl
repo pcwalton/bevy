@@ -15,6 +15,7 @@ struct ClusterableObject {
 
 const POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT: u32   = 1u;
 const POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE: u32 = 2u;
+const POINT_LIGHT_FLAGS_CONTACT_SHADOWS_BIT: u32   = 4u;
 
 struct DirectionalCascade {
     clip_from_world: mat4x4<f32>,
@@ -38,6 +39,7 @@ struct DirectionalLight {
 
 const DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT: u32 = 1u;
 const DIRECTIONAL_LIGHT_FLAGS_VOLUMETRIC_BIT: u32      = 2u;
+const DIRECTIONAL_LIGHT_FLAGS_CONTACT_SHADOWS_BIT: u32 = 4u;
 
 struct Lights {
     // NOTE: this array size must be kept in sync with the constants defined in bevy_pbr/src/render/light.rs
@@ -148,3 +150,12 @@ struct ScreenSpaceReflectionsSettings {
     bisection_steps: u32,
     use_secant: u32,
 };
+
+struct ContactShadows {
+    max_distance: f32,
+    thickness: f32,
+    linear_steps: u32,
+    linear_march_exponent: f32,
+    bisection_steps: u32,
+    use_secant: u32,
+}

@@ -1,8 +1,5 @@
 use crate::{
-    graph::NodePbr, irradiance_volume::IrradianceVolume, prelude::EnvironmentMapLight,
-    MeshPipeline, MeshViewBindGroup, RenderViewLightProbes, ScreenSpaceAmbientOcclusionSettings,
-    ScreenSpaceReflectionsUniform, ViewLightProbesUniformOffset,
-    ViewScreenSpaceReflectionsUniformOffset,
+    graph::NodePbr, irradiance_volume::IrradianceVolume, prelude::EnvironmentMapLight, MeshPipeline, MeshViewBindGroup, RenderViewLightProbes, ScreenSpaceAmbientOcclusionSettings, ScreenSpaceReflectionsUniform, ViewContactShadowsUniformOffset, ViewLightProbesUniformOffset, ViewScreenSpaceReflectionsUniformOffset
 };
 use bevy_app::prelude::*;
 use bevy_asset::{load_internal_asset, Handle};
@@ -149,6 +146,7 @@ impl ViewNode for DeferredOpaquePass3dPbrLightingNode {
         &'static ViewFogUniformOffset,
         &'static ViewLightProbesUniformOffset,
         &'static ViewScreenSpaceReflectionsUniformOffset,
+        &'static ViewContactShadowsUniformOffset,
         &'static MeshViewBindGroup,
         &'static ViewTarget,
         &'static DeferredLightingIdDepthTexture,
@@ -165,6 +163,7 @@ impl ViewNode for DeferredOpaquePass3dPbrLightingNode {
             view_fog_offset,
             view_light_probes_offset,
             view_ssr_offset,
+            view_contact_shadows_offset,
             mesh_view_bind_group,
             target,
             deferred_lighting_id_depth_texture,
@@ -220,6 +219,7 @@ impl ViewNode for DeferredOpaquePass3dPbrLightingNode {
                 view_fog_offset.offset,
                 **view_light_probes_offset,
                 **view_ssr_offset,
+                **view_contact_shadows_offset,
             ],
         );
         render_pass.set_bind_group(1, &bind_group_1, &[]);

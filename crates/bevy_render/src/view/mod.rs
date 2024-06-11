@@ -292,6 +292,16 @@ struct ColorGradingUniform {
     post_saturation: f32,
 }
 
+#[derive(Clone, Copy, Debug, ShaderType)]
+struct ContactShadowsUniform {
+    max_distance: f32,
+    thickness: f32,
+    linear_steps: u32,
+    linear_march_exponent: f32,
+    bisection_steps: u32,
+    use_secant: u32,
+}
+
 /// A section of color grading values that can be selectively applied to
 /// shadows, midtones, and highlights.
 #[derive(Reflect, Debug, Copy, Clone, PartialEq)]

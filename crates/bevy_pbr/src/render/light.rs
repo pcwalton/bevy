@@ -38,6 +38,7 @@ pub struct ExtractedPointLight {
     pub shadows_enabled: bool,
     pub shadow_depth_bias: f32,
     pub shadow_normal_bias: f32,
+    pub contact_shadows: bool,
     pub spot_light_angles: Option<(f32, f32)>,
 }
 
@@ -50,6 +51,7 @@ pub struct ExtractedDirectionalLight {
     pub volumetric: bool,
     pub shadow_depth_bias: f32,
     pub shadow_normal_bias: f32,
+    pub contact_shadows: bool,
     pub cascade_shadow_config: CascadeShadowConfig,
     pub cascades: EntityHashMap<Vec<Cascade>>,
     pub frusta: EntityHashMap<Vec<Frustum>>,
@@ -62,6 +64,7 @@ bitflags::bitflags! {
     struct PointLightFlags: u32 {
         const SHADOWS_ENABLED            = 1 << 0;
         const SPOT_LIGHT_Y_NEGATIVE      = 1 << 1;
+        const CONTACT_SHADOWS            = 1 << 2;
         const NONE                       = 0;
         const UNINITIALIZED              = 0xFFFF;
     }
@@ -94,6 +97,7 @@ bitflags::bitflags! {
     struct DirectionalLightFlags: u32 {
         const SHADOWS_ENABLED            = 1 << 0;
         const VOLUMETRIC                 = 1 << 1;
+        const CONTACT_SHADOWS            = 1 << 2;
         const NONE                       = 0;
         const UNINITIALIZED              = 0xFFFF;
     }
@@ -258,6 +262,7 @@ pub fn extract_lights(
             shadow_normal_bias: point_light.shadow_normal_bias
                 * point_light_texel_size
                 * std::f32::consts::SQRT_2,
+            contact_shadows: point_light.contact_shadows,
             spot_light_angles: None,
         };
         point_lights_values.push((
@@ -307,6 +312,7 @@ pub fn extract_lights(
                         shadow_normal_bias: spot_light.shadow_normal_bias
                             * texel_size
                             * std::f32::consts::SQRT_2,
+                        contact_shadows: spot_light.contact_shadows,
                         spot_light_angles: Some((spot_light.inner_angle, spot_light.outer_angle)),
                     },
                     render_visible_entities,
@@ -347,6 +353,7 @@ pub fn extract_lights(
                 shadow_depth_bias: directional_light.shadow_depth_bias,
                 // The factor of SQRT_2 is for the worst-case diagonal offset
                 shadow_normal_bias: directional_light.shadow_normal_bias * std::f32::consts::SQRT_2,
+                contact_shadows: directional_light.contact_shadows,
                 cascade_shadow_config: cascade_config.clone(),
                 cascades: cascades.cascades.clone(),
                 frusta: frusta.frusta.clone(),
@@ -683,6 +690,10 @@ pub fn prepare_lights(
             flags |= PointLightFlags::SHADOWS_ENABLED;
         }
 
+        if light.contact_shadows {
+            flags |= PointLightFlags::CONTACT_SHADOWS;
+        }
+
         let (light_custom_data, spot_light_tan_angle) = match light.spot_light_angles {
             Some((inner, outer)) => {
                 let light_direction = light.transform.forward();
@@ -751,6 +762,9 @@ pub fn prepare_lights(
         // Shadow enabled lights are second
         if light.shadows_enabled && (index < directional_shadow_enabled_count) {
             flags |= DirectionalLightFlags::SHADOWS_ENABLED;
+        }
+        if light.contact_shadows {
+            flags |= DirectionalLightFlags::CONTACT_SHADOWS;
         }
 
         let num_cascades = light
