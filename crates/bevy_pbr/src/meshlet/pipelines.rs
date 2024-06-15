@@ -12,8 +12,6 @@ use bevy_render::render_resource::*;
 pub const MESHLET_FILL_CLUSTER_BUFFERS_SHADER_HANDLE: Handle<Shader> =
     Handle::weak_from_u128(4325134235233421);
 pub const MESHLET_CULLING_SHADER_HANDLE: Handle<Shader> = Handle::weak_from_u128(5325134235233421);
-pub const MESHLET_DOWNSAMPLE_DEPTH_SHADER_HANDLE: Handle<Shader> =
-    Handle::weak_from_u128(6325134235233421);
 pub const MESHLET_VISIBILITY_BUFFER_RASTER_SHADER_HANDLE: Handle<Shader> =
     Handle::weak_from_u128(7325134235233421);
 pub const MESHLET_COPY_MATERIAL_DEPTH_SHADER_HANDLE: Handle<Shader> =
@@ -24,8 +22,6 @@ pub struct MeshletPipelines {
     fill_cluster_buffers: CachedComputePipelineId,
     cull_first: CachedComputePipelineId,
     cull_second: CachedComputePipelineId,
-    downsample_depth_first: CachedComputePipelineId,
-    downsample_depth_second: CachedComputePipelineId,
     visibility_buffer_raster: CachedRenderPipelineId,
     visibility_buffer_raster_depth_only: CachedRenderPipelineId,
     visibility_buffer_raster_depth_only_clamp_ortho: CachedRenderPipelineId,
@@ -81,34 +77,6 @@ impl FromWorld for MeshletPipelines {
                 ],
                 entry_point: "cull_clusters".into(),
             }),
-
-            downsample_depth_first: pipeline_cache.queue_compute_pipeline(
-                ComputePipelineDescriptor {
-                    label: Some("meshlet_downsample_depth_first_pipeline".into()),
-                    layout: vec![downsample_depth_layout.clone()],
-                    push_constant_ranges: vec![PushConstantRange {
-                        stages: ShaderStages::COMPUTE,
-                        range: 0..4,
-                    }],
-                    shader: MESHLET_DOWNSAMPLE_DEPTH_SHADER_HANDLE,
-                    shader_defs: vec![],
-                    entry_point: "downsample_depth_first".into(),
-                },
-            ),
-
-            downsample_depth_second: pipeline_cache.queue_compute_pipeline(
-                ComputePipelineDescriptor {
-                    label: Some("meshlet_downsample_depth_second_pipeline".into()),
-                    layout: vec![downsample_depth_layout],
-                    push_constant_ranges: vec![PushConstantRange {
-                        stages: ShaderStages::COMPUTE,
-                        range: 0..4,
-                    }],
-                    shader: MESHLET_DOWNSAMPLE_DEPTH_SHADER_HANDLE,
-                    shader_defs: vec![],
-                    entry_point: "downsample_depth_second".into(),
-                },
-            ),
 
             visibility_buffer_raster: pipeline_cache.queue_render_pipeline(
                 RenderPipelineDescriptor {
@@ -273,8 +241,6 @@ impl MeshletPipelines {
         &ComputePipeline,
         &ComputePipeline,
         &ComputePipeline,
-        &ComputePipeline,
-        &ComputePipeline,
         &RenderPipeline,
         &RenderPipeline,
         &RenderPipeline,
@@ -286,8 +252,6 @@ impl MeshletPipelines {
             pipeline_cache.get_compute_pipeline(pipeline.fill_cluster_buffers)?,
             pipeline_cache.get_compute_pipeline(pipeline.cull_first)?,
             pipeline_cache.get_compute_pipeline(pipeline.cull_second)?,
-            pipeline_cache.get_compute_pipeline(pipeline.downsample_depth_first)?,
-            pipeline_cache.get_compute_pipeline(pipeline.downsample_depth_second)?,
             pipeline_cache.get_render_pipeline(pipeline.visibility_buffer_raster)?,
             pipeline_cache.get_render_pipeline(pipeline.visibility_buffer_raster_depth_only)?,
             pipeline_cache

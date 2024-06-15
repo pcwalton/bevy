@@ -49,7 +49,7 @@ use self::{
     },
     pipelines::{
         MeshletPipelines, MESHLET_COPY_MATERIAL_DEPTH_SHADER_HANDLE, MESHLET_CULLING_SHADER_HANDLE,
-        MESHLET_DOWNSAMPLE_DEPTH_SHADER_HANDLE, MESHLET_FILL_CLUSTER_BUFFERS_SHADER_HANDLE,
+        DOWNSAMPLE_DEPTH_SHADER_HANDLE, MESHLET_FILL_CLUSTER_BUFFERS_SHADER_HANDLE,
         MESHLET_VISIBILITY_BUFFER_RASTER_SHADER_HANDLE,
     },
     visibility_buffer_raster_node::MeshletVisibilityBufferRasterPassNode,
@@ -136,12 +136,6 @@ impl Plugin for MeshletPlugin {
             app,
             MESHLET_CULLING_SHADER_HANDLE,
             "cull_clusters.wgsl",
-            Shader::from_wgsl
-        );
-        load_internal_asset!(
-            app,
-            MESHLET_DOWNSAMPLE_DEPTH_SHADER_HANDLE,
-            "downsample_depth.wgsl",
             Shader::from_wgsl
         );
         load_internal_asset!(

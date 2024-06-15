@@ -9,7 +9,7 @@ use crate::{
 };
 use bevy_color::LinearRgba;
 use bevy_utils::{default, detailed_trace};
-use std::ops::Range;
+use std::{any::TypeId, ops::Range};
 use wgpu::{IndexFormat, QuerySet, RenderPass};
 
 /// Tracks the state of a [`TrackedRenderPass`].
@@ -104,11 +104,16 @@ impl DrawState {
 pub struct TrackedRenderPass<'a> {
     pass: RenderPass<'a>,
     state: DrawState,
+    /// An opaque value that can be used to identify a render pass.
+    ///
+    /// This is currently used to distinguish between the early prepass, the
+    /// late prepass, and the main pass.
+    tag: Option<TypeId>,
 }
 
 impl<'a> TrackedRenderPass<'a> {
     /// Tracks the supplied render pass.
-    pub fn new(device: &RenderDevice, pass: RenderPass<'a>) -> Self {
+    pub fn new(device: &RenderDevice, pass: RenderPass<'a>, tag: Option<TypeId>) -> Self {
         let limits = device.limits();
         let max_bind_groups = limits.max_bind_groups as usize;
         let max_vertex_buffers = limits.max_vertex_buffers as usize;
@@ -119,12 +124,17 @@ impl<'a> TrackedRenderPass<'a> {
                 ..default()
             },
             pass,
+            tag,
         }
     }
 
     /// Returns the wgpu [`RenderPass`].
     pub fn wgpu_pass(&mut self) -> &mut RenderPass<'a> {
         &mut self.pass
+    }
+
+    pub fn tag(&self) -> Option<TypeId> {
+        self.tag
     }
 
     /// Sets the active [`RenderPipeline`].

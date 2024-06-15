@@ -91,16 +91,22 @@ pub mod graph {
         /// Label for the volumetric lighting pass.
         VolumetricFog,
         /// Label for the compute shader instance data building pass.
-        GpuPreprocess,
+        EarlyGpuPreprocess,
         /// Label for the screen space reflections pass.
         ScreenSpaceReflections,
+        LateGpuPreprocess,
+        EarlyDownsampleDepthBuffer,
+        LateDownsampleDepthBuffer,
     }
 }
 
 use crate::{deferred::DeferredPbrLightingPlugin, graph::NodePbr};
 use bevy_app::prelude::*;
 use bevy_asset::{load_internal_asset, AssetApp, Assets, Handle};
-use bevy_core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy_core_pipeline::core_3d::{
+    graph::{Core3d, Node3d},
+    prepare_core_3d_depth_textures,
+};
 use bevy_ecs::prelude::*;
 use bevy_render::{
     alpha::AlphaMode,
@@ -319,14 +325,17 @@ impl Plugin for PbrPlugin {
                 ExtractComponentPlugin::<ShadowFilteringMethod>::default(),
                 LightmapPlugin,
                 LightProbePlugin,
-                PbrProjectionPlugin::<Projection>::default(),
-                PbrProjectionPlugin::<PerspectiveProjection>::default(),
-                PbrProjectionPlugin::<OrthographicProjection>::default(),
+                (
+                    PbrProjectionPlugin::<Projection>::default(),
+                    PbrProjectionPlugin::<PerspectiveProjection>::default(),
+                    PbrProjectionPlugin::<OrthographicProjection>::default(),
+                ),
                 GpuMeshPreprocessPlugin {
                     use_gpu_instance_buffer_builder: self.use_gpu_instance_buffer_builder,
                 },
                 VolumetricFogPlugin,
                 ScreenSpaceReflectionsPlugin,
+                HiZPlugin,
             ))
             .configure_sets(
                 PostUpdate,
@@ -409,6 +418,9 @@ impl Plugin for PbrPlugin {
                         .in_set(RenderSet::ManageViews)
                         .after(prepare_assets::<GpuImage>),
                     prepare_clusters.in_set(RenderSet::PrepareResources),
+                    configure_occlusion_culling_view_targets
+                        .in_set(RenderSet::Prepare)
+                        .before(prepare_core_3d_depth_textures),
                 ),
             )
             .init_resource::<LightMeta>();

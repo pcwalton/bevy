@@ -381,36 +381,6 @@ fn raster_pass(
     draw_pass.draw_indirect(visibility_buffer_draw_indirect_args, 0);
 }
 
-fn downsample_depth(
-    render_context: &mut RenderContext,
-    meshlet_view_resources: &MeshletViewResources,
-    meshlet_view_bind_groups: &MeshletViewBindGroups,
-    downsample_depth_first_pipeline: &ComputePipeline,
-    downsample_depth_second_pipeline: &ComputePipeline,
-) {
-    let command_encoder = render_context.command_encoder();
-    let mut downsample_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("downsample_depth"),
-        timestamp_writes: None,
-    });
-    downsample_pass.set_pipeline(downsample_depth_first_pipeline);
-    downsample_pass.set_push_constants(
-        0,
-        &meshlet_view_resources.depth_pyramid_mip_count.to_le_bytes(),
-    );
-    downsample_pass.set_bind_group(0, &meshlet_view_bind_groups.downsample_depth, &[]);
-    downsample_pass.dispatch_workgroups(
-        meshlet_view_resources.view_size.x.div_ceil(64),
-        meshlet_view_resources.view_size.y.div_ceil(64),
-        1,
-    );
-
-    if meshlet_view_resources.depth_pyramid_mip_count >= 7 {
-        downsample_pass.set_pipeline(downsample_depth_second_pipeline);
-        downsample_pass.dispatch_workgroups(1, 1, 1);
-    }
-}
-
 fn copy_material_depth_pass(
     render_context: &mut RenderContext,
     meshlet_view_resources: &MeshletViewResources,

@@ -1,3 +1,5 @@
+use std::any::TypeId;
+
 use bevy_ecs::prelude::*;
 use bevy_ecs::query::QueryItem;
 use bevy_render::render_graph::ViewNode;
@@ -23,6 +25,8 @@ use super::{AlphaMask3dDeferred, Opaque3dDeferred};
 /// By default, inserted before the main pass in the render graph.
 #[derive(Default)]
 pub struct DeferredGBufferPrepassNode;
+
+struct DeferredGBufferPrepassTag;
 
 impl ViewNode for DeferredGBufferPrepassNode {
     type ViewQuery = (
@@ -138,7 +142,11 @@ impl ViewNode for DeferredGBufferPrepassNode {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            let mut render_pass = TrackedRenderPass::new(&render_device, render_pass);
+            let mut render_pass = TrackedRenderPass::new(
+                &render_device,
+                render_pass,
+                Some(TypeId::of::<DeferredGBufferPrepassTag>()),
+            );
             if let Some(viewport) = camera.viewport.as_ref() {
                 render_pass.set_camera_viewport(viewport);
             }

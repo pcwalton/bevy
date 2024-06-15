@@ -14,7 +14,7 @@ use crate::{
     render_resource::{CachedRenderPipelineId, GpuArrayBufferable},
 };
 
-use self::gpu_preprocessing::IndirectParametersBuffer;
+use self::gpu_preprocessing::IndirectParametersBuffers;
 
 pub mod gpu_preprocessing;
 pub mod no_gpu_preprocessing;
@@ -144,7 +144,7 @@ pub trait GetFullBatchData: GetBatchData {
     /// preprocessing).
     fn get_batch_indirect_parameters_index(
         param: &SystemParamItem<Self::Param>,
-        indirect_parameters_buffer: &mut IndirectParametersBuffer,
+        indirect_parameters_buffer: &mut IndirectParametersBuffers,
         entity: Entity,
         instance_index: u32,
     ) -> Option<NonMaxU32>;

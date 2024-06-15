@@ -432,7 +432,7 @@ impl<'w> RenderContext<'w> {
         });
 
         let render_pass = command_encoder.begin_render_pass(&descriptor);
-        TrackedRenderPass::new(&self.render_device, render_pass)
+        TrackedRenderPass::new(&self.render_device, render_pass, None)
     }
 
     /// Append a [`CommandBuffer`] to the command buffer queue.

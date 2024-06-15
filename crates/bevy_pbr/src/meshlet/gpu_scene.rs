@@ -572,32 +572,6 @@ pub fn prepare_meshlet_view_bind_groups(
             &entries,
         );
 
-        let view_depth_texture = match view_depth {
-            (Some(view_depth), None) => view_depth.view(),
-            (None, Some(shadow_view)) => &shadow_view.depth_attachment.view,
-            _ => unreachable!(),
-        };
-        let downsample_depth = render_device.create_bind_group(
-            "meshlet_downsample_depth_bind_group",
-            &gpu_scene.downsample_depth_bind_group_layout,
-            &BindGroupEntries::sequential((
-                view_depth_texture,
-                &view_resources.depth_pyramid_mips[0],
-                &view_resources.depth_pyramid_mips[1],
-                &view_resources.depth_pyramid_mips[2],
-                &view_resources.depth_pyramid_mips[3],
-                &view_resources.depth_pyramid_mips[4],
-                &view_resources.depth_pyramid_mips[5],
-                &view_resources.depth_pyramid_mips[6],
-                &view_resources.depth_pyramid_mips[7],
-                &view_resources.depth_pyramid_mips[8],
-                &view_resources.depth_pyramid_mips[9],
-                &view_resources.depth_pyramid_mips[10],
-                &view_resources.depth_pyramid_mips[11],
-                &gpu_scene.depth_pyramid_sampler,
-            )),
-        );
-
         let entries = BindGroupEntries::sequential((
             cluster_meshlet_ids.as_entire_binding(),
             gpu_scene.meshlets.binding(),
@@ -789,33 +763,6 @@ impl FromWorld for MeshletGpuScene {
                         uniform_buffer::<PreviousViewData>(true),
                     ),
                 ),
-            ),
-            downsample_depth_bind_group_layout: render_device.create_bind_group_layout(
-                "meshlet_downsample_depth_bind_group_layout",
-                &BindGroupLayoutEntries::sequential(ShaderStages::COMPUTE, {
-                    let write_only_r32float = || {
-                        texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::WriteOnly)
-                    };
-                    (
-                        texture_depth_2d(),
-                        write_only_r32float(),
-                        write_only_r32float(),
-                        write_only_r32float(),
-                        write_only_r32float(),
-                        write_only_r32float(),
-                        texture_storage_2d(
-                            TextureFormat::R32Float,
-                            StorageTextureAccess::ReadWrite,
-                        ),
-                        write_only_r32float(),
-                        write_only_r32float(),
-                        write_only_r32float(),
-                        write_only_r32float(),
-                        write_only_r32float(),
-                        write_only_r32float(),
-                        sampler(SamplerBindingType::NonFiltering),
-                    )
-                }),
             ),
             visibility_buffer_raster_bind_group_layout: render_device.create_bind_group_layout(
                 "meshlet_visibility_buffer_raster_bind_group_layout",
@@ -1028,10 +975,6 @@ pub struct MeshletViewResources {
     pub visibility_buffer_draw_indirect_args_first: Buffer,
     pub visibility_buffer_draw_indirect_args_second: Buffer,
     visibility_buffer_draw_triangle_buffer: Buffer,
-    depth_pyramid_all_mips: TextureView,
-    depth_pyramid_mips: [TextureView; 12],
-    pub depth_pyramid_mip_count: u32,
-    previous_depth_pyramid: TextureView,
     pub material_depth_color: Option<CachedTexture>,
     pub material_depth: Option<CachedTexture>,
     pub view_size: UVec2,
@@ -1043,7 +986,6 @@ pub struct MeshletViewBindGroups {
     pub fill_cluster_buffers: BindGroup,
     pub culling_first: BindGroup,
     pub culling_second: BindGroup,
-    pub downsample_depth: BindGroup,
     pub visibility_buffer_raster: BindGroup,
     pub copy_material_depth: Option<BindGroup>,
     pub material_draw: Option<BindGroup>,

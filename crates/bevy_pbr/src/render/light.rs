@@ -23,6 +23,7 @@ use bevy_transform::{components::GlobalTransform, prelude::Transform};
 #[cfg(feature = "trace")]
 use bevy_utils::tracing::info_span;
 use bevy_utils::tracing::{error, warn};
+use std::any::TypeId;
 use std::{hash::Hash, ops::Range};
 
 use crate::*;
@@ -1387,6 +1388,8 @@ impl ShadowPassNode {
     }
 }
 
+struct ShadowPassTag;
+
 impl Node for ShadowPassNode {
     fn update(&mut self, world: &mut World) {
         self.main_view_query.update_archetypes(world);
@@ -1441,7 +1444,11 @@ impl Node for ShadowPassNode {
                         occlusion_query_set: None,
                     });
 
-                    let mut render_pass = TrackedRenderPass::new(&render_device, render_pass);
+                    let mut render_pass = TrackedRenderPass::new(
+                        &render_device,
+                        render_pass,
+                        Some(TypeId::of::<ShadowPassTag>()),
+                    );
                     let pass_span =
                         diagnostics.pass_span(&mut render_pass, view_light.pass_name.clone());
 

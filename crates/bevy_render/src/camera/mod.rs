@@ -3,12 +3,14 @@ mod camera;
 mod camera_driver_node;
 mod clear_color;
 mod manual_texture_view;
+mod occlusion_culling;
 mod projection;
 
 pub use camera::*;
 pub use camera_driver_node::*;
 pub use clear_color::*;
 pub use manual_texture_view::*;
+pub use occlusion_culling::*;
 pub use projection::*;
 
 use crate::{
@@ -30,6 +32,7 @@ impl Plugin for CameraPlugin {
             .register_type::<Exposure>()
             .register_type::<TemporalJitter>()
             .register_type::<MipBias>()
+            .register_type::<OcclusionCulling>()
             .init_resource::<ManualTextureViews>()
             .init_resource::<ClearColor>()
             .add_plugins((
@@ -39,6 +42,7 @@ impl Plugin for CameraPlugin {
                 ExtractResourcePlugin::<ManualTextureViews>::default(),
                 ExtractResourcePlugin::<ClearColor>::default(),
                 ExtractComponentPlugin::<CameraMainTextureUsages>::default(),
+                ExtractComponentPlugin::<OcclusionCulling>::default(),
             ));
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {

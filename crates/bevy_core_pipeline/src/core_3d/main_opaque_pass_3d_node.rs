@@ -1,3 +1,5 @@
+use std::any::TypeId;
+
 use crate::{
     core_3d::Opaque3d,
     skybox::{SkyboxBindGroup, SkyboxPipelineId},
@@ -85,7 +87,11 @@ impl ViewNode for MainOpaquePass3dNode {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            let mut render_pass = TrackedRenderPass::new(&render_device, render_pass);
+            let mut render_pass = TrackedRenderPass::new(
+                &render_device,
+                render_pass,
+                Some(TypeId::of::<MainPassTag>()),
+            );
             let pass_span = diagnostics.pass_span(&mut render_pass, "main_opaque_pass_3d");
 
             if let Some(viewport) = camera.viewport.as_ref() {
@@ -130,3 +136,5 @@ impl ViewNode for MainOpaquePass3dNode {
         Ok(())
     }
 }
+
+pub struct MainPassTag;

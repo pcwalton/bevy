@@ -1,10 +1,13 @@
-use std::mem;
+use std::{any::TypeId, mem};
 
 use bevy_asset::{load_internal_asset, AssetId};
 use bevy_core_pipeline::{
     core_3d::{AlphaMask3d, Opaque3d, Transmissive3d, Transparent3d, CORE_3D_DEPTH_FORMAT},
     deferred::{AlphaMask3dDeferred, Opaque3dDeferred},
-    prepass::MotionVectorPrepass,
+    prepass::{
+        node::{EarlyPrepassTag, LatePrepassTag},
+        MotionVectorPrepass,
+    },
 };
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::entity::EntityHashMap;
@@ -17,7 +20,7 @@ use bevy_math::{Affine3, Rect, UVec2, Vec3, Vec4};
 use bevy_render::{
     batching::{
         gpu_preprocessing::{
-            self, GpuPreprocessingSupport, IndirectParameters, IndirectParametersBuffer,
+            self, GpuPreprocessingSupport, IndirectParameters, IndirectParametersBuffers,
         },
         no_gpu_preprocessing, GetBatchData, GetFullBatchData, NoAutomaticBatching,
     },
@@ -218,7 +221,7 @@ impl Plugin for MeshRenderPlugin {
                     );
             };
 
-            let indirect_parameters_buffer = IndirectParametersBuffer::new();
+            let indirect_parameters_buffer = IndirectParametersBuffers::new();
 
             let render_device = render_app.world().resource::<RenderDevice>();
             if let Some(per_object_buffer_batch_size) =
@@ -1316,7 +1319,7 @@ impl GetFullBatchData for MeshPipeline {
 
     fn get_batch_indirect_parameters_index(
         (mesh_instances, _, meshes): &SystemParamItem<Self::Param>,
-        indirect_parameters_buffer: &mut IndirectParametersBuffer,
+        indirect_parameters_buffer: &mut IndirectParametersBuffers,
         entity: Entity,
         instance_index: u32,
     ) -> Option<NonMaxU32> {
@@ -1336,7 +1339,7 @@ impl GetFullBatchData for MeshPipeline {
 fn get_batch_indirect_parameters_index(
     mesh_instances: &RenderMeshInstances,
     meshes: &RenderAssets<GpuMesh>,
-    indirect_parameters_buffer: &mut IndirectParametersBuffer,
+    indirect_parameters_buffers: &mut IndirectParametersBuffers,
     entity: Entity,
     instance_index: u32,
 ) -> Option<NonMaxU32> {
@@ -1374,7 +1377,8 @@ fn get_batch_indirect_parameters_index(
         },
     };
 
-    (indirect_parameters_buffer.push(indirect_parameters) as u32)
+    indirect_parameters_buffers
+        .push(indirect_parameters)
         .try_into()
         .ok()
 }
@@ -2008,7 +2012,7 @@ pub fn prepare_mesh_bind_group(
     } else if let Some(gpu_batched_instance_buffers) = gpu_batched_instance_buffers {
         gpu_batched_instance_buffers
             .into_inner()
-            .instance_data_binding()
+            .main_pass_instance_data_binding()
     } else {
         return;
     };
@@ -2240,16 +2244,16 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
     type Param = (
         SRes<RenderAssets<GpuMesh>>,
         SRes<RenderMeshInstances>,
-        SRes<IndirectParametersBuffer>,
+        SRes<IndirectParametersBuffers>,
         SRes<PipelineCache>,
         Option<SRes<PreprocessPipelines>>,
     );
-    type ViewQuery = Has<PreprocessBindGroup>;
+    type ViewQuery = Has<PreprocessBindGroups>;
     type ItemQuery = ();
     #[inline]
     fn render<'w>(
         item: &P,
-        has_preprocess_bind_group: ROQueryItem<Self::ViewQuery>,
+        has_preprocess_bind_groups: ROQueryItem<Self::ViewQuery>,
         _item_query: Option<()>,
         (meshes, mesh_instances, indirect_parameters_buffer, pipeline_cache, preprocess_pipelines): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
@@ -2258,7 +2262,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
         // compute shader having been run, which of course can only happen if
         // it's compiled. Otherwise, our mesh instance data won't be present.
         if let Some(preprocess_pipelines) = preprocess_pipelines {
-            if !has_preprocess_bind_group
+            if !has_preprocess_bind_groups
                 || !preprocess_pipelines.pipelines_are_loaded(&pipeline_cache)
             {
                 return RenderCommandResult::Failure;
@@ -2279,16 +2283,29 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
         // Calculate the indirect offset, and look up the buffer.
         let indirect_parameters = match item.extra_index().as_indirect_parameters_index() {
             None => None,
-            Some(index) => match indirect_parameters_buffer.buffer() {
-                None => {
-                    warn!("Not rendering mesh because indirect parameters buffer wasn't present");
-                    return RenderCommandResult::Failure;
+            Some(index) => {
+                let indirect_parameters_buffer =
+                    if pass.tag() == Some(TypeId::of::<EarlyPrepassTag>()) {
+                        &indirect_parameters_buffer.early_prepass
+                    } else if pass.tag() == Some(TypeId::of::<LatePrepassTag>()) {
+                        &indirect_parameters_buffer.late_prepass
+                    } else {
+                        &indirect_parameters_buffer.main_pass
+                    };
+
+                match indirect_parameters_buffer.buffer() {
+                    None => {
+                        warn!(
+                            "Not rendering mesh because indirect parameters buffer wasn't present"
+                        );
+                        return RenderCommandResult::Failure;
+                    }
+                    Some(buffer) => Some((
+                        index as u64 * mem::size_of::<IndirectParameters>() as u64,
+                        buffer,
+                    )),
                 }
-                Some(buffer) => Some((
-                    index as u64 * mem::size_of::<IndirectParameters>() as u64,
-                    buffer,
-                )),
-            },
+            }
         };
 
         pass.set_vertex_buffer(0, gpu_mesh.vertex_buffer.slice(..));

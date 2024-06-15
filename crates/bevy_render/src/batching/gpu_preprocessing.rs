@@ -1,7 +1,6 @@
 //! Batching functionality when GPU preprocessing is in use.
 
 use bevy_app::{App, Plugin};
-use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     entity::Entity,
     query::{Has, With},
@@ -17,6 +16,7 @@ use smallvec::smallvec;
 use wgpu::{BindingResource, BufferUsages, DownlevelFlags, Features};
 
 use crate::{
+    camera::OcclusionCulling,
     render_phase::{
         BinnedPhaseItem, BinnedRenderPhaseBatch, CachedRenderPipelinePhaseItem,
         PhaseItemExtraIndex, SortedPhaseItem, SortedRenderPhase, UnbatchableBinnedEntityIndices,
@@ -40,7 +40,7 @@ impl Plugin for BatchingPlugin {
 
         render_app.add_systems(
             Render,
-            write_indirect_parameters_buffer.in_set(RenderSet::PrepareResourcesFlush),
+            write_indirect_parameters_buffers.in_set(RenderSet::PrepareResourcesFlush),
         );
     }
 
@@ -91,7 +91,11 @@ where
     /// expected to write to.
     ///
     /// There will be one entry for each index.
-    pub data_buffer: UninitBufferVec<BD>,
+    pub main_pass_output_data_buffer: UninitBufferVec<BD>,
+
+    pub early_prepass_output_data_buffer: UninitBufferVec<BD>,
+
+    pub late_prepass_output_data_buffer: UninitBufferVec<BD>,
 
     /// The index of the buffer data in the current input buffer that
     /// corresponds to each instance.
@@ -117,9 +121,8 @@ where
 /// The buffer of GPU preprocessing work items for a single view.
 pub struct PreprocessWorkItemBuffer {
     /// The buffer of work items.
-    pub buffer: BufferVec<PreprocessWorkItem>,
-    /// True if we're using GPU culling.
-    pub gpu_culling: bool,
+    pub work_item_buffer: BufferVec<PreprocessWorkItem>,
+    pub culling_buffers: CullingBuffers,
 }
 
 /// One invocation of the preprocessing shader: i.e. one mesh instance in a
@@ -134,6 +137,12 @@ pub struct PreprocessWorkItem {
     /// buffer that we write to. In indirect mode, this is the index of the
     /// [`IndirectParameters`].
     pub output_index: u32,
+}
+
+pub enum CullingBuffers {
+    Cpu,
+    GpuFrustum,
+    GpuOcclusion { visibility_buffer: BufferVec<u32> },
 }
 
 /// The `wgpu` indirect parameters structure.
@@ -200,19 +209,34 @@ pub struct IndirectParameters {
 }
 
 /// The buffer containing the list of [`IndirectParameters`], for draw commands.
-#[derive(Resource, Deref, DerefMut)]
-pub struct IndirectParametersBuffer(pub BufferVec<IndirectParameters>);
+#[derive(Resource)]
+pub struct IndirectParametersBuffers {
+    pub early_prepass: BufferVec<IndirectParameters>,
+    pub late_prepass: BufferVec<IndirectParameters>,
+    pub main_pass: BufferVec<IndirectParameters>,
+}
 
-impl IndirectParametersBuffer {
+impl IndirectParametersBuffers {
     /// Creates the indirect parameters buffer.
-    pub fn new() -> IndirectParametersBuffer {
-        IndirectParametersBuffer(BufferVec::new(
-            BufferUsages::STORAGE | BufferUsages::INDIRECT,
-        ))
+    pub fn new() -> IndirectParametersBuffers {
+        IndirectParametersBuffers {
+            early_prepass: BufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT),
+            late_prepass: BufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT),
+            main_pass: BufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT),
+        }
+    }
+
+    pub fn push(&mut self, indirect_parameters: IndirectParameters) -> u32 {
+        let early_prepass_index = self.early_prepass.push(indirect_parameters);
+        let late_prepass_index = self.late_prepass.push(indirect_parameters);
+        let main_pass_index = self.main_pass.push(indirect_parameters);
+        debug_assert_eq!(early_prepass_index, main_pass_index);
+        debug_assert_eq!(late_prepass_index, main_pass_index);
+        early_prepass_index as u32
     }
 }
 
-impl Default for IndirectParametersBuffer {
+impl Default for IndirectParametersBuffers {
     fn default() -> Self {
         Self::new()
     }
@@ -249,7 +273,9 @@ where
     /// Creates new buffers.
     pub fn new() -> Self {
         BatchedInstanceBuffers {
-            data_buffer: UninitBufferVec::new(BufferUsages::STORAGE),
+            main_pass_output_data_buffer: UninitBufferVec::new(BufferUsages::STORAGE),
+            early_prepass_output_data_buffer: UninitBufferVec::new(BufferUsages::STORAGE),
+            late_prepass_output_data_buffer: UninitBufferVec::new(BufferUsages::STORAGE),
             work_item_buffers: EntityHashMap::default(),
             current_input_buffer: RawBufferVec::new(BufferUsages::STORAGE),
             previous_input_buffer: RawBufferVec::new(BufferUsages::STORAGE),
@@ -259,19 +285,41 @@ where
     /// Returns the binding of the buffer that contains the per-instance data.
     ///
     /// This buffer needs to be filled in via a compute shader.
-    pub fn instance_data_binding(&self) -> Option<BindingResource> {
-        self.data_buffer
+    pub fn main_pass_instance_data_binding(&self) -> Option<BindingResource> {
+        self.main_pass_output_data_buffer
+            .buffer()
+            .map(|buffer| buffer.as_entire_binding())
+    }
+
+    pub fn early_prepass_instance_data_binding(&self) -> Option<BindingResource> {
+        self.early_prepass_output_data_buffer
+            .buffer()
+            .map(|buffer| buffer.as_entire_binding())
+    }
+
+    pub fn late_prepass_instance_data_binding(&self) -> Option<BindingResource> {
+        self.late_prepass_output_data_buffer
             .buffer()
             .map(|buffer| buffer.as_entire_binding())
     }
 
     /// Clears out the buffers in preparation for a new frame.
     pub fn clear(&mut self) {
-        self.data_buffer.clear();
+        self.main_pass_output_data_buffer.clear();
+        self.early_prepass_output_data_buffer.clear();
+        self.late_prepass_output_data_buffer.clear();
         self.current_input_buffer.clear();
         self.previous_input_buffer.clear();
+
         for work_item_buffer in self.work_item_buffers.values_mut() {
-            work_item_buffer.buffer.clear();
+            work_item_buffer.work_item_buffer.clear();
+
+            match work_item_buffer.culling_buffers {
+                CullingBuffers::Cpu | CullingBuffers::GpuFrustum => {}
+                CullingBuffers::GpuOcclusion {
+                    ref mut visibility_buffer,
+                } => visibility_buffer.clear(),
+            }
         }
     }
 }
@@ -375,9 +423,9 @@ pub fn delete_old_work_item_buffers<GFBD>(
 /// trying to combine the draws into a batch.
 pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
     gpu_array_buffer: ResMut<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
-    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffer>,
+    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffers>,
     mut sorted_render_phases: ResMut<ViewSortedRenderPhases<I>>,
-    mut views: Query<(Entity, Has<GpuCulling>)>,
+    mut views: Query<(Entity, Has<GpuCulling>, Has<OcclusionCulling>)>,
     system_param_item: StaticSystemParam<GFBD::Param>,
 ) where
     I: CachedRenderPipelinePhaseItem + SortedPhaseItem,
@@ -385,12 +433,14 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
 {
     // We only process GPU-built batch data in this function.
     let BatchedInstanceBuffers {
-        ref mut data_buffer,
+        ref mut main_pass_output_data_buffer,
+        ref mut early_prepass_output_data_buffer,
+        ref mut late_prepass_output_data_buffer,
         ref mut work_item_buffers,
         ..
     } = gpu_array_buffer.into_inner();
 
-    for (view, gpu_culling) in &mut views {
+    for (view, gpu_culling, occlusion_culling) in &mut views {
         let Some(phase) = sorted_render_phases.get_mut(&view) else {
             continue;
         };
@@ -400,8 +450,11 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
             work_item_buffers
                 .entry(view)
                 .or_insert_with(|| PreprocessWorkItemBuffer {
-                    buffer: BufferVec::new(BufferUsages::STORAGE),
-                    gpu_culling,
+                    work_item_buffer: BufferVec::new(BufferUsages::STORAGE),
+                    culling_buffers: CullingBuffers::from_components(
+                        gpu_culling,
+                        occlusion_culling,
+                    ),
                 });
 
         // Walk through the list of phase items, building up batches as we go.
@@ -436,7 +489,12 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
 
             // Make space in the data buffer for this instance.
             let current_entity = phase.items[current_index].entity();
-            let output_index = data_buffer.add() as u32;
+            let output_index = main_pass_output_data_buffer.add() as u32;
+            // TODO: This should only be allocated if GPU occlusion culling is enabled!
+            let early_prepass_output_index = early_prepass_output_data_buffer.add() as u32;
+            let late_prepass_output_index = late_prepass_output_data_buffer.add() as u32;
+            debug_assert_eq!(output_index, early_prepass_output_index);
+            debug_assert_eq!(output_index, late_prepass_output_index);
 
             // If we can't batch, break the existing batch and make a new one.
             if !can_batch {
@@ -468,19 +526,27 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
             // shader will copy the per-instance data over.
             if let (Some(batch), Some(input_index)) = (batch.as_ref(), current_input_index.as_ref())
             {
-                work_item_buffer.buffer.push(PreprocessWorkItem {
-                    input_index: (*input_index).into(),
-                    output_index: match batch.indirect_parameters_index {
+                work_item_buffer.add_work_item(
+                    (*input_index).into(),
+                    match batch.indirect_parameters_index {
                         Some(indirect_parameters_index) => indirect_parameters_index.into(),
                         None => output_index,
                     },
-                });
+                );
             }
         }
 
         // Flush the final batch if necessary.
         if let Some(batch) = batch.take() {
-            batch.flush(data_buffer.len() as u32, phase);
+            debug_assert_eq!(
+                main_pass_output_data_buffer.len(),
+                early_prepass_output_data_buffer.len()
+            );
+            debug_assert_eq!(
+                main_pass_output_data_buffer.len(),
+                late_prepass_output_data_buffer.len()
+            );
+            batch.flush(main_pass_output_data_buffer.len() as u32, phase);
         }
     }
 }
@@ -488,9 +554,9 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
 /// Creates batches for a render phase that uses bins.
 pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
     gpu_array_buffer: ResMut<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
-    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffer>,
+    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffers>,
     mut binned_render_phases: ResMut<ViewBinnedRenderPhases<BPI>>,
-    mut views: Query<(Entity, Has<GpuCulling>)>,
+    mut views: Query<(Entity, Has<GpuCulling>, Has<OcclusionCulling>)>,
     param: StaticSystemParam<GFBD::Param>,
 ) where
     BPI: BinnedPhaseItem,
@@ -499,12 +565,14 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
     let system_param_item = param.into_inner();
 
     let BatchedInstanceBuffers {
-        ref mut data_buffer,
+        ref mut main_pass_output_data_buffer,
+        ref mut early_prepass_output_data_buffer,
+        ref mut late_prepass_output_data_buffer,
         ref mut work_item_buffers,
         ..
     } = gpu_array_buffer.into_inner();
 
-    for (view, gpu_culling) in &mut views {
+    for (view, gpu_culling, occlusion_culling) in &mut views {
         let Some(phase) = binned_render_phases.get_mut(&view) else {
             continue;
         };
@@ -515,8 +583,11 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
             work_item_buffers
                 .entry(view)
                 .or_insert_with(|| PreprocessWorkItemBuffer {
-                    buffer: BufferVec::new(BufferUsages::STORAGE),
-                    gpu_culling,
+                    work_item_buffer: BufferVec::new(BufferUsages::STORAGE),
+                    culling_buffers: CullingBuffers::from_components(
+                        gpu_culling,
+                        occlusion_culling,
+                    ),
                 });
 
         // Prepare batchables.
@@ -527,18 +598,24 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                 let Some(input_index) = GFBD::get_binned_index(&system_param_item, entity) else {
                     continue;
                 };
-                let output_index = data_buffer.add() as u32;
+
+                // TODO: Only do the prepasses if necessary.
+                let output_index = main_pass_output_data_buffer.add() as u32;
+                let early_prepass_output_index = early_prepass_output_data_buffer.add() as u32;
+                let late_prepass_output_index = late_prepass_output_data_buffer.add() as u32;
+                debug_assert_eq!(output_index, early_prepass_output_index);
+                debug_assert_eq!(output_index, late_prepass_output_index);
 
                 match batch {
                     Some(ref mut batch) => {
                         batch.instance_range.end = output_index + 1;
-                        work_item_buffer.buffer.push(PreprocessWorkItem {
-                            input_index: input_index.into(),
-                            output_index: batch
+                        work_item_buffer.add_work_item(
+                            input_index.into(),
+                            batch
                                 .extra_index
                                 .as_indirect_parameters_index()
                                 .unwrap_or(output_index),
-                        });
+                        );
                     }
 
                     None if gpu_culling => {
@@ -548,10 +625,10 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                             entity,
                             output_index,
                         );
-                        work_item_buffer.buffer.push(PreprocessWorkItem {
-                            input_index: input_index.into(),
-                            output_index: indirect_parameters_index.unwrap_or_default().into(),
-                        });
+                        work_item_buffer.add_work_item(
+                            input_index.into(),
+                            indirect_parameters_index.unwrap_or_default().into(),
+                        );
                         batch = Some(BinnedRenderPhaseBatch {
                             representative_entity: entity,
                             instance_range: output_index..output_index + 1,
@@ -562,10 +639,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                     }
 
                     None => {
-                        work_item_buffer.buffer.push(PreprocessWorkItem {
-                            input_index: input_index.into(),
-                            output_index,
-                        });
+                        work_item_buffer.add_work_item(input_index.into(), output_index);
                         batch = Some(BinnedRenderPhaseBatch {
                             representative_entity: entity,
                             instance_range: output_index..output_index + 1,
@@ -587,7 +661,11 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                 let Some(input_index) = GFBD::get_binned_index(&system_param_item, entity) else {
                     continue;
                 };
-                let output_index = data_buffer.add() as u32;
+                let output_index = main_pass_output_data_buffer.add() as u32;
+                let early_prepass_output_index = early_prepass_output_data_buffer.add() as u32;
+                let late_prepass_output_index = late_prepass_output_data_buffer.add() as u32;
+                debug_assert_eq!(output_index, early_prepass_output_index);
+                debug_assert_eq!(output_index, late_prepass_output_index);
 
                 if gpu_culling {
                     let indirect_parameters_index = GFBD::get_batch_indirect_parameters_index(
@@ -597,10 +675,8 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                         output_index,
                     )
                     .unwrap_or_default();
-                    work_item_buffer.buffer.push(PreprocessWorkItem {
-                        input_index: input_index.into(),
-                        output_index: indirect_parameters_index.into(),
-                    });
+                    work_item_buffer
+                        .add_work_item(input_index.into(), indirect_parameters_index.into());
                     unbatchables
                         .buffer_indices
                         .add(UnbatchableBinnedEntityIndices {
@@ -610,10 +686,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                             ),
                         });
                 } else {
-                    work_item_buffer.buffer.push(PreprocessWorkItem {
-                        input_index: input_index.into(),
-                        output_index,
-                    });
+                    work_item_buffer.add_work_item(input_index.into(), output_index);
                     unbatchables
                         .buffer_indices
                         .add(UnbatchableBinnedEntityIndices {
@@ -635,29 +708,85 @@ pub fn write_batched_instance_buffers<GFBD>(
     GFBD: GetFullBatchData,
 {
     let BatchedInstanceBuffers {
-        ref mut data_buffer,
+        ref mut main_pass_output_data_buffer,
+        ref mut early_prepass_output_data_buffer,
+        ref mut late_prepass_output_data_buffer,
         work_item_buffers: ref mut index_buffers,
         ref mut current_input_buffer,
         previous_input_buffer: _,
     } = gpu_array_buffer.into_inner();
 
-    data_buffer.write_buffer(&render_device);
+    main_pass_output_data_buffer.write_buffer(&render_device);
+    early_prepass_output_data_buffer.write_buffer(&render_device);
+    late_prepass_output_data_buffer.write_buffer(&render_device);
     current_input_buffer.write_buffer(&render_device, &render_queue);
     // There's no need to write `previous_input_buffer`, as we wrote
     // that on the previous frame, and it hasn't changed.
 
     for index_buffer in index_buffers.values_mut() {
         index_buffer
-            .buffer
+            .work_item_buffer
             .write_buffer(&render_device, &render_queue);
+
+        match index_buffer.culling_buffers {
+            CullingBuffers::Cpu | CullingBuffers::GpuFrustum => {}
+            CullingBuffers::GpuOcclusion {
+                ref mut visibility_buffer,
+            } => {
+                visibility_buffer.write_buffer(&render_device, &render_queue);
+            }
+        }
     }
 }
 
-pub fn write_indirect_parameters_buffer(
+pub fn write_indirect_parameters_buffers(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffer>,
+    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffers>,
 ) {
-    indirect_parameters_buffer.write_buffer(&render_device, &render_queue);
-    indirect_parameters_buffer.clear();
+    indirect_parameters_buffer
+        .early_prepass
+        .write_buffer(&render_device, &render_queue);
+    indirect_parameters_buffer
+        .late_prepass
+        .write_buffer(&render_device, &render_queue);
+    indirect_parameters_buffer
+        .main_pass
+        .write_buffer(&render_device, &render_queue);
+
+    indirect_parameters_buffer.early_prepass.clear();
+    indirect_parameters_buffer.late_prepass.clear();
+    indirect_parameters_buffer.main_pass.clear();
+}
+
+impl CullingBuffers {
+    fn from_components(gpu_culling: bool, occlusion_culling: bool) -> CullingBuffers {
+        match (gpu_culling, occlusion_culling) {
+            (true, true) => CullingBuffers::GpuOcclusion {
+                visibility_buffer: BufferVec::new(BufferUsages::STORAGE),
+            },
+            (true, false) => CullingBuffers::GpuFrustum,
+            (false, _) => CullingBuffers::Cpu,
+        }
+    }
+}
+
+impl PreprocessWorkItemBuffer {
+    fn add_work_item(&mut self, input_index: u32, output_index: u32) {
+        let instance_index = self.work_item_buffer.push(PreprocessWorkItem {
+            input_index,
+            output_index,
+        });
+
+        match self.culling_buffers {
+            CullingBuffers::GpuOcclusion {
+                ref mut visibility_buffer,
+            } if instance_index % 32 == 0 => {
+                visibility_buffer.push(0);
+            }
+            CullingBuffers::Cpu
+            | CullingBuffers::GpuFrustum
+            | CullingBuffers::GpuOcclusion { .. } => {}
+        }
+    }
 }

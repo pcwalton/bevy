@@ -1,16 +1,20 @@
 mod fog;
 mod gpu_preprocess;
+mod hi_z;
 mod light;
 pub(crate) mod mesh;
 mod mesh_bindings;
 mod mesh_view_bindings;
 mod morph;
+mod occlusion_culling;
 mod skin;
 
 pub use fog::*;
 pub use gpu_preprocess::*;
+pub use hi_z::*;
 pub use light::*;
 pub use mesh::*;
 pub use mesh_bindings::MeshLayouts;
 pub use mesh_view_bindings::*;
+pub use occlusion_culling::*;
 pub use skin::{extract_skins, prepare_skins, SkinIndices, SkinUniforms, MAX_JOINTS};
