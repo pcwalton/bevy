@@ -13,6 +13,7 @@
 // [2]: http://www.alexandre-pestana.com/volumetric-lights/
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
+#import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_clip}
 #import bevy_pbr::mesh_view_bindings::{lights, view}
 #import bevy_pbr::mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_VOLUMETRIC_BIT
 #import bevy_pbr::shadow_sampling::sample_shadow_map_hardware
@@ -52,6 +53,20 @@ struct VolumetricFog {
 // 1 / (4π)
 const FRAC_4_PI: f32 = 0.07957747154594767;
 
+struct Vertex {
+    @builtin(instance_index) instance_index: u32,
+    @location(0) position: vec3<f32>,
+}
+
+@vertex
+fn vertex(vertex: Vertex) -> @builtin(position) vec4<f32> {
+    /*return mesh_position_local_to_clip(
+        get_world_from_local(vertex.instance_index),
+        vec4<f32>(vertex.position, 1.0),
+    );*/
+    return vec4<f32>(vertex.position, 1.0);
+}
+
 // The common Henyey-Greenstein asymmetric phase function [1] [2].
 //
 // This determines how much light goes toward the viewer as opposed to away from
@@ -68,7 +83,7 @@ fn henyey_greenstein(neg_LdotV: f32) -> f32 {
 }
 
 @fragment
-fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     // Unpack the `volumetric_fog` settings.
     let fog_color = volumetric_fog.fog_color;
     let ambient_color = volumetric_fog.ambient_color;
@@ -85,14 +100,14 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     // Sample the depth. If this is multisample, just use sample 0; this is
     // approximate but good enough.
-    let frag_coord = in.position;
+    let frag_coord = position;
     let depth = textureLoad(depth_texture, vec2<i32>(frag_coord.xy), 0);
 
     // Starting at the end depth, which we got above, figure out how long the
     // ray we want to trace is and the length of each increment.
     let end_depth = min(
         max_depth,
-        -position_ndc_to_view(frag_coord_to_ndc(vec4(in.position.xy, depth, 1.0))).z
+        -position_ndc_to_view(frag_coord_to_ndc(vec4(position.xy, depth, 1.0))).z
     );
     let step_size = end_depth / f32(step_count);
 
@@ -100,7 +115,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     // Calculate the ray origin (`Ro`) and the ray direction (`Rd`) in NDC,
     // view, and world coordinates.
-    let Rd_ndc = vec3(frag_coord_to_ndc(in.position).xy, 1.0);
+    let Rd_ndc = vec3(frag_coord_to_ndc(position).xy, 1.0);
     let Rd_view = normalize(position_ndc_to_view(Rd_ndc));
     let Ro_world = view.world_position;
     let Rd_world = normalize(position_ndc_to_world(Rd_ndc) - Ro_world);
@@ -213,6 +228,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
 
     // We're done! Blend between the source color and the lit fog color.
-    let source = textureSample(color_texture, color_sampler, in.uv);
+    let uv = position.xy / vec2<f32>(textureDimensions(color_texture).xy);
+    let source = textureSample(color_texture, color_sampler, uv);
     return vec4(source.rgb * background_alpha + accumulated_color, source.a);
 }

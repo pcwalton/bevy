@@ -30,14 +30,13 @@
 //! [Henyey-Greenstein phase function]: https://www.pbr-book.org/4ed/Volume_Scattering/Phase_Functions#TheHenyeyndashGreensteinPhaseFunction
 
 use bevy_app::{App, Plugin};
-use bevy_asset::{load_internal_asset, Handle};
+use bevy_asset::{load_internal_asset, Assets, Handle};
 use bevy_color::{Color, ColorToComponents};
 use bevy_core_pipeline::{
     core_3d::{
         graph::{Core3d, Node3d},
         prepare_core_3d_depth_textures, Camera3d,
     },
-    fullscreen_vertex_shader::fullscreen_shader_vertex_state,
     prepass::{DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass},
 };
 use bevy_derive::{Deref, DerefMut};
@@ -50,9 +49,13 @@ use bevy_ecs::{
     system::{lifetimeless::Read, Commands, Query, Res, ResMut, Resource},
     world::{FromWorld, World},
 };
-use bevy_math::Vec3;
+use bevy_math::{primitives::Plane3d, Vec2, Vec3};
 use bevy_reflect::Reflect;
 use bevy_render::{
+    mesh::{
+        GpuBufferInfo, GpuMesh, Mesh, MeshVertexBufferLayoutRef, MeshVertexBufferLayouts, Meshable,
+    },
+    render_asset::RenderAssets,
     render_graph::{NodeRunError, RenderGraphApp, RenderGraphContext, ViewNode, ViewNodeRunner},
     render_resource::{
         binding_types::{
@@ -64,6 +67,7 @@ use bevy_render::{
         RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType,
         SamplerDescriptor, Shader, ShaderStages, ShaderType, SpecializedRenderPipeline,
         SpecializedRenderPipelines, TextureFormat, TextureSampleType, TextureUsages,
+        VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
     },
     renderer::{RenderContext, RenderDevice, RenderQueue},
     texture::BevyDefault,
@@ -80,6 +84,8 @@ use crate::{
 
 /// The volumetric fog shader.
 pub const VOLUMETRIC_FOG_HANDLE: Handle<Shader> = Handle::weak_from_u128(17400058287583986650);
+
+pub const PLANE_MESH: Handle<Mesh> = Handle::weak_from_u128(435245126479971076);
 
 /// A plugin that implements volumetric fog.
 pub struct VolumetricFogPlugin;
@@ -209,10 +215,11 @@ pub struct ViewVolumetricFogPipeline(pub CachedRenderPipelineId);
 pub struct VolumetricFogNode;
 
 /// Identifies a single specialization of the volumetric fog shader.
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, Hash, Clone)]
 pub struct VolumetricFogPipelineKey {
     /// The layout of the view, which is needed for the raymarching.
     mesh_pipeline_view_key: MeshPipelineViewLayoutKey,
+    vertex_buffer_layout: MeshVertexBufferLayoutRef,
     /// Whether the view has high dynamic range.
     hdr: bool,
 }
@@ -250,6 +257,13 @@ impl Plugin for VolumetricFogPlugin {
             "volumetric_fog.wgsl",
             Shader::from_wgsl
         );
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        meshes.insert(
+            &PLANE_MESH,
+            Plane3d::new(Vec3::NEG_Z, Vec2::ONE).mesh().into(),
+        );
+
         app.register_type::<VolumetricFogSettings>()
             .register_type::<VolumetricLight>();
 
@@ -439,6 +453,11 @@ impl ViewNode for VolumetricFogNode {
             return Ok(());
         };
 
+        let gpu_meshes = world.resource::<RenderAssets<GpuMesh>>();
+        let Some(gpu_mesh) = gpu_meshes.get(&PLANE_MESH) else {
+            println!("GPU mesh wasn't in `RenderAssets<GpuMesh>`!");
+            return Ok(());
+        };
         let postprocess = view_target.post_process_write();
 
         // Create the bind group for the view.
@@ -475,6 +494,7 @@ impl ViewNode for VolumetricFogNode {
             .command_encoder()
             .begin_render_pass(&render_pass_descriptor);
 
+        render_pass.set_vertex_buffer(0, *gpu_mesh.vertex_buffer.slice(..));
         render_pass.set_pipeline(pipeline);
         render_pass.set_bind_group(
             0,
@@ -492,7 +512,21 @@ impl ViewNode for VolumetricFogNode {
             &volumetric_view_bind_group,
             &[**view_volumetric_lighting_uniform_buffer_offset],
         );
-        render_pass.draw(0..3, 0..1);
+
+        // Draw elements or arrays, as appropriate.
+        match &gpu_mesh.buffer_info {
+            GpuBufferInfo::Indexed {
+                buffer,
+                index_format,
+                count,
+            } => {
+                render_pass.set_index_buffer(*buffer.slice(..), *index_format);
+                render_pass.draw_indexed(0..*count, 0, 0..1);
+            }
+            GpuBufferInfo::NonIndexed => {
+                render_pass.draw(0..gpu_mesh.vertex_count, 0..1);
+            }
+        }
 
         Ok(())
     }
@@ -522,11 +556,22 @@ impl SpecializedRenderPipeline for VolumetricFogPipeline {
             self.volumetric_view_bind_group_layout_no_msaa.clone()
         };
 
+        let vertex_format = key
+            .vertex_buffer_layout
+            .0
+            .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])
+            .expect("Failed to get vertex layout for volumetric fog hull");
+
         RenderPipelineDescriptor {
             label: Some("volumetric lighting pipeline".into()),
             layout: vec![mesh_view_layout.clone(), volumetric_view_bind_group_layout],
             push_constant_ranges: vec![],
-            vertex: fullscreen_shader_vertex_state(),
+            vertex: VertexState {
+                shader: VOLUMETRIC_FOG_HANDLE,
+                shader_defs: shader_defs.clone(),
+                entry_point: "vertex".into(),
+                buffers: vec![vertex_format],
+            },
             primitive: PrimitiveState::default(),
             depth_stencil: None,
             multisample: MultisampleState::default(),
@@ -549,6 +594,7 @@ impl SpecializedRenderPipeline for VolumetricFogPipeline {
 }
 
 /// Specializes volumetric fog pipelines for all views with that effect enabled.
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_volumetric_fog_pipelines(
     mut commands: Commands,
     pipeline_cache: Res<PipelineCache>,
@@ -566,7 +612,11 @@ pub fn prepare_volumetric_fog_pipelines(
         With<VolumetricFogSettings>,
     >,
     msaa: Res<Msaa>,
+    meshes: Res<RenderAssets<GpuMesh>>,
+    mut mesh_vertex_buffer_layouts: ResMut<MeshVertexBufferLayouts>,
 ) {
+    let plane_mesh = meshes.get(&PLANE_MESH).expect("Plane mesh not found!");
+
     for (entity, view, normal_prepass, depth_prepass, motion_vector_prepass, deferred_prepass) in
         view_targets.iter()
     {
@@ -589,6 +639,7 @@ pub fn prepare_volumetric_fog_pipelines(
             &volumetric_lighting_pipeline,
             VolumetricFogPipelineKey {
                 mesh_pipeline_view_key,
+                vertex_buffer_layout: plane_mesh.layout.clone(),
                 hdr: view.hdr,
             },
         );
