@@ -27,6 +27,7 @@
 // The GPU version of [`VolumetricFogSettings`]. See the comments in
 // `volumetric_fog/mod.rs` for descriptions of the fields here.
 struct VolumetricFog {
+    clip_from_local: mat4x4<f32>,
     fog_color: vec3<f32>,
     light_tint: vec3<f32>,
     ambient_color: vec3<f32>,
@@ -60,11 +61,7 @@ struct Vertex {
 
 @vertex
 fn vertex(vertex: Vertex) -> @builtin(position) vec4<f32> {
-    /*return mesh_position_local_to_clip(
-        get_world_from_local(vertex.instance_index),
-        vec4<f32>(vertex.position, 1.0),
-    );*/
-    return vec4<f32>(vertex.position, 1.0);
+    return volumetric_fog.clip_from_local * vec4<f32>(vertex.position, 1.0);
 }
 
 // The common Henyey-Greenstein asymmetric phase function [1] [2].

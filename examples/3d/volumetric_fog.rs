@@ -3,7 +3,7 @@
 use bevy::{
     core_pipeline::{bloom::BloomSettings, tonemapping::Tonemapping, Skybox},
     math::vec3,
-    pbr::{VolumetricFogSettings, VolumetricLight},
+    pbr::{FogVolume, VolumetricFogSettings, VolumetricLight},
     prelude::*,
 };
 
@@ -57,7 +57,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             // This value is explicitly set to 0 since we have no environment map light
             ambient_intensity: 0.0,
             ..default()
-        });
+        })
+        .insert(FogVolume::default());
 
     // Add the help text.
     commands.spawn(
