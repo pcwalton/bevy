@@ -117,6 +117,12 @@ struct PbrInput {
     // we're doing anisotropy, so they're prefixed with `anisotropy_`.
     anisotropy_T: vec3<f32>,
     anisotropy_B: vec3<f32>,
+
+#ifdef STANDARD_MATERIAL_CUSTOM_FRESNEL
+    custom_fresnel: vec3<f32>,
+    custom_fresnel_amount: vec3<f32>,
+#endif  // STANDARD_MATERIAL_CUSTOM_FRESNEL
+
     is_orthographic: bool,
     flags: u32,
 };
@@ -144,6 +150,11 @@ fn pbr_input_new() -> PbrInput {
     pbr_input.anisotropy_B = vec3<f32>(0.0);
 
     pbr_input.lightmap_light = vec3<f32>(0.0);
+
+#ifdef STANDARD_MATERIAL_CUSTOM_FRESNEL
+    pbr_input.custom_fresnel = vec3<f32>(0.0);
+    pbr_input.custom_fresnel_amount = vec3<f32>(0.0);
+#endif  // STANDARD_MATERIAL_CUSTOM_FRESNEL
 
     pbr_input.flags = 0u;
 

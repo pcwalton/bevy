@@ -687,6 +687,8 @@ pub struct StandardMaterial {
 
     /// The transform applied to the UVs corresponding to `ATTRIBUTE_UV_0` on the mesh before sampling. Default is identity.
     pub uv_transform: Affine2,
+
+    pub custom_fresnel: bool,
 }
 
 impl StandardMaterial {
@@ -831,6 +833,7 @@ impl Default for StandardMaterial {
             opaque_render_method: OpaqueRendererMethod::Auto,
             deferred_lighting_pass_id: DEFAULT_PBR_DEFERRED_LIGHTING_PASS_ID,
             uv_transform: Affine2::IDENTITY,
+            custom_fresnel: false,
         }
     }
 }
@@ -1108,18 +1111,19 @@ bitflags! {
         const CLEARCOAT                = 0x000040;
         const CLEARCOAT_NORMAL_MAP     = 0x000080;
         const ANISOTROPY               = 0x000100;
-        const BASE_COLOR_UV            = 0x000200;
-        const EMISSIVE_UV              = 0x000400;
-        const METALLIC_ROUGHNESS_UV    = 0x000800;
-        const OCCLUSION_UV             = 0x001000;
-        const SPECULAR_TRANSMISSION_UV = 0x002000;
-        const THICKNESS_UV             = 0x004000;
-        const DIFFUSE_TRANSMISSION_UV  = 0x008000;
-        const NORMAL_MAP_UV            = 0x010000;
-        const ANISOTROPY_UV            = 0x020000;
-        const CLEARCOAT_UV             = 0x040000;
-        const CLEARCOAT_ROUGHNESS_UV   = 0x080000;
-        const CLEARCOAT_NORMAL_UV      = 0x100000;
+        const CUSTOM_FRESNEL           = 0x000200;
+        const BASE_COLOR_UV            = 0x000400;
+        const EMISSIVE_UV              = 0x000800;
+        const METALLIC_ROUGHNESS_UV    = 0x001000;
+        const OCCLUSION_UV             = 0x002000;
+        const SPECULAR_TRANSMISSION_UV = 0x004000;
+        const THICKNESS_UV             = 0x008000;
+        const DIFFUSE_TRANSMISSION_UV  = 0x010000;
+        const NORMAL_MAP_UV            = 0x020000;
+        const ANISOTROPY_UV            = 0x040000;
+        const CLEARCOAT_UV             = 0x080000;
+        const CLEARCOAT_ROUGHNESS_UV   = 0x100000;
+        const CLEARCOAT_NORMAL_UV      = 0x200000;
         const DEPTH_BIAS               = 0xffffffff_00000000;
     }
 }
@@ -1168,6 +1172,11 @@ impl From<&StandardMaterial> for StandardMaterialKey {
         key.set(
             StandardMaterialKey::ANISOTROPY,
             material.anisotropy_strength > 0.0,
+        );
+
+        key.set(
+            StandardMaterialKey::CUSTOM_FRESNEL,
+            material.custom_fresnel,
         );
 
         key.set(
@@ -1334,6 +1343,10 @@ impl Material for StandardMaterial {
                 (
                     StandardMaterialKey::ANISOTROPY,
                     "STANDARD_MATERIAL_ANISOTROPY",
+                ),
+                (
+                    StandardMaterialKey::CUSTOM_FRESNEL,
+                    "STANDARD_MATERIAL_CUSTOM_FRESNEL",
                 ),
                 (
                     StandardMaterialKey::BASE_COLOR_UV,

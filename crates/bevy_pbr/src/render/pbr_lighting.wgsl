@@ -103,6 +103,11 @@ struct LightingInput {
     // the tangent direction.
     Ba: vec3<f32>,
 #endif  // STANDARD_MATERIAL_ANISOTROPY
+
+#ifdef STANDARD_MATERIAL_CUSTOM_FRESNEL
+    custom_fresnel: vec3<f32>,
+    custom_fresnel_amount: vec3<f32>,
+#endif  // STANDARD_MATERIAL_CUSTOM_FRESNEL
 }
 
 // Values derived from the `LightingInput` for both diffuse and specular lights.
@@ -222,6 +227,11 @@ fn F_Schlick(f0: f32, f90: f32, VdotH: f32) -> f32 {
     return f0 + (f90 - f0) * pow(1.0 - VdotH, 5.0);
 }
 
+fn Schlick_to_F0(f0: vec3<f32>, f90: f32, VdotH: f32) -> vec3<f32> {
+    let x5 = clamp(pow(1.0 - VdotH, 5.0), 0.0, 0.9999);
+    return (f0 - f90 * x5) / (1.0 - x5);
+}
+
 fn fresnel(f0: vec3<f32>, LdotH: f32) -> vec3<f32> {
     // f_90 suitable for ambient occlusion
     // see https://google.github.io/filament/Filament.html#lighting/occlusion
@@ -309,8 +319,12 @@ fn specular(
     let D = D_GGX(roughness, NdotH, H);
     // Calculate visibility.
     let V = V_SmithGGXCorrelated(roughness, NdotV, NdotL);
+
     // Calculate the Fresnel term.
-    let F = fresnel(F0, LdotH);
+    var F = fresnel(F0, LdotH);
+#ifdef STANDARD_MATERIAL_CUSTOM_FRESNEL
+    F = mix(F, (*input).custom_fresnel, (*input).custom_fresnel_amount);
+#endif  // STANDARD_MATERIAL_CUSTOM_FRESNEL
 
     // Calculate the specular light.
     let Fr = specular_multiscatter(input, D, V, F, specular_intensity);

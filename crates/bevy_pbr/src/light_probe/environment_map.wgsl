@@ -4,7 +4,7 @@
 #import bevy_pbr::mesh_view_bindings as bindings
 #import bevy_pbr::mesh_view_bindings::light_probes
 #import bevy_pbr::lighting::{
-    F_Schlick_vec, LayerLightingInput, LightingInput, LAYER_BASE, LAYER_CLEARCOAT
+    F_Schlick_vec, Schlick_to_F0, LayerLightingInput, LightingInput, LAYER_BASE, LAYER_CLEARCOAT
 }
 
 struct EnvironmentMapLight {
@@ -161,7 +161,7 @@ fn environment_map_light(
     let diffuse_color = (*input).diffuse_color;
     let NdotV = (*input).layers[LAYER_BASE].NdotV;
     let F_ab = (*input).F_ab;
-    let F0 = (*input).F0_;
+    var F0 = (*input).F0_;
     let world_position = (*input).P;
 
     var out: EnvironmentMapLight;
@@ -173,6 +173,11 @@ fn environment_map_light(
         return out;
     }
 
+#ifdef STANDARD_MATERIAL_CUSTOM_FRESNEL
+    let custom_f0 = Schlick_to_F0((*input).custom_fresnel, 1.0, NdotV);
+    F0 = mix(F0, custom_f0, (*input).custom_fresnel_amount);
+#endif  // STANDARD_MATERIAL_CUSTOM_FRESNEL
+
     // No real world material has specular values under 0.02, so we use this range as a
     // "pre-baked specular occlusion" that extinguishes the fresnel term, for artistic control.
     // See: https://google.github.io/filament/Filament.html#specularocclusion
@@ -181,7 +186,12 @@ fn environment_map_light(
     // Multiscattering approximation: https://www.jcgt.org/published/0008/01/03/paper.pdf
     // Useful reference: https://bruop.github.io/ibl
     let Fr = max(vec3(1.0 - roughness), F0) - F0;
-    let kS = F0 + Fr * pow(1.0 - NdotV, 5.0);
+
+    var kS = F0 + Fr * pow(1.0 - NdotV, 5.0);
+#ifdef STANDARD_MATERIAL_CUSTOM_FRESNEL
+    kS = mix(kS, (*input).custom_fresnel, (*input).custom_fresnel_amount);
+#endif
+
     let Ess = F_ab.x + F_ab.y;
     let FssEss = kS * Ess * specular_occlusion;
     let Ems = 1.0 - Ess;

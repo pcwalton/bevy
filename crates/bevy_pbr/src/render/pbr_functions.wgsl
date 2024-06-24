@@ -398,6 +398,15 @@ fn apply_pbr_lighting(
 #endif  // STANDARD_MATERIAL_ANISOTROPY
 #endif  // STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
 
+#ifdef STANDARD_MATERIAL_CUSTOM_FRESNEL
+    lighting_input.custom_fresnel = in.custom_fresnel;
+    lighting_input.custom_fresnel_amount = in.custom_fresnel_amount;
+#ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
+    transmissive_lighting_input.custom_fresnel = in.custom_fresnel;
+    transmissive_lighting_input.custom_fresnel_amount = in.custom_fresnel_amount;
+#endif
+#endif  // STANDARD_MATERIAL_CUSTOM_FRESNEL
+
     let view_z = dot(vec4<f32>(
         view_bindings::view.view_from_world[0].z,
         view_bindings::view.view_from_world[1].z,
@@ -646,6 +655,10 @@ fn apply_pbr_lighting(
     transmissive_environment_light_input.layers[LAYER_CLEARCOAT].perceptual_roughness = 0.0;
     transmissive_environment_light_input.layers[LAYER_CLEARCOAT].roughness = 0.0;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
+#ifdef STANDARD_MATERIAL_CUSTOM_FRESNEL
+    transmissive_environment_light_input.custom_fresnel = in.custom_fresnel;
+    transmissive_environment_light_input.custom_fresnel_amount = in.custom_fresnel_amount;
+#endif
 
     let transmitted_environment_light =
         environment_map::environment_map_light(&transmissive_environment_light_input, false);
@@ -690,7 +703,7 @@ fn apply_pbr_lighting(
             vec3<f32>(0.0) // TODO: Pass in (pre-attenuated) scattered light contribution here
         ).rgb;
     }
-#endif
+#endif  // STANDARD_MATERIAL_SPECULAR_TRANSMISSION
 
     // Total light
     output_color = vec4<f32>(
