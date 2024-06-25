@@ -757,7 +757,7 @@ pub fn queue_material_meshes<M: Material>(
                         let bin_key = Opaque3dBinKey {
                             draw_function: draw_opaque_pbr,
                             pipeline: pipeline_id,
-                            asset_id: mesh_instance.mesh_asset_id,
+                            asset_id: mesh_instance.mesh_asset_id.into(),
                             material_bind_group_id: material.get_bind_group_id().0,
                             lightmap_image,
                         };
@@ -781,7 +781,7 @@ pub fn queue_material_meshes<M: Material>(
                         let bin_key = OpaqueNoLightmap3dBinKey {
                             draw_function: draw_alpha_mask_pbr,
                             pipeline: pipeline_id,
-                            asset_id: mesh_instance.mesh_asset_id,
+                            asset_id: mesh_instance.mesh_asset_id.into(),
                             material_bind_group_id: material.get_bind_group_id().0,
                         };
                         alpha_mask_phase.add(

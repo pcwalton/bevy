@@ -3230,6 +3230,17 @@ description = "Displays an example model with anisotropy"
 category = "3D Rendering"
 wasm = false
 
+[[example]]
+name = "custom_phase_item"
+path = "examples/3d/custom_phase_item.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.custom_phase_item]
+name = "Custom phase item"
+description = "Demonstrates enqueuing custom phase items"
+category = "3D Rendering"
+wasm = true
+
 [profile.wasm-release]
 inherits = "release"
 opt-level = "z"
