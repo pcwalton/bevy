@@ -247,6 +247,7 @@ pub struct PrepassPipeline<M: Material> {
     pub deferred_material_vertex_shader: Option<Handle<Shader>>,
     pub deferred_material_fragment_shader: Option<Handle<Shader>>,
     pub material_pipeline: MaterialPipeline<M>,
+    pub bindless_textures: bool,
     _marker: PhantomData<M>,
 }
 
@@ -284,6 +285,7 @@ impl<M: Material> FromWorld for PrepassPipeline<M> {
         );
 
         let mesh_pipeline = world.resource::<MeshPipeline>();
+        let render_bind_group_store = world.resource::<RenderBindGroupStore>();
 
         PrepassPipeline {
             view_layout_motion_vectors,
@@ -309,8 +311,12 @@ impl<M: Material> FromWorld for PrepassPipeline<M> {
                 ShaderRef::Handle(handle) => Some(handle),
                 ShaderRef::Path(path) => Some(asset_server.load(path)),
             },
-            material_layout: M::bind_group_layout(render_device),
+            material_layout: M::bind_group_layout(
+                render_device,
+                render_bind_group_store.bindless_textures_enabled,
+            ),
             material_pipeline: world.resource::<MaterialPipeline<M>>().clone(),
+            bindless_textures: render_bind_group_store.bindless_textures_enabled,
             _marker: PhantomData,
         }
     }
@@ -443,6 +449,10 @@ where
 
         if key.mesh_key.contains(MeshPipelineKey::HAS_PREVIOUS_MORPH) {
             shader_defs.push("HAS_PREVIOUS_MORPH".into());
+        }
+
+        if self.bindless_textures {
+            shader_defs.push("BINDLESS_TEXTURES".into());
         }
 
         if key.mesh_key.intersects(
@@ -861,7 +871,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                 draw_function: opaque_draw_deferred,
                                 pipeline: pipeline_id,
                                 asset_id: mesh_instance.mesh_asset_id.into(),
-                                material_bind_group_id: material.get_bind_group_id().0,
+                                material_bind_group_id: material.bind_group_id,
                             },
                             *visible_entity,
                             BinnedRenderPhaseType::mesh(mesh_instance.should_batch()),
@@ -872,7 +882,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                 draw_function: opaque_draw_prepass,
                                 pipeline: pipeline_id,
                                 asset_id: mesh_instance.mesh_asset_id.into(),
-                                material_bind_group_id: material.get_bind_group_id().0,
+                                material_bind_group_id: material.bind_group_id,
                             },
                             *visible_entity,
                             BinnedRenderPhaseType::mesh(mesh_instance.should_batch()),
@@ -886,7 +896,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                             pipeline: pipeline_id,
                             draw_function: alpha_mask_draw_deferred,
                             asset_id: mesh_instance.mesh_asset_id.into(),
-                            material_bind_group_id: material.get_bind_group_id().0,
+                            material_bind_group_id: material.bind_group_id,
                         };
                         alpha_mask_deferred_phase.as_mut().unwrap().add(
                             bin_key,
@@ -898,7 +908,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                             pipeline: pipeline_id,
                             draw_function: alpha_mask_draw_prepass,
                             asset_id: mesh_instance.mesh_asset_id.into(),
-                            material_bind_group_id: material.get_bind_group_id().0,
+                            material_bind_group_id: material.bind_group_id,
                         };
                         alpha_mask_phase.add(
                             bin_key,

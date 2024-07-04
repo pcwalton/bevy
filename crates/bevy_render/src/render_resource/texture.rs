@@ -1,4 +1,5 @@
 use crate::define_atomic_id;
+use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
 use crate::render_resource::resource_macros::*;
@@ -111,6 +112,23 @@ impl Deref for SurfaceTexture {
     }
 }
 
+impl PartialEq for TextureView {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for TextureView {}
+
+impl Hash for TextureView {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: Hasher,
+    {
+        self.id.hash(state);
+    }
+}
+
 define_atomic_id!(SamplerId);
 render_resource_wrapper!(ErasedSampler, wgpu::Sampler);
 
@@ -148,5 +166,22 @@ impl Deref for Sampler {
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.value
+    }
+}
+
+impl PartialEq for Sampler {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for Sampler {}
+
+impl Hash for Sampler {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: Hasher,
+    {
+        self.id.hash(state);
     }
 }

@@ -1,11 +1,12 @@
 use bevy_asset::Asset;
 use bevy_color::{Alpha, ColorToComponents};
-use bevy_math::{vec2, Affine2, Affine3, Mat2, Mat3, Vec2, Vec3, Vec4};
+use bevy_math::{vec2, Affine2, Affine3, Mat2, Mat3, Mat4, Vec2, Vec3, Vec4};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
     mesh::MeshVertexBufferLayoutRef, render_asset::RenderAssets, render_resource::*,
 };
 use bitflags::bitflags;
+use bytemuck::{Pod, Zeroable};
 
 use crate::deferred::DEFAULT_PBR_DEFERRED_LIGHTING_PASS_ID;
 use crate::*;
@@ -29,7 +30,9 @@ pub enum UvChannel {
 /// May be created directly from a [`Color`] or an [`Image`].
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[bind_group_data(StandardMaterialKey)]
+#[array(256)]
 #[uniform(0, StandardMaterialUniform)]
+#[bindless(27)]
 #[reflect(Default, Debug)]
 pub struct StandardMaterial {
     /// The color of the surface of the material before lighting.
@@ -351,6 +354,21 @@ pub struct StandardMaterial {
     /// Defaults to [`UvChannel::Uv0`].
     pub normal_map_channel: UvChannel,
 
+    /// Specifies the level of exposure to ambient light.
+    ///
+    /// This is usually generated and stored automatically ("baked") by 3D-modelling software.
+    ///
+    /// Typically, steep concave parts of a model (such as the armpit of a shirt) are darker,
+    /// because they have little exposure to light.
+    /// An occlusion map specifies those parts of the model that light doesn't reach well.
+    ///
+    /// The material will be less lit in places where this texture is dark.
+    /// This is similar to ambient occlusion, but built into the model.
+    #[texture(7)]
+    #[sampler(8)]
+    #[dependency]
+    pub occlusion_texture: Option<Handle<Image>>,
+
     /// Used to fake the lighting of bumps and dents on a material.
     ///
     /// A typical usage would be faking cobblestones on a flat plane mesh in 3D.
@@ -384,21 +402,6 @@ pub struct StandardMaterial {
     ///
     /// Defaults to [`UvChannel::Uv0`].
     pub occlusion_channel: UvChannel,
-
-    /// Specifies the level of exposure to ambient light.
-    ///
-    /// This is usually generated and stored automatically ("baked") by 3D-modelling software.
-    ///
-    /// Typically, steep concave parts of a model (such as the armpit of a shirt) are darker,
-    /// because they have little exposure to light.
-    /// An occlusion map specifies those parts of the model that light doesn't reach well.
-    ///
-    /// The material will be less lit in places where this texture is dark.
-    /// This is similar to ambient occlusion, but built into the model.
-    #[texture(7)]
-    #[sampler(8)]
-    #[dependency]
-    pub occlusion_texture: Option<Handle<Image>>,
 
     /// An extra thin translucent layer on top of the main PBR layer. This is
     /// typically used for painted surfaces.
@@ -904,19 +907,16 @@ impl StandardMaterialFlags {
     const ALPHA_MODE_SHIFT_BITS: u32 = 32 - Self::ALPHA_MODE_MASK_BITS.count_ones();
 }
 
-/// The GPU representation of the uniform data of a [`StandardMaterial`].
-#[derive(Clone, Default, ShaderType)]
+#[derive(Clone, Copy, ShaderType, Pod, Zeroable)]
+#[repr(C)]
 pub struct StandardMaterialUniform {
-    /// Doubles as diffuse albedo for non-metallic, specular for metallic and a mix for everything
-    /// in between.
+    /// The transform applied to the UVs corresponding to `ATTRIBUTE_UV_0` on the mesh before sampling. Default is identity.
+    pub uv_transform: Mat4,
     pub base_color: Vec4,
-    // Use a color for user-friendliness even though we technically don't use the alpha channel
-    // Might be used in the future for exposure correction in HDR
     pub emissive: Vec4,
     /// Color white light takes after travelling through the attenuation distance underneath the material surface
     pub attenuation_color: Vec4,
-    /// The transform applied to the UVs corresponding to `ATTRIBUTE_UV_0` on the mesh before sampling. Default is identity.
-    pub uv_transform: Mat3,
+    pub anisotropy_rotation: Vec2,
     /// Linear perceptual roughness, clamped to [0.089, 1.0] in the shader
     /// Defaults to minimum of 0.089
     pub roughness: f32,
@@ -938,7 +938,6 @@ pub struct StandardMaterialUniform {
     pub clearcoat: f32,
     pub clearcoat_perceptual_roughness: f32,
     pub anisotropy_strength: f32,
-    pub anisotropy_rotation: Vec2,
     /// The [`StandardMaterialFlags`] accessible in the `wgsl` shader.
     pub flags: u32,
     /// When the alpha mode mask flag is set, any base color alpha above this cutoff means fully opaque,
@@ -1097,7 +1096,7 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
             lightmap_exposure: self.lightmap_exposure,
             max_relief_mapping_search_steps: self.parallax_mapping_method.max_steps(),
             deferred_lighting_pass_id: self.deferred_lighting_pass_id as u32,
-            uv_transform: self.uv_transform.into(),
+            uv_transform: Mat4::from_mat3(self.uv_transform.into()),
         }
     }
 }

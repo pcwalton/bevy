@@ -62,6 +62,7 @@ use bevy_window::{PrimaryWindow, RawHandleWrapperHolder};
 use extract_resource::ExtractResourcePlugin;
 use globals::GlobalsPlugin;
 use render_asset::RenderAssetBytesPerFrame;
+use render_resource::RenderResourcePlugin;
 use renderer::{RenderAdapter, RenderAdapterInfo, RenderDevice, RenderQueue};
 
 use crate::mesh::GpuMesh;
@@ -112,6 +113,8 @@ pub enum RenderSet {
     PrepareAssets,
     /// Create any additional views such as those used for shadow mapping.
     ManageViews,
+    /// Collect meshes and produce any per-mesh data the GPU will need
+    CollectMeshes,
     /// Queue drawable entities as phase items in render phases ready for
     /// sorting (if necessary)
     Queue,
@@ -171,6 +174,7 @@ impl Render {
                 .chain()
                 .in_set(Prepare),
         );
+        schedule.configure_sets((PrepareAssets, CollectMeshes, Queue).chain());
 
         schedule
     }
@@ -346,6 +350,7 @@ impl Plugin for RenderPlugin {
             GlobalsPlugin,
             MorphPlugin,
             BatchingPlugin,
+            RenderResourcePlugin::default(),
         ));
 
         app.init_resource::<RenderAssetBytesPerFrame>()

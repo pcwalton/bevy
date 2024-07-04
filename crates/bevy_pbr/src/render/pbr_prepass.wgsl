@@ -6,8 +6,10 @@
     pbr_functions,
     pbr_functions::SampleBias,
     prepass_io,
+    mesh_bindings::mesh,
     mesh_view_bindings::view,
 }
+#import bevy_render::maths
 
 #ifdef MESHLET_MESH_MATERIAL_PASS
 #import bevy_pbr::meshlet_visibility_buffer_resolve::resolve_vertex_output
@@ -30,6 +32,11 @@ fn fragment(
     pbr_prepass_functions::prepass_alpha_discard(in);
 #endif
 
+    let material_id = mesh[in.instance_index].material_id;
+#ifdef BINDLESS_TEXTURES
+    var bindless_indices = pbr_bindings::bindless_indices[material_id];
+#endif  // BINDLESS_TEXTURES
+
     var out: prepass_io::FragmentOutput;
 
 #ifdef DEPTH_CLAMP_ORTHO
@@ -38,8 +45,10 @@ fn fragment(
 
 #ifdef NORMAL_PREPASS
     // NOTE: Unlit bit not set means == 0 is true, so the true case is if lit
-    if (material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
-        let double_sided = (material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
+    if (pbr_bindings::materials[material_id].flags &
+            pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
+        let double_sided = (pbr_bindings::materials[material_id].flags &
+            pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
 
         let world_normal = pbr_functions::prepare_world_normal(
             in.world_normal,
@@ -53,36 +62,64 @@ fn fragment(
 #ifdef VERTEX_TANGENTS
 #ifdef STANDARD_MATERIAL_NORMAL_MAP
 
+        if (true
+#ifdef BINDLESS_TEXTURES
+                && bindless_indices.normal_map_texture < 0xffffffffu
+                && bindless_indices.normal_map_sampler < 0xffffffffu
+#endif  // BINDLESS_TEXTURES
+        ) {
+
+            let uv_transform_mat4 = pbr_bindings::materials[material_id].uv_transform;
+            let uv_transform = maths::mat4x4_to_mat3x3(uv_transform_mat4);
+
 #ifdef STANDARD_MATERIAL_NORMAL_MAP_UV_B
-        let uv = (material.uv_transform * vec3(in.uv_b, 1.0)).xy;
+            let uv = (uv_transform * vec3(in.uv_b, 1.0)).xy;
 #else
-        let uv = (material.uv_transform * vec3(in.uv, 1.0)).xy;
+            let uv = (uv_transform * vec3(in.uv, 1.0)).xy;
 #endif
 
-        // Fill in the sample bias so we can sample from textures.
-        var bias: SampleBias;
+            // Fill in the sample bias so we can sample from textures.
+            var bias: SampleBias;
 #ifdef MESHLET_MESH_MATERIAL_PASS
-        bias.ddx_uv = in.ddx_uv;
-        bias.ddy_uv = in.ddy_uv;
+            bias.ddx_uv = in.ddx_uv;
+            bias.ddy_uv = in.ddy_uv;
 #else   // MESHLET_MESH_MATERIAL_PASS
-        bias.mip_bias = view.mip_bias;
+            bias.mip_bias = view.mip_bias;
 #endif  // MESHLET_MESH_MATERIAL_PASS
 
-        let Nt = pbr_functions::sample_texture(
-            pbr_bindings::normal_map_texture,
-            pbr_bindings::normal_map_sampler,
-            uv,
-            bias,
-        ).rgb;
-        let TBN = pbr_functions::calculate_tbn_mikktspace(normal, in.world_tangent);
+            let Nt =
+#ifdef MESHLET_MESH_MATERIAL_PASS
+                textureSampleGrad(
+#else   // MESHLET_MESH_MATERIAL_PASS
+                textureSampleBias(
+#endif  // MESHLET_MESH_MATERIAL_PASS
+#ifdef BINDLESS_TEXTURES
+                    pbr_bindings::normal_map_texture[bindless_indices.normal_map_texture],
+                    pbr_bindings::normal_map_sampler[bindless_indices.normal_map_sampler],
+#else   // BINDLESS_TEXTURES
+                    pbr_bindings::normal_map_texture,
+                    pbr_bindings::normal_map_sampler,
+#endif  // BINDLESS_TEXTURES
+                    uv,
+#ifdef MESHLET_MESH_MATERIAL_PASS
+                    bias.ddx_uv,
+                    bias.ddy_uv,
+#else   // MESHLET_MESH_MATERIAL_PASS
+                    bias.mip_bias,
+#endif  // MESHLET_MESH_MATERIAL_PASS
+                ).rgb;
 
-        normal = pbr_functions::apply_normal_mapping(
-            material.flags,
-            TBN,
-            double_sided,
-            is_front,
-            Nt,
-        );
+            let TBN = pbr_functions::calculate_tbn_mikktspace(normal, in.world_tangent);
+
+            normal = pbr_functions::apply_normal_mapping(
+                pbr_bindings::materials[material_id].flags,
+                TBN,
+                double_sided,
+                is_front,
+                Nt,
+            );
+
+        }
 
 #endif  // STANDARD_MATERIAL_NORMAL_MAP
 #endif  // VERTEX_TANGENTS

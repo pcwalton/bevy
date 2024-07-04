@@ -10,7 +10,7 @@ use bevy::{
             binding_types::{sampler, texture_2d},
             *,
         },
-        renderer::RenderDevice,
+        renderer::{RenderDevice, RenderQueue},
         texture::{FallbackImage, GpuImage},
         RenderApp,
     },
@@ -101,8 +101,10 @@ impl AsBindGroup for BindlessMaterial {
         &self,
         layout: &BindGroupLayout,
         render_device: &RenderDevice,
+        _: &RenderQueue,
         image_assets: &RenderAssets<GpuImage>,
         fallback_image: &FallbackImage,
+        bind_group_store: &mut RenderBindGroupStore,
     ) -> Result<PreparedBindGroup<Self::Data>, AsBindGroupError> {
         // retrieve the render resources from handles
         let mut images = vec![];
@@ -125,16 +127,29 @@ impl AsBindGroup for BindlessMaterial {
             textures[id] = &*image.texture_view;
         }
 
+        let bind_group_id = bind_group_store.get_or_create_bind_group_id(&[]);
+
         let bind_group = render_device.create_bind_group(
             "bindless_material_bind_group",
             layout,
             &BindGroupEntries::sequential((&textures[..], &fallback_image.sampler)),
         );
 
+        bind_group_store.bind_group_id_to_bind_group.insert(
+            bind_group_id,
+            RenderBindGroup {
+                bind_group,
+                buffer_arrays: default(),
+                bindless: None,
+                bindless_count: 0,
+            },
+        );
+
         Ok(PreparedBindGroup {
             bindings: vec![],
-            bind_group,
+            bind_group_id,
             data: (),
+            bindless_index: default(),
         })
     }
 
@@ -142,15 +157,17 @@ impl AsBindGroup for BindlessMaterial {
         &self,
         _: &BindGroupLayout,
         _: &RenderDevice,
+        _: &RenderQueue,
         _: &RenderAssets<GpuImage>,
         _: &FallbackImage,
+        _: bool,
     ) -> Result<UnpreparedBindGroup<Self::Data>, AsBindGroupError> {
         // we implement as_bind_group directly because
         panic!("bindless texture arrays can't be owned")
         // or rather, they can be owned, but then you can't make a `&'a [&'a TextureView]` from a vec of them in get_binding().
     }
 
-    fn bind_group_layout_entries(_: &RenderDevice) -> Vec<BindGroupLayoutEntry>
+    fn bind_group_layout_entries(_: &RenderDevice, _: bool) -> Vec<BindGroupLayoutEntry>
     where
         Self: Sized,
     {

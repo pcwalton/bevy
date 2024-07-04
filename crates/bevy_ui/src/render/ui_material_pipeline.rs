@@ -23,6 +23,7 @@ use bevy_render::{
 use bevy_transform::prelude::GlobalTransform;
 use bevy_window::{PrimaryWindow, Window};
 use bytemuck::{Pod, Zeroable};
+use lifetimeless::SResMut;
 
 use crate::*;
 
@@ -216,7 +217,12 @@ impl<M: UiMaterial> FromWorld for UiMaterialPipeline<M> {
     fn from_world(world: &mut World) -> Self {
         let asset_server = world.resource::<AssetServer>();
         let render_device = world.resource::<RenderDevice>();
-        let ui_layout = M::bind_group_layout(render_device);
+        let render_bind_group_store = world.resource::<RenderBindGroupStore>();
+
+        let ui_layout = M::bind_group_layout(
+            render_device,
+            render_bind_group_store.bindless_textures_enabled,
+        );
 
         let view_layout = render_device.create_bind_group_layout(
             "ui_view_layout",
@@ -280,7 +286,10 @@ pub struct SetUiMaterialBindGroup<M: UiMaterial, const I: usize>(PhantomData<M>)
 impl<P: PhaseItem, M: UiMaterial, const I: usize> RenderCommand<P>
     for SetUiMaterialBindGroup<M, I>
 {
-    type Param = SRes<RenderAssets<PreparedUiMaterial<M>>>;
+    type Param = (
+        SRes<RenderAssets<PreparedUiMaterial<M>>>,
+        SRes<RenderBindGroupStore>,
+    );
     type ViewQuery = ();
     type ItemQuery = Read<UiMaterialBatch<M>>;
 
@@ -288,16 +297,24 @@ impl<P: PhaseItem, M: UiMaterial, const I: usize> RenderCommand<P>
         _item: &P,
         _view: (),
         material_handle: Option<ROQueryItem<'_, Self::ItemQuery>>,
-        materials: SystemParamItem<'w, '_, Self::Param>,
+        (materials, bind_group_store): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
+        let bind_group_store = bind_group_store.into_inner();
         let Some(material_handle) = material_handle else {
             return RenderCommandResult::Failure;
         };
         let Some(material) = materials.into_inner().get(material_handle.material) else {
             return RenderCommandResult::Failure;
         };
-        pass.set_bind_group(I, &material.bind_group, &[]);
+        let Some(material_bind_group) = bind_group_store
+            .bind_group_id_to_bind_group
+            .get(&material.bind_group_id)
+        else {
+            return RenderCommandResult::Failure;
+        };
+
+        pass.set_bind_group(I, &material_bind_group.bind_group, &[]);
         RenderCommandResult::Success
     }
 }
@@ -597,7 +614,7 @@ pub fn prepare_uimaterial_nodes<M: UiMaterial>(
 
 pub struct PreparedUiMaterial<T: UiMaterial> {
     pub bindings: Vec<(u32, OwnedBindingResource)>,
-    pub bind_group: BindGroup,
+    pub bind_group_id: RenderBindGroupId,
     pub key: T::Data,
 }
 
@@ -606,19 +623,35 @@ impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M> {
 
     type Param = (
         SRes<RenderDevice>,
+        SRes<RenderQueue>,
         SRes<RenderAssets<GpuImage>>,
         SRes<FallbackImage>,
         SRes<UiMaterialPipeline<M>>,
+        SResMut<RenderBindGroupStore>,
     );
 
     fn prepare_asset(
         material: Self::SourceAsset,
-        (render_device, images, fallback_image, pipeline): &mut SystemParamItem<Self::Param>,
+        (
+            render_device,
+            render_queue,
+            images,
+            fallback_image,
+            pipeline,
+            ref mut render_bind_group_store,
+        ): &mut SystemParamItem<Self::Param>,
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
-        match material.as_bind_group(&pipeline.ui_layout, render_device, images, fallback_image) {
+        match material.as_bind_group(
+            &pipeline.ui_layout,
+            render_device,
+            render_queue,
+            images,
+            fallback_image,
+            render_bind_group_store,
+        ) {
             Ok(prepared) => Ok(PreparedUiMaterial {
                 bindings: prepared.bindings,
-                bind_group: prepared.bind_group,
+                bind_group_id: prepared.bind_group_id,
                 key: prepared.data,
             }),
             Err(AsBindGroupError::RetryNextUpdate) => {

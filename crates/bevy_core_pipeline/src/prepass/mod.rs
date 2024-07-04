@@ -39,8 +39,7 @@ use bevy_render::{
         PhaseItemExtraIndex,
     },
     render_resource::{
-        BindGroupId, CachedRenderPipelineId, ColorTargetState, ColorWrites, DynamicUniformBuffer,
-        Extent3d, ShaderType, TextureFormat, TextureView,
+        CachedRenderPipelineId, ColorTargetState, ColorWrites, DynamicUniformBuffer, Extent3d, RenderBindGroupId, ShaderType, TextureFormat, TextureView
     },
     texture::ColorAttachment,
 };
@@ -149,6 +148,9 @@ pub struct Opaque3dPrepass {
 /// The data used to bin each opaque 3D object in the prepass and deferred pass.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpaqueNoLightmap3dBinKey {
+    /// The ID of a bind group specific to the material.
+    pub material_bind_group_id: RenderBindGroupId,
+
     /// The ID of the GPU pipeline.
     pub pipeline: CachedRenderPipelineId,
 
@@ -157,11 +159,6 @@ pub struct OpaqueNoLightmap3dBinKey {
 
     /// The ID of the asset.
     pub asset_id: UntypedAssetId,
-
-    /// The ID of a bind group specific to the material.
-    ///
-    /// In the case of PBR, this is the `MaterialBindGroupId`.
-    pub material_bind_group_id: Option<BindGroupId>,
 }
 
 impl PhaseItem for Opaque3dPrepass {

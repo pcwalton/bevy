@@ -9,6 +9,7 @@ use bevy_render::{
     render_resource::*,
     texture::{GpuImage, Image},
 };
+use bytemuck::{Pod, Zeroable};
 
 pub const COLOR_MATERIAL_SHADER_HANDLE: Handle<Shader> =
     Handle::weak_from_u128(3253086872234592509);
@@ -96,10 +97,14 @@ bitflags::bitflags! {
 }
 
 /// The GPU representation of the uniform data of a [`ColorMaterial`].
-#[derive(Clone, Default, ShaderType)]
+#[derive(Clone, Copy, Default, Pod, Zeroable, ShaderType)]
+#[repr(C)]
 pub struct ColorMaterialUniform {
     pub color: Vec4,
     pub flags: u32,
+    pub pad_a: u32,
+    pub pad_b: u32,
+    pub pad_c: u32,
 }
 
 impl AsBindGroupShaderType<ColorMaterialUniform> for ColorMaterial {
@@ -112,6 +117,9 @@ impl AsBindGroupShaderType<ColorMaterialUniform> for ColorMaterial {
         ColorMaterialUniform {
             color: LinearRgba::from(self.color).to_f32_array().into(),
             flags: flags.bits(),
+            pad_a: 0,
+            pad_b: 0,
+            pad_c: 0,
         }
     }
 }

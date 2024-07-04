@@ -15,8 +15,10 @@ const STORAGE_TEXTURE_ATTRIBUTE_NAME: Symbol = Symbol("storage_texture");
 const SAMPLER_ATTRIBUTE_NAME: Symbol = Symbol("sampler");
 const STORAGE_ATTRIBUTE_NAME: Symbol = Symbol("storage");
 const BIND_GROUP_DATA_ATTRIBUTE_NAME: Symbol = Symbol("bind_group_data");
+const BINDLESS_ATTRIBUTE_NAME: Symbol = Symbol("bindless");
+const ARRAY_ATTRIBUTE_NAME: Symbol = Symbol("array");
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum BindingType {
     Uniform,
     Texture,
@@ -44,57 +46,165 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
     let asset_path = manifest.get_path("bevy_asset");
 
     let mut binding_states: Vec<BindingState> = Vec::new();
+    let mut bindless_impls = Vec::new();
     let mut binding_impls = Vec::new();
     let mut binding_layouts = Vec::new();
+    let mut bindless_binding_impls = Vec::new();
+    let mut bindless_binding_layouts = Vec::new();
+    let mut array_uniform_impls = Vec::new();
     let mut attr_prepared_data_ident = None;
+
+    // Array size
+    let array_size: Option<u32> = match ast.attrs.iter().find(|attr| {
+        attr.path()
+            .get_ident()
+            .is_some_and(|ident| ident == ARRAY_ATTRIBUTE_NAME)
+    }) {
+        None => None,
+        Some(attr) => Some(attr.parse_args::<LitInt>()?.base10_parse()?),
+    };
+
+    // Are we using bindless textures?
+    let bindless: Option<u32> = match ast.attrs.iter().find(|attr| {
+        attr.path()
+            .get_ident()
+            .is_some_and(|ident| ident == BINDLESS_ATTRIBUTE_NAME)
+    }) {
+        None => None,
+        Some(attr) => {
+            if array_size.is_none() {
+                return Err(Error::new_spanned(
+                    ast,
+                    "`#[array]` must be specified to enable bindless textures",
+                ));
+            }
+            Some(attr.parse_args::<LitInt>()?.base10_parse()?)
+        }
+    };
 
     // Read struct-level attributes
     for attr in &ast.attrs {
-        if let Some(attr_ident) = attr.path().get_ident() {
-            if attr_ident == BIND_GROUP_DATA_ATTRIBUTE_NAME {
-                if let Ok(prepared_data_ident) =
-                    attr.parse_args_with(|input: ParseStream| input.parse::<Ident>())
-                {
-                    attr_prepared_data_ident = Some(prepared_data_ident);
-                }
-            } else if attr_ident == UNIFORM_ATTRIBUTE_NAME {
-                let (binding_index, converted_shader_type) = get_uniform_binding_attr(attr)?;
-                binding_impls.push(quote! {{
-                    use #render_path::render_resource::AsBindGroupShaderType;
-                    let mut buffer = #render_path::render_resource::encase::UniformBuffer::new(Vec::new());
-                    let converted: #converted_shader_type = self.as_bind_group_shader_type(images);
-                    buffer.write(&converted).unwrap();
-                    (
-                        #binding_index,
-                        #render_path::render_resource::OwnedBindingResource::Buffer(render_device.create_buffer_with_data(
-                            &#render_path::render_resource::BufferInitDescriptor {
-                                label: None,
-                                usage: #render_path::render_resource::BufferUsages::COPY_DST | #render_path::render_resource::BufferUsages::UNIFORM,
-                                contents: buffer.as_ref(),
-                            },
-                        ))
-                    )
-                }});
+        let Some(attr_ident) = attr.path().get_ident() else {
+            continue;
+        };
 
-                binding_layouts.push(quote!{
-                    #render_path::render_resource::BindGroupLayoutEntry {
-                        binding: #binding_index,
-                        visibility: #render_path::render_resource::ShaderStages::all(),
-                        ty: #render_path::render_resource::BindingType::Buffer {
-                            ty: #render_path::render_resource::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: Some(<#converted_shader_type as #render_path::render_resource::ShaderType>::min_size()),
-                        },
-                        count: None,
-                    }
-                });
-
-                let required_len = binding_index as usize + 1;
-                if required_len > binding_states.len() {
-                    binding_states.resize(required_len, BindingState::Free);
-                }
-                binding_states[binding_index as usize] = BindingState::OccupiedConvertedUniform;
+        if attr_ident == BIND_GROUP_DATA_ATTRIBUTE_NAME {
+            if let Ok(prepared_data_ident) =
+                attr.parse_args_with(|input: ParseStream| input.parse::<Ident>())
+            {
+                attr_prepared_data_ident = Some(prepared_data_ident);
             }
+        } else if attr_ident == UNIFORM_ATTRIBUTE_NAME {
+            let (binding_index, converted_shader_type) = get_uniform_binding_attr(attr)?;
+
+            // Bindless path.
+
+            array_uniform_impls.push(quote! {{
+                use #render_path::render_resource::AsBindGroupShaderType;
+                let converted: #converted_shader_type = self.as_bind_group_shader_type(images);
+
+                (
+                    #binding_index,
+                    ::bytemuck::bytes_of(&converted).to_vec(),
+                )
+            }});
+
+            match array_size {
+                Some(array_size) => {
+                    // TODO: combine these next two somehow?
+                    bindless_binding_impls.push(quote! {{
+                        (
+                            #binding_index,
+                            #render_path::render_resource::OwnedBindingResource::BufferArray(
+                                #binding_index),
+                        )
+                    }});
+
+                    binding_impls.push(quote! {{
+                        (
+                            #binding_index,
+                            #render_path::render_resource::OwnedBindingResource::BufferArray(
+                                #binding_index),
+                        )
+                    }});
+
+                    // TODO: combine these next two somehow?
+                    bindless_binding_layouts.push(quote! {{
+                        #render_path::render_resource::BindGroupLayoutEntry {
+                            binding: #binding_index,
+                            visibility: #render_path::render_resource::ShaderStages::all(),
+                            ty: #render_path::render_resource::BindingType::Buffer {
+                                ty: #render_path::render_resource::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: Some((u64::from(<
+                                        #converted_shader_type as
+                                            #render_path::render_resource::ShaderType
+                                    >::min_size()) * #array_size as u64).try_into().unwrap()),
+                            },
+                            count: None,
+                        }
+                    }});
+
+                    binding_layouts.push(quote! {{
+                        #render_path::render_resource::BindGroupLayoutEntry {
+                            binding: #binding_index,
+                            visibility: #render_path::render_resource::ShaderStages::all(),
+                            ty: #render_path::render_resource::BindingType::Buffer {
+                                ty: #render_path::render_resource::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: Some((u64::from(<
+                                        #converted_shader_type as
+                                            #render_path::render_resource::ShaderType
+                                    >::min_size()) * #array_size as u64).try_into().unwrap()),
+                            },
+                            count: None,
+                        }
+                    }});
+                }
+
+                None => {
+                    // Non-array path.
+                    binding_impls.push(quote! {{
+                        use #render_path::render_resource::AsBindGroupShaderType;
+                        let mut buffer = #render_path::render_resource::encase::UniformBuffer::new(Vec::new());
+                        let converted: #converted_shader_type = self.as_bind_group_shader_type(images);
+                        buffer.write(&converted).unwrap();
+                        (
+                            #binding_index,
+                            #render_path::render_resource::OwnedBindingResource::Buffer(render_device.create_buffer_with_data(
+                                &#render_path::render_resource::BufferInitDescriptor {
+                                    label: None,
+                                    usage: #render_path::render_resource::BufferUsages::COPY_DST |
+                                        #render_path::render_resource::BufferUsages::UNIFORM,
+                                    contents: buffer.as_ref(),
+                                },
+                            ))
+                        )
+                    }});
+
+                    binding_layouts.push(quote! {{
+                        #render_path::render_resource::BindGroupLayoutEntry {
+                            binding: #binding_index,
+                            visibility: #render_path::render_resource::ShaderStages::all(),
+                            ty: #render_path::render_resource::BindingType::Buffer {
+                                ty: #render_path::render_resource::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: Some((u64::from(<
+                                        #converted_shader_type as
+                                            #render_path::render_resource::ShaderType
+                                    >::min_size())).try_into().unwrap()),
+                            },
+                            count: None,
+                        }
+                    }});
+                }
+            }
+
+            let required_len = binding_index as usize + 1;
+            if required_len > binding_states.len() {
+                binding_states.resize(required_len, BindingState::Free);
+            }
+            binding_states[binding_index as usize] = BindingState::OccupiedConvertedUniform;
         }
     }
 
@@ -312,6 +422,8 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
 
                     let fallback_image = get_fallback_image(&render_path, *dimension);
 
+                    // Non-bindless path:
+
                     // insert fallible texture-based entries at 0 so that if we fail here, we exit before allocating any buffers
                     binding_impls.insert(0, quote! {
                         (
@@ -339,6 +451,46 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                             count: None,
                         }
                     });
+
+                    // Bindless path:
+
+                    bindless_impls.push(quote! {{
+                        let handle: Option<&#asset_path::Handle<#render_path::texture::Image>> = (&self.#field_name).into();
+                        let texture_view = if let Some(handle) = handle {
+                            Some(images.get(handle).ok_or_else(|| #render_path::render_resource::AsBindGroupError::RetryNextUpdate)?.texture_view.clone())
+                        } else {
+                            None
+                        };
+
+                        (
+                            #binding_index,
+                            #render_path::render_resource::UnpreparedBindlessResource::TextureView(texture_view),
+                        )
+                    }});
+
+                    // insert fallible texture-based entries at 0 so that if we fail here, we exit before allocating any buffers
+                    bindless_binding_impls.insert(0, quote! {{
+                        (
+                            #binding_index,
+                            #render_path::render_resource::OwnedBindingResource::BindlessTextureView(
+                                #binding_index),
+                        )
+                    }});
+
+                    if let Some(array_size) = array_size {
+                        bindless_binding_layouts.push(quote! {
+                            #render_path::render_resource::BindGroupLayoutEntry {
+                                binding: #binding_index,
+                                visibility: #visibility,
+                                ty: #render_path::render_resource::BindingType::Texture {
+                                    multisampled: #multisampled,
+                                    sample_type: #render_path::render_resource::#sample_type,
+                                    view_dimension: #render_path::render_resource::#dimension,
+                                },
+                                count: Some((#array_size).try_into().unwrap()),
+                            }
+                        });
+                    }
                 }
                 BindingType::Sampler => {
                     let SamplerAttrs {
@@ -355,7 +507,9 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
 
                     let fallback_image = get_fallback_image(&render_path, *dimension);
 
+                    // Non-bindless path:
                     // insert fallible texture-based entries at 0 so that if we fail here, we exit before allocating any buffers
+
                     binding_impls.insert(0, quote! {
                         (
                             #binding_index,
@@ -378,6 +532,41 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                             count: None,
                         }
                     });
+
+                    // Bindless path:
+
+                    bindless_impls.push(quote! {{
+                        let handle: Option<&#asset_path::Handle<#render_path::texture::Image>> = (&self.#field_name).into();
+                        let sampler = if let Some(handle) = handle {
+                            Some(images.get(handle).ok_or_else(|| #render_path::render_resource::AsBindGroupError::RetryNextUpdate)?.sampler.clone())
+                        } else {
+                            None
+                        };
+
+                        (
+                            #binding_index,
+                            #render_path::render_resource::UnpreparedBindlessResource::Sampler(sampler)
+                        )
+                    }});
+
+                    bindless_binding_impls.insert(0, quote! {{
+                        (
+                            #binding_index,
+                            #render_path::render_resource::OwnedBindingResource::BindlessSampler(
+                                #binding_index),
+                        )
+                    }});
+
+                    if let Some(array_size) = array_size {
+                        bindless_binding_layouts.push(quote!{
+                            #render_path::render_resource::BindGroupLayoutEntry {
+                                binding: #binding_index,
+                                visibility: #visibility,
+                                ty: #render_path::render_resource::BindingType::Sampler(#render_path::render_resource::#sampler_binding_type),
+                                count: Some((#array_size).try_into().unwrap()),
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -484,6 +673,85 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
         (prepared_data.clone(), prepared_data)
     };
 
+    if let Some(index_binding) = bindless {
+        bindless_binding_layouts.push(quote! {{
+            #render_path::render_resource::BindGroupLayoutEntry {
+                binding: #index_binding,
+                visibility: #render_path::render_resource::ShaderStages::VERTEX_FRAGMENT,
+                ty: #render_path::render_resource::BindingType::Buffer {
+                    ty: #render_path::render_resource::BufferBindingType::Storage {
+                        read_only: true,
+                    },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
+        }});
+    }
+
+    let array_uniforms = match array_size {
+        None => {
+            quote! {
+                None
+            }
+        }
+        Some(array_size) => {
+            quote! {
+                Some(#render_path::render_resource::UnpreparedArrayUniforms {
+                    count: #array_size,
+                    uniforms: vec![#(#array_uniform_impls)*],
+                })
+            }
+        }
+    };
+
+    let unprepared_bind_group_impl = if let Some(binding_array_index_buffer_binding) = bindless {
+        quote! {{
+            if _bindless {
+                (
+                    vec![#(#bindless_binding_impls,)*],
+                    #array_uniforms,
+                    vec![
+                        #render_path::render_resource::UnpreparedBindlessResources {
+                            // TODO: should probably do insert
+                            resources: vec![#(#bindless_impls,)*].into_iter().collect(),
+                            binding_array_index_buffer_binding: #binding_array_index_buffer_binding,
+                        }
+                    ],
+                )
+            } else {
+                (
+                    vec![#(#binding_impls,)*],
+                    #array_uniforms,
+                    vec![],
+                )
+            }
+        }}
+    } else {
+        quote! {
+            (
+                vec![#(#binding_impls,)*],
+                #array_uniforms,
+                vec![],
+            )
+        }
+    };
+
+    let bind_group_layout_impl = if bindless.is_some() {
+        quote! {
+            if _bindless {
+                vec![#(#bindless_binding_layouts,)*]
+            } else {
+                vec![#(#binding_layouts,)*]
+            }
+        }
+    } else {
+        quote! {
+            vec![#(#binding_layouts,)*]
+        }
+    };
+
     Ok(TokenStream::from(quote! {
         #(#field_struct_impls)*
 
@@ -498,19 +766,29 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                 &self,
                 layout: &#render_path::render_resource::BindGroupLayout,
                 render_device: &#render_path::renderer::RenderDevice,
+                render_queue: &#render_path::renderer::RenderQueue,
                 images: &#render_path::render_asset::RenderAssets<#render_path::texture::GpuImage>,
                 fallback_image: &#render_path::texture::FallbackImage,
-            ) -> Result<#render_path::render_resource::UnpreparedBindGroup<Self::Data>, #render_path::render_resource::AsBindGroupError> {
-                let bindings = vec![#(#binding_impls,)*];
+                _bindless: bool,
+            ) -> Result<
+                #render_path::render_resource::UnpreparedBindGroup<Self::Data>,
+                #render_path::render_resource::AsBindGroupError
+            > {
+                let (bindings, array_uniforms, bindless_resources) = #unprepared_bind_group_impl;
 
                 Ok(#render_path::render_resource::UnpreparedBindGroup {
                     bindings,
+                    array_uniforms,
+                    bindless_resources,
                     data: #get_prepared_data,
                 })
             }
 
-            fn bind_group_layout_entries(render_device: &#render_path::renderer::RenderDevice) -> Vec<#render_path::render_resource::BindGroupLayoutEntry> {
-                vec![#(#binding_layouts,)*]
+            fn bind_group_layout_entries(
+                render_device: &#render_path::renderer::RenderDevice,
+                _bindless: bool,
+            ) -> Vec<#render_path::render_resource::BindGroupLayoutEntry> {
+                #bind_group_layout_impl
             }
         }
     }))

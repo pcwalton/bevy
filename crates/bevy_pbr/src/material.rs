@@ -17,8 +17,12 @@ use bevy_core_pipeline::{
 };
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
+    entity::EntityHashMap,
     prelude::*,
-    system::{lifetimeless::SRes, SystemParamItem},
+    system::{
+        lifetimeless::{SRes, SResMut},
+        SystemParamItem,
+    },
 };
 use bevy_reflect::Reflect;
 use bevy_render::{
@@ -29,14 +33,13 @@ use bevy_render::{
     render_asset::{PrepareAssetError, RenderAsset, RenderAssetPlugin, RenderAssets},
     render_phase::*,
     render_resource::*,
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderQueue},
     texture::FallbackImage,
     view::{ExtractedView, Msaa, RenderVisibilityRanges, VisibleEntities, WithMesh},
 };
 use bevy_utils::tracing::error;
+use std::hash::Hash;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::{hash::Hash, num::NonZeroU32};
 
 use self::{irradiance_volume::IrradianceVolume, prelude::EnvironmentMapLight};
 
@@ -268,6 +271,13 @@ where
                     queue_material_meshes::<M>
                         .in_set(RenderSet::QueueMeshes)
                         .after(prepare_assets::<PreparedMaterial<M>>),
+                )
+                .add_systems(
+                    Render,
+                    copy_material_bind_group_ids_to_mesh_instances::<M>
+                        .in_set(RenderSet::CollectMeshes)
+                        .after(clear_render_material_bind_group_ids)
+                        .before(collect_meshes_for_gpu_building),
                 );
 
             if self.shadows_enabled {
@@ -407,10 +417,14 @@ impl<M: Material> FromWorld for MaterialPipeline<M> {
     fn from_world(world: &mut World) -> Self {
         let asset_server = world.resource::<AssetServer>();
         let render_device = world.resource::<RenderDevice>();
+        let render_bind_group_store = world.resource::<RenderBindGroupStore>();
 
         MaterialPipeline {
             mesh_pipeline: world.resource::<MeshPipeline>().clone(),
-            material_layout: M::bind_group_layout(render_device),
+            material_layout: M::bind_group_layout(
+                render_device,
+                render_bind_group_store.bindless_textures_enabled,
+            ),
             vertex_shader: match M::vertex_shader() {
                 ShaderRef::Default => None,
                 ShaderRef::Handle(handle) => Some(handle),
@@ -440,6 +454,7 @@ impl<P: PhaseItem, M: Material, const I: usize> RenderCommand<P> for SetMaterial
     type Param = (
         SRes<RenderAssets<PreparedMaterial<M>>>,
         SRes<RenderMaterialInstances<M>>,
+        SRes<RenderBindGroupStore>,
     );
     type ViewQuery = ();
     type ItemQuery = ();
@@ -449,11 +464,12 @@ impl<P: PhaseItem, M: Material, const I: usize> RenderCommand<P> for SetMaterial
         item: &P,
         _view: (),
         _item_query: Option<()>,
-        (materials, material_instances): SystemParamItem<'w, '_, Self::Param>,
+        (materials, material_instances, bind_group_store): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let materials = materials.into_inner();
         let material_instances = material_instances.into_inner();
+        let bind_group_store = bind_group_store.into_inner();
 
         let Some(material_asset_id) = material_instances.get(&item.entity()) else {
             return RenderCommandResult::Failure;
@@ -461,7 +477,13 @@ impl<P: PhaseItem, M: Material, const I: usize> RenderCommand<P> for SetMaterial
         let Some(material) = materials.get(*material_asset_id) else {
             return RenderCommandResult::Failure;
         };
-        pass.set_bind_group(I, &material.bind_group, &[]);
+        let Some(material_bind_group) = bind_group_store
+            .bind_group_id_to_bind_group
+            .get(&material.bind_group_id)
+        else {
+            return RenderCommandResult::Failure;
+        };
+        pass.set_bind_group(I, &material_bind_group.bind_group, &[]);
         RenderCommandResult::Success
     }
 }
@@ -740,10 +762,6 @@ pub fn queue_material_meshes<M: Material>(
                 }
             };
 
-            mesh_instance
-                .material_bind_group_id
-                .set(material.get_bind_group_id());
-
             match mesh_key
                 .intersection(MeshPipelineKey::BLEND_RESERVED_BITS | MeshPipelineKey::MAY_DISCARD)
             {
@@ -764,7 +782,7 @@ pub fn queue_material_meshes<M: Material>(
                             draw_function: draw_opaque_pbr,
                             pipeline: pipeline_id,
                             asset_id: mesh_instance.mesh_asset_id.into(),
-                            material_bind_group_id: material.get_bind_group_id().0,
+                            material_bind_group_id: Some(material.bind_group_id),
                             lightmap_image,
                         };
                         opaque_phase.add(
@@ -792,7 +810,7 @@ pub fn queue_material_meshes<M: Material>(
                             draw_function: draw_alpha_mask_pbr,
                             pipeline: pipeline_id,
                             asset_id: mesh_instance.mesh_asset_id.into(),
-                            material_bind_group_id: material.get_bind_group_id().0,
+                            material_bind_group_id: material.bind_group_id,
                         };
                         alpha_mask_phase.add(
                             bin_key,
@@ -892,7 +910,8 @@ pub struct MaterialProperties {
 /// Data prepared for a [`Material`] instance.
 pub struct PreparedMaterial<T: Material> {
     pub bindings: Vec<(u32, OwnedBindingResource)>,
-    pub bind_group: BindGroup,
+    pub bind_group_id: RenderBindGroupId,
+    pub bindless_index: RenderBindlessIndex,
     pub key: T::Data,
     pub properties: MaterialProperties,
 }
@@ -902,22 +921,37 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
 
     type Param = (
         SRes<RenderDevice>,
+        SRes<RenderQueue>,
         SRes<RenderAssets<GpuImage>>,
         SRes<FallbackImage>,
         SRes<MaterialPipeline<M>>,
         SRes<DefaultOpaqueRendererMethod>,
         SRes<Msaa>,
+        SResMut<RenderBindGroupStore>,
     );
+
+    fn preprocess_asset(_material: &Self::SourceAsset, _: &mut SystemParamItem<Self::Param>) {}
 
     fn prepare_asset(
         material: Self::SourceAsset,
-        (render_device, images, fallback_image, pipeline, default_opaque_render_method, msaa): &mut SystemParamItem<Self::Param>,
+        (
+            render_device,
+            render_queue,
+            images,
+            fallback_image,
+            pipeline,
+            default_opaque_render_method,
+            msaa,
+            ref mut render_bind_group_store,
+        ): &mut SystemParamItem<Self::Param>,
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
         match material.as_bind_group(
             &pipeline.material_layout,
             render_device,
+            render_queue,
             images,
             fallback_image,
+            render_bind_group_store,
         ) {
             Ok(prepared) => {
                 let method = match material.opaque_render_method() {
@@ -934,7 +968,8 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
 
                 Ok(PreparedMaterial {
                     bindings: prepared.bindings,
-                    bind_group: prepared.bind_group,
+                    bind_group_id: prepared.bind_group_id,
+                    bindless_index: prepared.bindless_index,
                     key: prepared.data,
                     properties: MaterialProperties {
                         alpha_mode: material.alpha_mode(),
@@ -953,51 +988,44 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
     }
 }
 
-#[derive(Component, Clone, Copy, Default, PartialEq, Eq, Deref, DerefMut)]
-pub struct MaterialBindGroupId(pub Option<BindGroupId>);
-
-impl MaterialBindGroupId {
-    pub fn new(id: BindGroupId) -> Self {
-        Self(Some(id))
-    }
-}
-
-impl From<BindGroup> for MaterialBindGroupId {
-    fn from(value: BindGroup) -> Self {
-        Self::new(value.id())
-    }
-}
-
-/// An atomic version of [`MaterialBindGroupId`] that can be read from and written to
-/// safely from multiple threads.
-#[derive(Default)]
-pub struct AtomicMaterialBindGroupId(AtomicU32);
-
-impl AtomicMaterialBindGroupId {
-    /// Stores a value atomically. Uses [`Ordering::Relaxed`] so there is zero guarantee of ordering
-    /// relative to other operations.
-    ///
-    /// See also:  [`AtomicU32::store`].
-    pub fn set(&self, id: MaterialBindGroupId) {
-        let id = if let Some(id) = id.0 {
-            NonZeroU32::from(id).get()
-        } else {
-            0
-        };
-        self.0.store(id, Ordering::Relaxed);
-    }
-
-    /// Loads a value atomically. Uses [`Ordering::Relaxed`] so there is zero guarantee of ordering
-    /// relative to other operations.
-    ///
-    /// See also:  [`AtomicU32::load`].
-    pub fn get(&self) -> MaterialBindGroupId {
-        MaterialBindGroupId(NonZeroU32::new(self.0.load(Ordering::Relaxed)).map(BindGroupId::from))
-    }
-}
-
 impl<T: Material> PreparedMaterial<T> {
-    pub fn get_bind_group_id(&self) -> MaterialBindGroupId {
-        MaterialBindGroupId(Some(self.bind_group.id()))
+    #[inline]
+    pub fn get_bind_group_id(&self) -> RenderBindGroupId {
+        self.bind_group_id
+    }
+
+    #[inline]
+    pub fn get_bindless_index(&self) -> RenderBindlessIndex {
+        self.bindless_index
+    }
+}
+
+#[derive(Resource, Default, Deref, DerefMut)]
+pub struct RenderMaterialBindGroupIds(pub EntityHashMap<(RenderBindGroupId, RenderBindlessIndex)>);
+
+pub fn clear_render_material_bind_group_ids(
+    mut render_material_bind_group_ids: ResMut<RenderMaterialBindGroupIds>,
+) {
+    render_material_bind_group_ids.clear();
+}
+
+pub fn copy_material_bind_group_ids_to_mesh_instances<M>(
+    mut render_material_bind_group_ids: ResMut<RenderMaterialBindGroupIds>,
+    render_material_instances: Res<RenderMaterialInstances<M>>,
+    prepared_materials: Res<RenderAssets<PreparedMaterial<M>>>,
+) where
+    M: Material,
+{
+    for (entity, material_id) in render_material_instances.iter() {
+        let Some(prepared_material) = prepared_materials.get(*material_id) else {
+            continue;
+        };
+        render_material_bind_group_ids.insert(
+            *entity,
+            (
+                prepared_material.get_bind_group_id(),
+                prepared_material.get_bindless_index(),
+            ),
+        );
     }
 }

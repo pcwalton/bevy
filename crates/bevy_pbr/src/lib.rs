@@ -412,9 +412,13 @@ impl Plugin for PbrPlugin {
                         .in_set(RenderSet::ManageViews)
                         .after(prepare_assets::<GpuImage>),
                     prepare_clusters.in_set(RenderSet::PrepareResources),
+                    clear_render_material_bind_group_ids
+                        .in_set(RenderSet::CollectMeshes)
+                        .before(collect_meshes_for_gpu_building),
                 ),
             )
-            .init_resource::<LightMeta>();
+            .init_resource::<LightMeta>()
+            .init_resource::<RenderMaterialBindGroupIds>();
 
         let shadow_pass_node = ShadowPassNode::new(render_app.world_mut());
         let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();

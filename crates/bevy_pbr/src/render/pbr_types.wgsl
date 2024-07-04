@@ -2,6 +2,34 @@
 
 // Since this is a hot path, try to keep the alignment and size of the struct members in mind.
 // You can find the alignment and sizes at <https://www.w3.org/TR/WGSL/#alignment-and-size>.
+struct StandardMaterialSubgroupData {
+    uv_transform: mat4x4<f32>,
+    base_color: vec4<f32>,
+    emissive: vec4<f32>,
+    attenuation_color: vec4<f32>,
+    anisotropy_rotation: vec2<f32>,
+    perceptual_roughness: f32,
+    metallic: f32,
+    reflectance: f32,
+    diffuse_transmission: f32,
+    specular_transmission: f32,
+    thickness: f32,
+    ior: f32,
+    attenuation_distance: f32,
+    clearcoat: f32,
+    clearcoat_perceptual_roughness: f32,
+    anisotropy_strength: f32,
+    // 'flags' is a bit field indicating various options. u32 is 32 bits so we have up to 32 options.
+    flags: u32,
+    alpha_cutoff: f32,
+    parallax_depth_scale: f32,
+    max_parallax_layer_count: f32,
+    lightmap_exposure: f32,
+    max_relief_mapping_search_steps: u32,
+    /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
+    deferred_lighting_pass_id: u32,
+};
+
 struct StandardMaterial {
     base_color: vec4<f32>,
     emissive: vec4<f32>,
@@ -28,6 +56,53 @@ struct StandardMaterial {
     max_relief_mapping_search_steps: u32,
     /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
     deferred_lighting_pass_id: u32,
+};
+
+struct StandardMaterialBindlessIndices {
+    base_color_texture: u32,
+    base_color_sampler: u32,
+    emissive_texture: u32,
+    emissive_sampler: u32,
+    metallic_roughness_texture: u32,
+    metallic_roughness_sampler: u32,
+    normal_map_texture: u32,
+    normal_map_sampler: u32,
+    occlusion_texture: u32,
+    occlusion_sampler: u32,
+    depth_map_texture: u32,
+    depth_map_sampler: u32,
+#ifdef PBR_ANISOTROPY_TEXTURE_SUPPORTED
+    anisotropy_texture: u32,
+    anisotropy_sampler: u32,
+#endif  // PBR_ANISOTROPY_TEXTURE_SUPPORTED
+#ifdef PBR_TRANSMISSION_TEXTURES_SUPPORTED
+    specular_transmission_texture: u32,
+    specular_transmission_sampler: u32,
+    thickness_texture: u32,
+    thickness_sampler: u32,
+    diffuse_transmission_texture: u32,
+    diffuse_transmission_sampler: u32,
+#endif  // PBR_TRANSMISSION_TEXTURES_SUPPORTED
+#ifdef PBR_MULTI_LAYER_MATERIAL_TEXTURES_SUPPORTED
+    clearcoat_texture: u32,
+    clearcoat_sampler: u32,
+    clearcoat_roughness_texture: u32,
+    clearcoat_roughness_sampler: u32,
+    clearcoat_normal_texture: u32,
+    clearcoat_normal_sampler: u32,
+#endif  // PBR_MULTI_LAYER_MATERIAL_TEXTURES_SUPPORTED
+
+#ifdef PBR_ANISOTROPY_TEXTURE_SUPPORTED
+#ifndef PBR_TRANSMISSION_TEXTURES_SUPPORTED
+    pad_a: u32,
+    pad_b: u32,
+#endif  // PBR_TRANSMISSION_TEXTURES_SUPPORTED
+#else   // PBR_ANISOTROPY_TEXTURE_SUPPORTED
+#ifdef PBR_TRANSMISSION_TEXTURES_SUPPORTED
+    pad_a: u32,
+    pad_b: u32,
+#endif  // PBR_TRANSMISSION_TEXTURES_SUPPORTED
+#endif  // PBR_ANISOTROPY_TEXTURE_SUPPORTED
 };
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

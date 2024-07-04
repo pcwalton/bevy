@@ -37,8 +37,7 @@ use bevy_render::{
     Extract, ExtractSchedule, Render, RenderApp, RenderSet,
 };
 use bevy_transform::components::GlobalTransform;
-
-use crate::Material2dBindGroupId;
+use bevy_utils::prelude::default;
 
 /// Component for rendering with meshes in the 2d pipeline, usually with a [2d material](crate::Material2d) such as [`ColorMaterial`](crate::ColorMaterial).
 ///
@@ -198,7 +197,7 @@ bitflags::bitflags! {
 pub struct RenderMesh2dInstance {
     pub transforms: Mesh2dTransforms,
     pub mesh_asset_id: AssetId<Mesh>,
-    pub material_bind_group_id: Material2dBindGroupId,
+    pub material_bind_group_id: RenderBindGroupId,
     pub automatic_batching: bool,
 }
 
@@ -240,7 +239,7 @@ pub fn extract_mesh2d(
                     flags: MeshFlags::empty().bits(),
                 },
                 mesh_asset_id: handle.0.id(),
-                material_bind_group_id: Material2dBindGroupId::default(),
+                material_bind_group_id: default(),
                 automatic_batching: !no_automatic_batching,
             },
         );
@@ -358,7 +357,7 @@ impl Mesh2dPipeline {
 
 impl GetBatchData for Mesh2dPipeline {
     type Param = SRes<RenderMesh2dInstances>;
-    type CompareData = (Material2dBindGroupId, AssetId<Mesh>);
+    type CompareData = (RenderBindGroupId, AssetId<Mesh>);
     type BufferData = Mesh2dUniform;
 
     fn get_batch_data(

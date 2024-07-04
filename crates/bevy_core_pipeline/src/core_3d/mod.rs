@@ -84,8 +84,7 @@ use bevy_render::{
         ViewSortedRenderPhases,
     },
     render_resource::{
-        BindGroupId, CachedRenderPipelineId, Extent3d, FilterMode, Sampler, SamplerDescriptor,
-        Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
+        CachedRenderPipelineId, Extent3d, FilterMode, RenderBindGroupId, Sampler, SamplerDescriptor, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView
     },
     renderer::RenderDevice,
     texture::{BevyDefault, ColorAttachment, Image, TextureCache},
@@ -223,6 +222,9 @@ pub struct Opaque3d {
 /// Data that must be identical in order to batch phase items together.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Opaque3dBinKey {
+    /// The ID of a bind group specific to the material.
+    pub material_bind_group_id: Option<RenderBindGroupId>,
+
     /// The identifier of the render pipeline.
     pub pipeline: CachedRenderPipelineId,
 
@@ -234,11 +236,6 @@ pub struct Opaque3dBinKey {
     /// Normally, this is the ID of the mesh, but for non-mesh items it might be
     /// the ID of another type of asset.
     pub asset_id: UntypedAssetId,
-
-    /// The ID of a bind group specific to the material.
-    ///
-    /// In the case of PBR, this is the `MaterialBindGroupId`.
-    pub material_bind_group_id: Option<BindGroupId>,
 
     /// The lightmap, if present.
     pub lightmap_image: Option<AssetId<Image>>,

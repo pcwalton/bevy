@@ -22,6 +22,10 @@ struct MeshInput {
     // The index of this mesh's `MeshInput` in the `previous_input` array, if
     // applicable. If not present, this is `u32::MAX`.
     previous_input_index: u32,
+    material_id: u32,
+    pad_a: u32,
+    pad_b: u32,
+    pad_c: u32,
 }
 
 // Information about each mesh instance needed to cull it on GPU.
@@ -186,4 +190,6 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     output[mesh_output_index].local_from_world_transpose_b = local_from_world_transpose_b;
     output[mesh_output_index].flags = current_input[input_index].flags;
     output[mesh_output_index].lightmap_uv_rect = current_input[input_index].lightmap_uv_rect;
+    output[mesh_output_index].material_id =
+        current_input[input_index].material_id;
 }

@@ -39,7 +39,11 @@ use bevy_render::{
     Extract,
 };
 use bevy_transform::components::GlobalTransform;
-use bevy_utils::{tracing::error, tracing::warn, Entry, HashMap, Parallel};
+use bevy_utils::{
+    prelude::default,
+    tracing::{error, warn},
+    Entry, HashMap, Parallel,
+};
 
 use bytemuck::{Pod, Zeroable};
 use nonmax::{NonMaxU16, NonMaxU32};
@@ -187,6 +191,7 @@ impl Plugin for MeshRenderPlugin {
                 render_app
                     .init_resource::<gpu_preprocessing::BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>(
                     )
+                    .init_resource::<RenderMeshInstanceGpuQueues>()
                     .add_systems(
                         ExtractSchedule,
                         extract_meshes_for_gpu_building.in_set(ExtractMeshesSet),
@@ -194,6 +199,7 @@ impl Plugin for MeshRenderPlugin {
                     .add_systems(
                         Render,
                         (
+                            collect_meshes_for_gpu_building.in_set(RenderSet::CollectMeshes),
                             gpu_preprocessing::write_batched_instance_buffers::<MeshPipeline>
                                 .in_set(RenderSet::PrepareResourcesFlush),
                             gpu_preprocessing::delete_old_work_item_buffers::<MeshPipeline>
@@ -274,6 +280,10 @@ pub struct MeshUniform {
     //
     // (MSB: most significant bit; LSB: least significant bit.)
     pub lightmap_uv_rect: UVec2,
+    pub bindless_index: u32,
+    pub pad_a: u32,
+    pub pad_b: u32,
+    pub pad_c: u32,
 }
 
 /// Information that has to be transferred from CPU to GPU in order to produce
@@ -304,6 +314,10 @@ pub struct MeshInputUniform {
     ///
     /// This is used for TAA. If not present, this will be `u32::MAX`.
     pub previous_input_index: u32,
+    pub material_bindless_index: u32,
+    pub pad_a: u32,
+    pub pad_b: u32,
+    pub pad_c: u32,
 }
 
 /// Information about each mesh instance needed to cull it on GPU.
@@ -330,7 +344,11 @@ pub struct MeshCullingData {
 pub struct MeshCullingDataBuffer(RawBufferVec<MeshCullingData>);
 
 impl MeshUniform {
-    pub fn new(mesh_transforms: &MeshTransforms, maybe_lightmap_uv_rect: Option<Rect>) -> Self {
+    pub fn new(
+        mesh_transforms: &MeshTransforms,
+        bindless_index: RenderBindlessIndex,
+        maybe_lightmap_uv_rect: Option<Rect>,
+    ) -> Self {
         let (local_from_world_transpose_a, local_from_world_transpose_b) =
             mesh_transforms.world_from_local.inverse_transpose_3x3();
         Self {
@@ -340,6 +358,10 @@ impl MeshUniform {
             local_from_world_transpose_a,
             local_from_world_transpose_b,
             flags: mesh_transforms.flags,
+            bindless_index: *bindless_index,
+            pad_a: 0,
+            pad_b: 0,
+            pad_c: 0,
         }
     }
 }
@@ -455,10 +477,8 @@ pub struct RenderMeshInstanceGpu {
 pub struct RenderMeshInstanceShared {
     /// The [`AssetId`] of the mesh.
     pub mesh_asset_id: AssetId<Mesh>,
-    /// A slot for the material bind group ID.
-    ///
-    /// This is filled in during [`crate::material::queue_material_meshes`].
-    pub material_bind_group_id: AtomicMaterialBindGroupId,
+    /// A slot for the material bind group ID and bindless index.
+    pub material_bind_group_ids: (RenderBindGroupId, RenderBindlessIndex),
     /// Various flags.
     pub flags: RenderMeshInstanceFlags,
 }
@@ -491,7 +511,8 @@ pub struct RenderMeshInstanceGpuBuilder {
     pub mesh_flags: MeshFlags,
 }
 
-/// The per-thread queues used during [`extract_meshes_for_gpu_building`].
+/// One per-thread queue produced during [`extract_meshes_for_gpu_building`] and
+/// consumed during [`collect_meshes_for_gpu_building`].
 ///
 /// There are two varieties of these: one for when culling happens on CPU and
 /// one for when culling happens on GPU. Having the two varieties avoids wasting
@@ -536,7 +557,7 @@ impl RenderMeshInstanceShared {
             mesh_asset_id: handle.id(),
 
             flags: mesh_instance_flags,
-            material_bind_group_id: AtomicMaterialBindGroupId::default(),
+            material_bind_group_ids: default(),
         }
     }
 
@@ -546,7 +567,7 @@ impl RenderMeshInstanceShared {
     pub fn should_batch(&self) -> bool {
         self.flags
             .contains(RenderMeshInstanceFlags::AUTOMATIC_BATCHING)
-            && self.material_bind_group_id.get().is_some()
+        /* && self.material_bind_group_ids.0.is_some() */
     }
 }
 
@@ -717,17 +738,27 @@ impl RenderMeshInstanceGpuBuilder {
         self,
         entity: Entity,
         render_mesh_instances: &mut EntityHashMap<RenderMeshInstanceGpu>,
+        render_material_bind_group_ids: &RenderMaterialBindGroupIds,
         current_input_buffer: &mut RawBufferVec<MeshInputUniform>,
     ) -> usize {
+        let (material_bind_group_id, material_bindless_index) = render_material_bind_group_ids
+            .get(&entity)
+            .cloned()
+            .unwrap_or(default());
+
         // Push the mesh input uniform.
         let current_uniform_index = current_input_buffer.push(MeshInputUniform {
             world_from_local: self.world_from_local.to_transpose(),
             lightmap_uv_rect: self.lightmap_uv_rect,
             flags: self.mesh_flags.bits(),
+            material_bindless_index: *material_bindless_index,
             previous_input_index: match self.previous_input_index {
                 Some(previous_input_index) => previous_input_index.into(),
                 None => u32::MAX,
             },
+            pad_a: 0,
+            pad_b: 0,
+            pad_c: 0,
         });
 
         // Record the [`RenderMeshInstance`].
@@ -735,7 +766,10 @@ impl RenderMeshInstanceGpuBuilder {
             entity,
             RenderMeshInstanceGpu {
                 translation: self.world_from_local.translation,
-                shared: self.shared,
+                shared: RenderMeshInstanceShared {
+                    material_bind_group_ids: (material_bind_group_id, material_bindless_index),
+                    ..self.shared
+                },
                 current_uniform_index: (current_uniform_index as u32)
                     .try_into()
                     .unwrap_or_default(),
@@ -891,6 +925,16 @@ pub fn extract_meshes_for_cpu_building(
     }
 }
 
+/// Holds all per-thread queues produced during
+/// [`extract_meshes_for_gpu_building`] and consumed during
+/// [`collect_meshes_for_gpu_building`].
+///
+/// There are two varieties of these: one for when culling happens on CPU and
+/// one for when culling happens on GPU. Having the two varieties avoids wasting
+/// space if GPU culling is disabled.
+#[derive(Resource, Default, Deref, DerefMut)]
+pub struct RenderMeshInstanceGpuQueues(Parallel<RenderMeshInstanceGpuQueue>);
+
 /// Extracts meshes from the main world into the render world and queues
 /// [`MeshInputUniform`]s to be uploaded to the GPU.
 ///
@@ -899,11 +943,7 @@ pub fn extract_meshes_for_cpu_building(
 pub fn extract_meshes_for_gpu_building(
     mut render_mesh_instances: ResMut<RenderMeshInstances>,
     render_visibility_ranges: Res<RenderVisibilityRanges>,
-    mut batched_instance_buffers: ResMut<
-        gpu_preprocessing::BatchedInstanceBuffers<MeshUniform, MeshInputUniform>,
-    >,
-    mut mesh_culling_data_buffer: ResMut<MeshCullingDataBuffer>,
-    mut render_mesh_instance_queues: Local<Parallel<RenderMeshInstanceGpuQueue>>,
+    mut render_mesh_instance_queues: ResMut<RenderMeshInstanceGpuQueues>,
     meshes_query: Extract<
         Query<(
             Entity,
@@ -1003,13 +1043,6 @@ pub fn extract_meshes_for_gpu_building(
             queue.push(entity, gpu_mesh_instance_builder, gpu_mesh_culling_data);
         },
     );
-
-    collect_meshes_for_gpu_building(
-        render_mesh_instances,
-        &mut batched_instance_buffers,
-        &mut mesh_culling_data_buffer,
-        &mut render_mesh_instance_queues,
-    );
 }
 
 /// A system that sets the [`RenderMeshInstanceFlags`] for each mesh based on
@@ -1043,22 +1076,30 @@ fn set_mesh_motion_vector_flags(
 
 /// Creates the [`RenderMeshInstanceGpu`]s and [`MeshInputUniform`]s when GPU
 /// mesh uniforms are built.
-fn collect_meshes_for_gpu_building(
-    render_mesh_instances: &mut RenderMeshInstancesGpu,
-    batched_instance_buffers: &mut gpu_preprocessing::BatchedInstanceBuffers<
-        MeshUniform,
-        MeshInputUniform,
+pub fn collect_meshes_for_gpu_building(
+    mut render_mesh_instances: ResMut<RenderMeshInstances>,
+    batched_instance_buffers: ResMut<
+        gpu_preprocessing::BatchedInstanceBuffers<MeshUniform, MeshInputUniform>,
     >,
-    mesh_culling_data_buffer: &mut MeshCullingDataBuffer,
-    render_mesh_instance_queues: &mut Parallel<RenderMeshInstanceGpuQueue>,
+    mut mesh_culling_data_buffer: ResMut<MeshCullingDataBuffer>,
+    mut render_mesh_instance_queues: ResMut<RenderMeshInstanceGpuQueues>,
+    render_material_bind_group_ids: Res<RenderMaterialBindGroupIds>,
 ) {
     // Collect render mesh instances. Build up the uniform buffer.
+
+    let RenderMeshInstances::GpuBuilding(ref mut render_mesh_instances) = *render_mesh_instances
+    else {
+        panic!(
+            "`collect_meshes_for_gpu_building` should only be called if we're \
+            using GPU `MeshUniform` building"
+        );
+    };
 
     let gpu_preprocessing::BatchedInstanceBuffers {
         ref mut current_input_buffer,
         ref mut previous_input_buffer,
         ..
-    } = batched_instance_buffers;
+    } = batched_instance_buffers.into_inner();
 
     // Swap buffers.
     mem::swap(current_input_buffer, previous_input_buffer);
@@ -1076,6 +1117,7 @@ fn collect_meshes_for_gpu_building(
                     mesh_instance_builder.add_to(
                         entity,
                         render_mesh_instances,
+                        &render_material_bind_group_ids,
                         current_input_buffer,
                     );
                 }
@@ -1085,9 +1127,11 @@ fn collect_meshes_for_gpu_building(
                     let instance_data_index = mesh_instance_builder.add_to(
                         entity,
                         render_mesh_instances,
+                        &render_material_bind_group_ids,
                         current_input_buffer,
                     );
-                    let culling_data_index = mesh_culling_builder.add_to(mesh_culling_data_buffer);
+                    let culling_data_index =
+                        mesh_culling_builder.add_to(&mut mesh_culling_data_buffer);
                     debug_assert_eq!(instance_data_index, culling_data_index);
                 }
             }
@@ -1122,6 +1166,8 @@ pub struct MeshPipeline {
     ///
     /// This affects whether reflection probes can be used.
     pub binding_arrays_are_usable: bool,
+
+    pub bindless_textures: bool,
 }
 
 impl FromWorld for MeshPipeline {
@@ -1131,8 +1177,9 @@ impl FromWorld for MeshPipeline {
             Res<DefaultImageSampler>,
             Res<RenderQueue>,
             Res<MeshPipelineViewLayouts>,
+            Res<RenderBindGroupStore>,
         )> = SystemState::new(world);
-        let (render_device, default_sampler, render_queue, view_layouts) =
+        let (render_device, default_sampler, render_queue, view_layouts, render_bind_group_store) =
             system_state.get_mut(world);
 
         let clustered_forward_buffer_binding_type = render_device
@@ -1179,6 +1226,7 @@ impl FromWorld for MeshPipeline {
             mesh_layouts: MeshLayouts::new(&render_device),
             per_object_buffer_batch_size: GpuArrayBuffer::<MeshUniform>::batch_size(&render_device),
             binding_arrays_are_usable: binding_arrays_are_usable(&render_device),
+            bindless_textures: render_bind_group_store.bindless_textures_enabled,
         }
     }
 }
@@ -1211,9 +1259,8 @@ impl GetBatchData for MeshPipeline {
         SRes<RenderLightmaps>,
         SRes<RenderAssets<GpuMesh>>,
     );
-    // The material bind group ID, the mesh ID, and the lightmap ID,
-    // respectively.
-    type CompareData = (MaterialBindGroupId, AssetId<Mesh>, Option<AssetId<Image>>);
+    // The bind group ID, the mesh ID, and the lightmap ID, respectively.
+    type CompareData = (RenderBindGroupId, AssetId<Mesh>, Option<AssetId<Image>>);
 
     type BufferData = MeshUniform;
 
@@ -1231,13 +1278,17 @@ impl GetBatchData for MeshPipeline {
         let mesh_instance = mesh_instances.get(&entity)?;
         let maybe_lightmap = lightmaps.render_lightmaps.get(&entity);
 
+        let (material_bind_group_id, material_bind_subgroup_id) =
+            mesh_instance.material_bind_group_ids;
+
         Some((
             MeshUniform::new(
                 &mesh_instance.transforms,
+                material_bind_subgroup_id,
                 maybe_lightmap.map(|lightmap| lightmap.uv_rect),
             ),
             mesh_instance.should_batch().then_some((
-                mesh_instance.material_bind_group_id.get(),
+                material_bind_group_id,
                 mesh_instance.mesh_asset_id,
                 maybe_lightmap.map(|lightmap| lightmap.image),
             )),
@@ -1264,10 +1315,12 @@ impl GetFullBatchData for MeshPipeline {
         let mesh_instance = mesh_instances.get(&entity)?;
         let maybe_lightmap = lightmaps.render_lightmaps.get(&entity);
 
+        let (material_bind_group_id, _) = mesh_instance.material_bind_group_ids;
+
         Some((
             mesh_instance.current_uniform_index,
             mesh_instance.should_batch().then_some((
-                mesh_instance.material_bind_group_id.get(),
+                material_bind_group_id,
                 mesh_instance.mesh_asset_id,
                 maybe_lightmap.map(|lightmap| lightmap.image),
             )),
@@ -1287,8 +1340,11 @@ impl GetFullBatchData for MeshPipeline {
         let mesh_instance = mesh_instances.get(&entity)?;
         let maybe_lightmap = lightmaps.render_lightmaps.get(&entity);
 
+        let (_, material_bind_subgroup_id) = mesh_instance.material_bind_group_ids;
+
         Some(MeshUniform::new(
             &mesh_instance.transforms,
+            material_bind_subgroup_id,
             maybe_lightmap.map(|lightmap| lightmap.uv_rect),
         ))
     }
@@ -1848,6 +1904,10 @@ impl SpecializedMeshPipeline for MeshPipeline {
 
         if self.binding_arrays_are_usable {
             shader_defs.push("MULTIPLE_LIGHT_PROBES_IN_ARRAY".into());
+        }
+
+        if self.bindless_textures {
+            shader_defs.push("BINDLESS_TEXTURES".into());
         }
 
         if IRRADIANCE_VOLUMES_ARE_USABLE {

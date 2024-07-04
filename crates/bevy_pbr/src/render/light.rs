@@ -1277,10 +1277,6 @@ pub fn queue_shadows<M: Material>(
                     }
                 };
 
-                mesh_instance
-                    .material_bind_group_id
-                    .set(material.get_bind_group_id());
-
                 shadow_phase.add(
                     ShadowBinKey {
                         draw_function: draw_shadow_mesh,

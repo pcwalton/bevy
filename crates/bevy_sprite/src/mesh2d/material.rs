@@ -5,7 +5,7 @@ use bevy_core_pipeline::{
     tonemapping::{DebandDither, Tonemapping},
 };
 use bevy_derive::{Deref, DerefMut};
-use bevy_ecs::entity::EntityHashMap;
+use bevy_ecs::{entity::EntityHashMap, system::lifetimeless::SResMut};
 use bevy_ecs::{
     prelude::*,
     system::{lifetimeless::SRes, SystemParamItem},
@@ -21,11 +21,11 @@ use bevy_render::{
         RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
     },
     render_resource::{
-        AsBindGroup, AsBindGroupError, BindGroup, BindGroupId, BindGroupLayout,
-        OwnedBindingResource, PipelineCache, RenderPipelineDescriptor, Shader, ShaderRef,
+        AsBindGroup, AsBindGroupError, BindGroupLayout, OwnedBindingResource, PipelineCache,
+        RenderBindGroupId, RenderBindGroupStore, RenderPipelineDescriptor, Shader, ShaderRef,
         SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines,
     },
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderQueue},
     texture::{FallbackImage, GpuImage},
     view::{ExtractedView, InheritedVisibility, Msaa, ViewVisibility, Visibility, VisibleEntities},
     Extract, ExtractSchedule, Render, RenderApp, RenderSet,
@@ -288,7 +288,12 @@ impl<M: Material2d> FromWorld for Material2dPipeline<M> {
     fn from_world(world: &mut World) -> Self {
         let asset_server = world.resource::<AssetServer>();
         let render_device = world.resource::<RenderDevice>();
-        let material2d_layout = M::bind_group_layout(render_device);
+        let render_bind_group_store = world.resource::<RenderBindGroupStore>();
+
+        let material2d_layout = M::bind_group_layout(
+            render_device,
+            render_bind_group_store.bindless_textures_enabled,
+        );
 
         Material2dPipeline {
             mesh2d_pipeline: world.resource::<Mesh2dPipeline>().clone(),
@@ -323,6 +328,7 @@ impl<P: PhaseItem, M: Material2d, const I: usize> RenderCommand<P>
     type Param = (
         SRes<RenderAssets<PreparedMaterial2d<M>>>,
         SRes<RenderMaterial2dInstances<M>>,
+        SRes<RenderBindGroupStore>,
     );
     type ViewQuery = ();
     type ItemQuery = ();
@@ -332,18 +338,26 @@ impl<P: PhaseItem, M: Material2d, const I: usize> RenderCommand<P>
         item: &P,
         _view: (),
         _item_query: Option<()>,
-        (materials, material_instances): SystemParamItem<'w, '_, Self::Param>,
+        (materials, material_instances, bind_group_store): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let materials = materials.into_inner();
         let material_instances = material_instances.into_inner();
+        let bind_group_store = bind_group_store.into_inner();
         let Some(material_instance) = material_instances.get(&item.entity()) else {
             return RenderCommandResult::Failure;
         };
         let Some(material2d) = materials.get(*material_instance) else {
             return RenderCommandResult::Failure;
         };
-        pass.set_bind_group(I, &material2d.bind_group, &[]);
+        let Some(material2d_bind_group) = bind_group_store
+            .bind_group_id_to_bind_group
+            .get(&material2d.bind_group_id)
+        else {
+            return RenderCommandResult::Failure;
+        };
+
+        pass.set_bind_group(I, &material2d_bind_group.bind_group, &[]);
         RenderCommandResult::Success
     }
 }
@@ -462,20 +476,17 @@ pub fn queue_material2d_meshes<M: Material2d>(
     }
 }
 
-#[derive(Component, Clone, Copy, Default, PartialEq, Eq, Deref, DerefMut)]
-pub struct Material2dBindGroupId(pub Option<BindGroupId>);
-
 /// Data prepared for a [`Material2d`] instance.
 pub struct PreparedMaterial2d<T: Material2d> {
     pub bindings: Vec<(u32, OwnedBindingResource)>,
-    pub bind_group: BindGroup,
+    pub bind_group_id: RenderBindGroupId,
     pub key: T::Data,
     pub depth_bias: f32,
 }
 
 impl<T: Material2d> PreparedMaterial2d<T> {
-    pub fn get_bind_group_id(&self) -> Material2dBindGroupId {
-        Material2dBindGroupId(Some(self.bind_group.id()))
+    pub fn get_bind_group_id(&self) -> RenderBindGroupId {
+        self.bind_group_id
     }
 }
 
@@ -484,24 +495,35 @@ impl<M: Material2d> RenderAsset for PreparedMaterial2d<M> {
 
     type Param = (
         SRes<RenderDevice>,
+        SRes<RenderQueue>,
         SRes<RenderAssets<GpuImage>>,
         SRes<FallbackImage>,
         SRes<Material2dPipeline<M>>,
+        SResMut<RenderBindGroupStore>,
     );
 
     fn prepare_asset(
         material: Self::SourceAsset,
-        (render_device, images, fallback_image, pipeline): &mut SystemParamItem<Self::Param>,
+        (
+            render_device,
+            render_queue,
+            images,
+            fallback_image,
+            pipeline,
+            ref mut render_bind_group_store,
+        ): &mut SystemParamItem<Self::Param>,
     ) -> Result<Self, bevy_render::render_asset::PrepareAssetError<Self::SourceAsset>> {
         match material.as_bind_group(
             &pipeline.material2d_layout,
             render_device,
+            render_queue,
             images,
             fallback_image,
+            render_bind_group_store,
         ) {
             Ok(prepared) => Ok(PreparedMaterial2d {
                 bindings: prepared.bindings,
-                bind_group: prepared.bind_group,
+                bind_group_id: prepared.bind_group_id,
                 key: prepared.data,
                 depth_bias: material.depth_bias(),
             }),

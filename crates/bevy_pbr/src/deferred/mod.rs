@@ -233,6 +233,7 @@ impl ViewNode for DeferredOpaquePass3dPbrLightingNode {
 pub struct DeferredLightingLayout {
     mesh_pipeline: MeshPipeline,
     bind_group_layout_1: BindGroupLayout,
+    bindless_textures: bool,
 }
 
 #[derive(Component)]
@@ -325,6 +326,10 @@ impl SpecializedRenderPipeline for DeferredLightingLayout {
             shader_defs.push("HAS_PREVIOUS_MORPH".into());
         }
 
+        if self.bindless_textures {
+            shader_defs.push("BINDLESS_TEXTURES".into());
+        }
+
         // Always true, since we're in the deferred lighting pipeline
         shader_defs.push("DEFERRED_PREPASS".into());
 
@@ -393,6 +398,7 @@ impl SpecializedRenderPipeline for DeferredLightingLayout {
 impl FromWorld for DeferredLightingLayout {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
+        let render_bind_group_store = world.resource::<RenderBindGroupStore>();
         let layout = render_device.create_bind_group_layout(
             "deferred_lighting_layout",
             &BindGroupLayoutEntries::single(
@@ -403,6 +409,7 @@ impl FromWorld for DeferredLightingLayout {
         Self {
             mesh_pipeline: world.resource::<MeshPipeline>().clone(),
             bind_group_layout_1: layout,
+            bindless_textures: render_bind_group_store.bindless_textures_enabled,
         }
     }
 }

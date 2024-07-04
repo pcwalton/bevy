@@ -50,6 +50,12 @@ pub trait RenderAsset: Send + Sync + 'static + Sized {
         None
     }
 
+    fn preprocess_asset(
+        _source_asset: &Self::SourceAsset,
+        _param: &mut SystemParamItem<Self::Param>,
+    ) {
+    }
+
     /// Prepares the [`RenderAsset::SourceAsset`] for the GPU by transforming it into a [`RenderAsset`].
     ///
     /// ECS data may be accessed via `param`.
@@ -296,7 +302,7 @@ fn extract_render_asset<A: RenderAsset>(mut commands: Commands, mut main_world: 
 /// All assets that should be prepared next frame.
 #[derive(Resource)]
 pub struct PrepareNextFrameAssets<A: RenderAsset> {
-    assets: Vec<(AssetId<A::SourceAsset>, A::SourceAsset)>,
+    pub assets: Vec<(AssetId<A::SourceAsset>, A::SourceAsset)>,
 }
 
 impl<A: RenderAsset> Default for PrepareNextFrameAssets<A> {
@@ -316,6 +322,8 @@ pub fn prepare_assets<A: RenderAsset>(
     param: StaticSystemParam<<A as RenderAsset>::Param>,
     mut bpf: ResMut<RenderAssetBytesPerFrame>,
 ) {
+    let mut assets_to_prepare = vec![];
+
     let mut wrote_asset_count = 0;
 
     let mut param = param.into_inner();
@@ -326,30 +334,7 @@ pub fn prepare_assets<A: RenderAsset>(
             continue;
         }
 
-        let write_bytes = if let Some(size) = A::byte_len(&extracted_asset) {
-            // we could check if available bytes > byte_len here, but we want to make some
-            // forward progress even if the asset is larger than the max bytes per frame.
-            // this way we always write at least one (sized) asset per frame.
-            // in future we could also consider partial asset uploads.
-            if bpf.exhausted() {
-                prepare_next_frame.assets.push((id, extracted_asset));
-                continue;
-            }
-            size
-        } else {
-            0
-        };
-
-        match A::prepare_asset(extracted_asset, &mut param) {
-            Ok(prepared_asset) => {
-                render_assets.insert(id, prepared_asset);
-                bpf.write_bytes(write_bytes);
-                wrote_asset_count += 1;
-            }
-            Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
-                prepare_next_frame.assets.push((id, extracted_asset));
-            }
-        }
+        assets_to_prepare.push((id, extracted_asset));
     }
 
     for removed in extracted_assets.removed.drain() {
@@ -362,6 +347,16 @@ pub fn prepare_assets<A: RenderAsset>(
         // even if the new asset is not yet ready or we are out of bytes to write.
         render_assets.remove(id);
 
+        assets_to_prepare.push((id, extracted_asset));
+    }
+
+    // Preprocess all assets.
+    for (_, extracted_asset) in assets_to_prepare.iter() {
+        A::preprocess_asset(extracted_asset, &mut param);
+    }
+
+    // Prepare all assets.
+    for (id, extracted_asset) in assets_to_prepare {
         let write_bytes = if let Some(size) = A::byte_len(&extracted_asset) {
             if bpf.exhausted() {
                 prepare_next_frame.assets.push((id, extracted_asset));

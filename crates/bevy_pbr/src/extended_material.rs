@@ -7,7 +7,7 @@ use bevy_render::{
         AsBindGroup, AsBindGroupError, BindGroupLayout, RenderPipelineDescriptor, Shader,
         ShaderRef, SpecializedMeshPipelineError, UnpreparedBindGroup,
     },
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderQueue},
     texture::{FallbackImage, GpuImage},
 };
 
@@ -152,39 +152,57 @@ impl<B: Material, E: MaterialExtension> AsBindGroup for ExtendedMaterial<B, E> {
         &self,
         layout: &BindGroupLayout,
         render_device: &RenderDevice,
+        render_queue: &RenderQueue,
         images: &RenderAssets<GpuImage>,
         fallback_image: &FallbackImage,
+        bindless: bool,
     ) -> Result<UnpreparedBindGroup<Self::Data>, AsBindGroupError> {
         // add together the bindings of the base material and the user material
         let UnpreparedBindGroup {
             mut bindings,
+            array_uniforms,
+            mut bindless_resources,
             data: base_data,
-        } = B::unprepared_bind_group(&self.base, layout, render_device, images, fallback_image)?;
+        } = B::unprepared_bind_group(
+            &self.base,
+            layout,
+            render_device,
+            render_queue,
+            images,
+            fallback_image,
+            bindless,
+        )?;
         let extended_bindgroup = E::unprepared_bind_group(
             &self.extension,
             layout,
             render_device,
+            render_queue,
             images,
             fallback_image,
+            bindless,
         )?;
 
         bindings.extend(extended_bindgroup.bindings);
+        bindless_resources.extend(extended_bindgroup.bindless_resources);
 
         Ok(UnpreparedBindGroup {
             bindings,
+            array_uniforms,
+            bindless_resources,
             data: (base_data, extended_bindgroup.data),
         })
     }
 
     fn bind_group_layout_entries(
         render_device: &RenderDevice,
+        bindless: bool,
     ) -> Vec<bevy_render::render_resource::BindGroupLayoutEntry>
     where
         Self: Sized,
     {
         // add together the bindings of the standard material and the user material
-        let mut entries = B::bind_group_layout_entries(render_device);
-        entries.extend(E::bind_group_layout_entries(render_device));
+        let mut entries = B::bind_group_layout_entries(render_device, bindless);
+        entries.extend(E::bind_group_layout_entries(render_device, bindless));
         entries
     }
 }

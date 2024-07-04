@@ -28,8 +28,8 @@ use bevy::{
         Extract, Render, RenderApp, RenderSet,
     },
     sprite::{
-        extract_mesh2d, DrawMesh2d, Material2dBindGroupId, Mesh2dHandle, Mesh2dPipeline,
-        Mesh2dPipelineKey, Mesh2dTransforms, MeshFlags, RenderMesh2dInstance, SetMesh2dBindGroup,
+        extract_mesh2d, DrawMesh2d, Mesh2dHandle, Mesh2dPipeline, Mesh2dPipelineKey,
+        Mesh2dTransforms, MeshFlags, RenderMesh2dInstance, SetMesh2dBindGroup,
         SetMesh2dViewBindGroup, WithMesh2d,
     },
     utils::EntityHashMap,
@@ -335,7 +335,7 @@ pub fn extract_colored_mesh2d(
             RenderMesh2dInstance {
                 mesh_asset_id: handle.0.id(),
                 transforms,
-                material_bind_group_id: Material2dBindGroupId::default(),
+                material_bind_group_id: default(),
                 automatic_batching: false,
             },
         );

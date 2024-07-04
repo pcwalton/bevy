@@ -323,7 +323,7 @@ fn apply_pbr_lighting(
     let clearcoat_R = reflect(-in.V, clearcoat_N);
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
-    let diffuse_color = calculate_diffuse_color(
+    var diffuse_color = calculate_diffuse_color(
         output_color.rgb,
         metallic,
         specular_transmission,
