@@ -9,32 +9,44 @@
 
 pub mod animatable;
 pub mod graph;
+pub mod keyframes;
 pub mod transition;
 mod util;
 
+use std::any::TypeId;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::iter;
-use std::ops::{Add, Mul};
 
 use bevy_app::{App, Plugin, PostUpdate};
-use bevy_asset::{Asset, AssetApp, Assets, Handle};
+use bevy_asset::{Asset, AssetApp, AssetEvent, Assets, Handle};
+use bevy_color::{Laba, LinearRgba, Oklaba, Srgba, Xyza};
 use bevy_core::Name;
-use bevy_ecs::{entity::MapEntities, prelude::*, reflect::ReflectMapEntities};
-use bevy_math::{FloatExt, Quat, Vec3};
-use bevy_reflect::Reflect;
+use bevy_derive::{Deref, DerefMut};
+use bevy_ecs::entity::MapEntities;
+use bevy_ecs::prelude::*;
+use bevy_ecs::query::FilteredAccess;
+use bevy_ecs::reflect::ReflectMapEntities;
+use bevy_ecs::system::{ParamBuilder, QueryParamBuilder, RunSystemOnce};
+use bevy_ecs::world::FilteredEntityMut;
+use bevy_math::{FloatExt, Quat, Vec2, Vec3, Vec3A, Vec4};
+use bevy_reflect::{Reflect, ReflectPath, TypeRegistry};
 use bevy_render::mesh::morph::MorphWeights;
 use bevy_time::Time;
 use bevy_transform::{prelude::Transform, TransformSystem};
+use bevy_ui::UiSystem;
+use bevy_utils::hashbrown::HashMap;
+use bevy_utils::HashSet;
 use bevy_utils::{
-    hashbrown::HashMap,
-    tracing::{error, trace},
+    tracing::{info_span, trace, warn},
     NoOpHash,
 };
 use fixedbitset::FixedBitSet;
 use graph::AnimationMask;
 use petgraph::{graph::NodeIndex, Direction};
+use prelude::{ReflectAnimatable, MORPH_WEIGHTS_REFLECT_ANIMATABLE};
 use serde::{Deserialize, Serialize};
 use thread_local::ThreadLocal;
 use uuid::Uuid;
@@ -45,13 +57,14 @@ use uuid::Uuid;
 pub mod prelude {
     #[doc(hidden)]
     pub use crate::{
-        animatable::*, graph::*, transition::*, AnimationClip, AnimationPlayer, AnimationPlugin,
-        Interpolation, Keyframes, VariableCurve,
+        animatable::*, graph::*, keyframes::*, transition::*, AnimationClip, AnimationPlayer,
+        AnimationPlugin, Interpolation, VariableCurve,
     };
 }
 
 use crate::{
     graph::{AnimationGraph, AnimationGraphAssetLoader, AnimationNodeIndex},
+    keyframes::Keyframes,
     transition::{advance_transitions, expire_completed_transitions, AnimationTransitions},
 };
 
@@ -59,42 +72,6 @@ use crate::{
 ///
 /// [UUID namespace]: https://en.wikipedia.org/wiki/Universally_unique_identifier#Versions_3_and_5_(namespace_name-based)
 pub static ANIMATION_TARGET_NAMESPACE: Uuid = Uuid::from_u128(0x3179f519d9274ff2b5966fd077023911);
-
-/// List of keyframes for one of the attribute of a [`Transform`].
-#[derive(Reflect, Clone, Debug)]
-pub enum Keyframes {
-    /// Keyframes for rotation.
-    Rotation(Vec<Quat>),
-    /// Keyframes for translation.
-    Translation(Vec<Vec3>),
-    /// Keyframes for scale.
-    Scale(Vec<Vec3>),
-    /// Keyframes for morph target weights.
-    ///
-    /// Note that in `.0`, each contiguous `target_count` values is a single
-    /// keyframe representing the weight values at given keyframe.
-    ///
-    /// This follows the [glTF design].
-    ///
-    /// [glTF design]: https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#animations
-    Weights(Vec<f32>),
-}
-
-impl Keyframes {
-    /// Returns the number of keyframes.
-    pub fn len(&self) -> usize {
-        match self {
-            Keyframes::Weights(vec) => vec.len(),
-            Keyframes::Translation(vec) | Keyframes::Scale(vec) => vec.len(),
-            Keyframes::Rotation(vec) => vec.len(),
-        }
-    }
-
-    /// Returns true if the number of keyframes is zero.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
 
 /// Describes how an attribute of a [`Transform`] or [`MorphWeights`] should be animated.
 ///
@@ -183,7 +160,7 @@ impl VariableCurve {
 }
 
 /// Interpolation method to use between keyframes.
-#[derive(Reflect, Clone, Debug)]
+#[derive(Reflect, Clone, Copy, Debug)]
 pub enum Interpolation {
     /// Linear interpolation between the two closest keyframes.
     Linear,
@@ -345,6 +322,97 @@ pub enum RepeatAnimation {
     Count(u32),
     /// The animation will never finish.
     Forever,
+}
+
+/// Why Bevy failed to evaluate an animation.
+#[derive(Clone, Debug)]
+pub enum AnimationEvaluationError {
+    /// The animation couldn't be played because the type of the keyframes
+    /// wasn't as expected.
+    ///
+    /// This typically happens when the type of the keyframes differs from that
+    /// of the property being animated.
+    ///
+    /// A common scenario that can trigger this error is trying to animate a
+    /// `f32` value with an expression like `keyframes: Box::new(vec![1.0, 2.0,
+    /// 3.0])`.  Because animation properties are specified as strings, the Rust
+    /// compiler has no idea what the type of the property is, so it chooses the
+    /// default for float literals, which is `f64`. This will fail at runtime,
+    /// since `f32` and `f64` are different types. The solution is to explicitly
+    /// specify `f32` when constructing the `Vec`, as e.g. `vec![1.0f32, 2.0f32,
+    /// 3.0f32]`.
+    ///
+    /// Another possible cause of this error is forgetting to make the keyframes
+    /// a vector, as in e.g. `keyframes: Box::new([1.0f32, 2.0f32, 3.0f32])`.
+    /// This should be changed to include a `vec!`, as in e.g. `keyframes:
+    /// Box::new(vec![1.0f32, 2.0f32, 3.0f32])`.
+    MalformedKeyframes,
+
+    /// The property being animated is of a type that doesn't implement
+    /// `Animatable`.
+    ///
+    /// This can also happen if the type does implement `Animatable`, but the
+    /// `Animatable` implementation wasn't exposed to the reflection
+    /// infrastructure via `#[reflect(Animatable)]`. Common scenarios that can
+    /// trigger this error include:
+    ///
+    /// * Trying to animate a `Color` directly. Because colors may be in
+    ///   different color spaces, it's not possible in general to interpolate
+    ///   arbitrary colors. Instead, you should generally animate the specific
+    ///   color space type (e.g. `Srgba`). For example, instead of animating the
+    ///   `sections[0].style.color` path on the `Text` component, animate the
+    ///   `Srgba` values, by specifying a path of `sections[0].style.color.0`
+    ///   (notice the trailing `.0`), and specify keyframes like `keyframes:
+    ///   Box::new(vec![Srgba::RED, Srgba::GREEN, Srgba::BLUE])`. (This of
+    ///   course assumes that your colors are `Srgba` to begin with; if they
+    ///   aren't, either change them to `Srgba` or change the keyframes to the
+    ///   appropriate color space.)
+    ///
+    /// * Attempting to animate a `Val` directly. Because Bevy doesn't currently
+    ///   support a `calc` feature like Web browsers do, it's not possible in
+    ///   general to interpolate between `Val`s, as there's no way to blend
+    ///   between e.g. a `Val::Px` and a `Val::Percent`. The solution is to
+    ///   animate a specific unit, such as pixels. For instance, instead of
+    ///   animating the `top` value on the `Style` component with keyframes like
+    ///   `keyframes: Box::new(vec![Val::Px(100.0), Val::Px(200.0)])`, animate
+    ///   the `top.0` value (note the trailing `.0`) with a keyframe expression
+    ///   like `keyframes: Box::new(vec![100.0f32, 200.0f32])`.
+    PropertyTypeNotAnimatable,
+
+    /// The `keyframes` array is too small.
+    ///
+    /// For curves with `Interpolation::Step` or `Interpolation::Linear`, the
+    /// `keyframes` array must have at least as many elements as keyframe
+    /// timestamps. For curves with `Interpolation::CubicBezier`, the
+    /// `keyframes` array must have at least 3× the number of elements as
+    /// keyframe timestamps, in order to account for the tangents.
+    KeyframeNotPresent,
+
+    /// The component type isn't reflectable.
+    ///
+    /// This can occur if you're animating a custom component and didn't add
+    /// both `#[derive(Reflect)]` and `#[reflect(Component)]` to its
+    /// declaration, or you didn't register the component on app startup. To fix
+    /// this error, ensure that your component is tagged with
+    /// `#[derive(Reflect)]` and `#[reflect(Component)]`, and make sure to call
+    /// `App::register_type` with your component type in your initialization
+    /// code.
+    ComponentTypeNotReflectable,
+
+    /// The component to be animated isn't present on the animation target.
+    ///
+    /// To fix this error, make sure the entity to be animated contains all
+    /// components that have animation curves.
+    ComponentNotPresent,
+
+    /// The component to be animated was present, but the `path` didn't name any
+    /// reflectable property on the component.
+    ///
+    /// This is usually because of a mistyped `ParsedPath`. For example, to
+    /// alter the color of the first section of text, you should use a path of
+    /// `sections[0].style.color.0` (correct) instead of, for example,
+    /// `sections.0.style.color` (incorrect).
+    PropertyNotPresent,
 }
 
 /// An animation that an [`AnimationPlayer`] is currently either playing or was
@@ -566,11 +634,7 @@ impl Clone for AnimationPlayer {
 /// The components that we might need to read or write during animation of each
 /// animation target.
 struct AnimationTargetContext<'a> {
-    entity: Entity,
-    target: &'a AnimationTarget,
-    name: Option<&'a Name>,
-    transform: Option<Mut<'a, Transform>>,
-    morph_weights: Option<Mut<'a, MorphWeights>>,
+    entity_mut: FilteredEntityMut<'a>,
 }
 
 /// Information needed during the traversal of the animation graph in
@@ -596,14 +660,18 @@ struct EvaluatedAnimationGraphNode {
     mask: AnimationMask,
 }
 
-thread_local! {
-    /// A cached per-thread copy of the graph evaluator.
-    ///
-    /// Caching the evaluator lets us save allocation traffic from frame to
-    /// frame.
-    static ANIMATION_GRAPH_EVALUATOR: RefCell<AnimationGraphEvaluator> =
-        RefCell::new(AnimationGraphEvaluator::default());
-}
+/// Holds the type IDs of all components that *any* loaded animation clip
+/// animates.
+///
+/// Whenever an animation clip is loaded, we add the type IDs of all its curves'
+/// components to this list.
+///
+/// This resource exists so that we can construct the animation target query
+/// when updating animations. Because there are an unbounded number of
+/// components that the application could possibly animate, we need to maintain
+/// this list at runtime.
+#[derive(Clone, Default, Resource, Deref, DerefMut)]
+pub struct AnimatedComponents(pub HashSet<TypeId>);
 
 impl AnimationPlayer {
     /// Start playing an animation, restarting it if necessary.
@@ -824,115 +892,210 @@ pub fn advance_animations(
         });
 }
 
+/// A system that maintains the [`AnimatedComponents`] list.
+///
+/// This system watches for new animation clips. For each new animation clip, it
+/// adds the IDs of the components that the clip references to the
+/// [`AnimatedComponents`] list. This allows [`animate_targets`] to construct
+/// its animation target query.
+pub fn update_animated_components(
+    mut asset_events: EventReader<AssetEvent<AnimationClip>>,
+    animation_clips: Res<Assets<AnimationClip>>,
+    mut animated_components: ResMut<AnimatedComponents>,
+) {
+    for event in asset_events.read() {
+        let asset_id = match event {
+            AssetEvent::Added { id }
+            | AssetEvent::Modified { id }
+            | AssetEvent::LoadedWithDependencies { id } => id,
+            AssetEvent::Removed { .. } | AssetEvent::Unused { .. } => continue,
+        };
+        let Some(animation_clip) = animation_clips.get(*asset_id) else {
+            continue;
+        };
+
+        for curves in animation_clip.curves.values() {
+            for curve in curves {
+                animated_components.insert(curve.keyframes.component);
+            }
+        }
+    }
+}
+
 /// A system that modifies animation targets (e.g. bones in a skinned mesh)
-/// according to the currently-playing animation.
-pub fn animate_targets(
+/// according to the currently-playing animations.
+///
+/// This takes the [`World`] because Bevy's animation system can potentially
+/// animate any reflectable component. Thus we must conservatively schedule this
+/// system on its own. Fortunately, this system is itself internally
+/// parallelized.
+pub fn animate_targets(world: &mut World) {
+    // Build a system dynamically.
+    let system = (
+        ParamBuilder::resource::<Assets<AnimationClip>>(),
+        ParamBuilder::resource::<Assets<AnimationGraph>>(),
+        ParamBuilder::resource::<AppTypeRegistry>(),
+        QueryParamBuilder::new(|builder| {
+            // This is a read-only query of animation players and graphs.
+            // Parallel animation target evaluation reads from this query.
+            builder
+                .data::<&AnimationPlayer>()
+                .data::<&Handle<AnimationGraph>>();
+        }),
+        QueryParamBuilder::new(|builder| {
+            // This is the query of animation targets that we parallelize over.
+            // We need read access to the `AnimationTarget` component, as well
+            // as write access to all components that any of the loaded
+            // animation clips can animate.
+            //
+            // Note that it's legal for `AnimationTarget` and `AnimationPlayer`
+            // to be on the same entity. Thus it would *not* be correct to add
+            // `Without<AnimationPlayer>` to this query.
+            let mut access = FilteredAccess::matches_everything();
+            let animated_components = builder.world().resource::<AnimatedComponents>();
+            for component_type_id in animated_components.iter() {
+                if let Some(component_id) = builder.world().components().get_id(*component_type_id)
+                {
+                    access.add_component_write(component_id);
+                }
+            }
+            if let Some(animation_target_component_id) =
+                builder.world().component_id::<AnimationTarget>()
+            {
+                access.add_component_read(animation_target_component_id);
+            }
+            builder.extend_access(access);
+            builder.with::<AnimationTarget>();
+        }),
+    )
+        .build_state(world)
+        .build_system(do_animate_targets);
+
+    world.run_system_once(system);
+}
+
+/// The sub-system that modifies animation targets according to the
+/// currently-playing animations.
+///
+/// `animate_targets` invokes this system with dynamically-generated queries.
+/// See the comments in [`animate_targets`] for more information.
+fn do_animate_targets(
     clips: Res<Assets<AnimationClip>>,
     graphs: Res<Assets<AnimationGraph>>,
+    app_type_registry: Res<AppTypeRegistry>,
     players: Query<(&AnimationPlayer, &Handle<AnimationGraph>)>,
-    mut targets: Query<(
-        Entity,
-        &AnimationTarget,
-        Option<&Name>,
-        AnyOf<(&mut Transform, &mut MorphWeights)>,
-    )>,
+    mut targets: Query<FilteredEntityMut>,
 ) {
-    // We use two queries here: one read-only query for animation players and
-    // one read-write query for animation targets (e.g. bones). The
-    // `AnimationPlayer` query is read-only shared memory accessible from all
-    // animation targets, which are evaluated in parallel.
+    let _span = info_span!("", "do_animate_targets");
 
-    // Iterate over all animation targets in parallel.
-    targets
-        .par_iter_mut()
-        .for_each(|(id, target, name, (transform, morph_weights))| {
-            let Ok((animation_player, animation_graph_handle)) = players.get(target.player) else {
+    let type_registry = app_type_registry.read();
+
+    // Evaluate all animation targets in parallel.
+    targets.par_iter_mut().for_each(|entity_mut| {
+        let Some(&AnimationTarget {
+            id: target_id,
+            player: player_id,
+        }) = entity_mut.get::<AnimationTarget>()
+        else {
+            return;
+        };
+
+        let (animation_player, animation_graph_id) =
+            if let Ok((player, graph_handle)) = players.get(player_id) {
+                (player, graph_handle.id())
+            } else {
                 trace!(
                     "Either an animation player {:?} or a graph was missing for the target \
-                     entity {:?} ({:?}); no animations will play this frame",
-                    target.player,
-                    id,
-                    name,
+                                 entity {:?} ({:?}); no animations will play this frame",
+                    player_id,
+                    entity_mut.id(),
+                    entity_mut.get::<Name>(),
                 );
                 return;
             };
 
-            // The graph might not have loaded yet. Safely bail.
-            let Some(animation_graph) = graphs.get(animation_graph_handle) else {
-                return;
-            };
+        // The graph might not have loaded yet. Safely bail.
+        let Some(animation_graph) = graphs.get(animation_graph_id) else {
+            return;
+        };
 
-            let mut target_context = AnimationTargetContext {
-                entity: id,
-                target,
-                name,
-                transform,
-                morph_weights,
-            };
+        // Determine which mask groups this animation target belongs to.
+        let target_mask = animation_graph
+            .mask_groups
+            .get(&target_id)
+            .cloned()
+            .unwrap_or_default();
 
-            // Determine which mask groups this animation target belongs to.
-            let target_mask = animation_graph
-                .mask_groups
-                .get(&target.id)
-                .cloned()
-                .unwrap_or_default();
+        let mut target_context = AnimationTargetContext { entity_mut };
 
-            // Apply the animations one after another. The way we accumulate
-            // weights ensures that the order we apply them in doesn't matter.
-            //
-            // Proof: Consider three animations A₀, A₁, A₂, … with weights w₀,
-            // w₁, w₂, … respectively. We seek the value:
-            //
-            //     A₀w₀ + A₁w₁ + A₂w₂ + ⋯
-            //
-            // Defining lerp(a, b, t) = a + t(b - a), we have:
-            //
-            //                                    ⎛    ⎛          w₁   ⎞           w₂     ⎞
-            //     A₀w₀ + A₁w₁ + A₂w₂ + ⋯ = ⋯ lerp⎜lerp⎜A₀, A₁, ⎯⎯⎯⎯⎯⎯⎯⎯⎟, A₂, ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎟ ⋯
-            //                                    ⎝    ⎝        w₀ + w₁⎠      w₀ + w₁ + w₂⎠
-            //
-            // Each step of the following loop corresponds to one of the lerp
-            // operations above.
-            let mut total_weight = 0.0;
-            for (&animation_graph_node_index, active_animation) in
-                animation_player.active_animations.iter()
+        // Apply the animations one after another. The way we accumulate
+        // weights ensures that the order we apply them in doesn't matter.
+        //
+        // Proof: Consider three animations A₀, A₁, A₂, … with weights w₀,
+        // w₁, w₂, … respectively. We seek the value:
+        //
+        //     A₀w₀ + A₁w₁ + A₂w₂ + ⋯
+        //
+        // Defining lerp(a, b, t) = a + t(b - a), we have:
+        //
+        //                                    ⎛    ⎛          w₁   ⎞           w₂     ⎞
+        //     A₀w₀ + A₁w₁ + A₂w₂ + ⋯ = ⋯ lerp⎜lerp⎜A₀, A₁, ⎯⎯⎯⎯⎯⎯⎯⎯⎟, A₂, ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎟ ⋯
+        //                                    ⎝    ⎝        w₀ + w₁⎠      w₀ + w₁ + w₂⎠
+        //
+        // Each step of the following loop corresponds to one of the lerp
+        // operations above.
+        let mut total_weight = 0.0;
+        for (&animation_graph_node_index, active_animation) in
+            animation_player.active_animations.iter()
+        {
+            // If the weight is zero or the current animation target is
+            // masked out, stop here.
+            if active_animation.weight == 0.0 || (target_mask & active_animation.computed_mask) != 0
             {
-                // If the weight is zero or the current animation target is
-                // masked out, stop here.
-                if active_animation.weight == 0.0
-                    || (target_mask & active_animation.computed_mask) != 0
-                {
-                    continue;
-                }
-
-                let Some(clip) = animation_graph
-                    .get(animation_graph_node_index)
-                    .and_then(|animation_graph_node| animation_graph_node.clip.as_ref())
-                    .and_then(|animation_clip_handle| clips.get(animation_clip_handle))
-                else {
-                    continue;
-                };
-
-                let Some(curves) = clip.curves_for_target(target_context.target.id) else {
-                    continue;
-                };
-
-                let weight = active_animation.computed_weight;
-                total_weight += weight;
-
-                target_context.apply(curves, weight / total_weight, active_animation.seek_time);
+                continue;
             }
-        });
+
+            let Some(clip) = animation_graph
+                .get(animation_graph_node_index)
+                .and_then(|animation_graph_node| animation_graph_node.clip.as_ref())
+                .and_then(|animation_clip_handle| clips.get(animation_clip_handle))
+            else {
+                continue;
+            };
+
+            let Some(curves) = clip.curves_for_target(target_id) else {
+                continue;
+            };
+
+            let weight = active_animation.computed_weight;
+            total_weight += weight;
+
+            target_context.apply(
+                curves,
+                weight / total_weight,
+                active_animation.seek_time,
+                &type_registry,
+            );
+        }
+    });
 }
 
 impl AnimationTargetContext<'_> {
     /// Applies a clip to a single animation target according to the
     /// [`AnimationTargetContext`].
-    fn apply(&mut self, curves: &[VariableCurve], weight: f32, seek_time: f32) {
+    fn apply(
+        &mut self,
+        curves: &[VariableCurve],
+        weight: f32,
+        seek_time: f32,
+        type_registry: &TypeRegistry,
+    ) {
         for curve in curves {
             // Some curves have only one keyframe used to set a transform
             if curve.keyframe_timestamps.len() == 1 {
-                self.apply_single_keyframe(curve, weight);
+                if let Err(err) = self.apply_single_keyframe(curve, weight, type_registry) {
+                    warn!("Animation application failed: {:?}", err);
+                }
                 continue;
             }
 
@@ -944,53 +1107,55 @@ impl AnimationTargetContext<'_> {
             // Compute how far we are through the keyframe, normalized to [0, 1]
             let lerp = f32::inverse_lerp(timestamp_start, timestamp_end, seek_time).clamp(0.0, 1.0);
 
-            self.apply_tweened_keyframe(
+            if let Err(err) = self.apply_tweened_keyframe(
                 curve,
                 step_start,
                 lerp,
                 weight,
                 timestamp_end - timestamp_start,
-            );
+                type_registry,
+            ) {
+                warn!("Animation application failed: {:?}", err);
+            }
         }
     }
 
-    fn apply_single_keyframe(&mut self, curve: &VariableCurve, weight: f32) {
-        match &curve.keyframes {
-            Keyframes::Rotation(keyframes) => {
-                if let Some(ref mut transform) = self.transform {
-                    transform.rotation = transform.rotation.slerp(keyframes[0], weight);
-                }
-            }
+    fn apply_single_keyframe(
+        &mut self,
+        curve: &VariableCurve,
+        weight: f32,
+        type_registry: &TypeRegistry,
+    ) -> Result<(), AnimationEvaluationError> {
+        let Some(reflect_component) =
+            type_registry.get_type_data::<ReflectComponent>(curve.keyframes.component)
+        else {
+            return Err(AnimationEvaluationError::ComponentTypeNotReflectable);
+        };
 
-            Keyframes::Translation(keyframes) => {
-                if let Some(ref mut transform) = self.transform {
-                    transform.translation = transform.translation.lerp(keyframes[0], weight);
-                }
-            }
+        let Some(component) = reflect_component.reflect_mut(self.entity_mut.reborrow()) else {
+            return Err(AnimationEvaluationError::ComponentNotPresent);
+        };
 
-            Keyframes::Scale(keyframes) => {
-                if let Some(ref mut transform) = self.transform {
-                    transform.scale = transform.scale.lerp(keyframes[0], weight);
-                }
-            }
+        let component = component.into_inner();
+        let Ok(property) = curve
+            .keyframes
+            .path
+            .reflect_element_mut(component.as_partial_reflect_mut())
+        else {
+            return Err(AnimationEvaluationError::PropertyNotPresent);
+        };
 
-            Keyframes::Weights(keyframes) => {
-                let Some(ref mut morphs) = self.morph_weights else {
-                    error!(
-                        "Tried to animate morphs on {:?} ({:?}), but no `MorphWeights` was found",
-                        self.entity, self.name,
-                    );
-                    return;
-                };
+        let type_id = property.get_represented_type_info().unwrap().type_id();
+        let Some(reflect_animatable) = type_registry.get_type_data::<ReflectAnimatable>(type_id)
+        else {
+            return Err(AnimationEvaluationError::PropertyTypeNotAnimatable);
+        };
 
-                let target_count = morphs.weights().len();
-                lerp_morph_weights(
-                    morphs.weights_mut(),
-                    get_keyframe(target_count, keyframes, 0).iter().copied(),
-                    weight,
-                );
-            }
-        }
+        reflect_animatable.interpolate_keyframe(
+            property,
+            curve.keyframes.keyframes.try_as_reflect().unwrap(),
+            weight,
+        )
     }
 
     fn apply_tweened_keyframe(
@@ -1000,220 +1165,42 @@ impl AnimationTargetContext<'_> {
         lerp: f32,
         weight: f32,
         duration: f32,
-    ) {
-        match (&curve.interpolation, &curve.keyframes) {
-            (Interpolation::Step, Keyframes::Rotation(keyframes)) => {
-                if let Some(ref mut transform) = self.transform {
-                    transform.rotation = transform.rotation.slerp(keyframes[step_start], weight);
-                }
-            }
+        type_registry: &TypeRegistry,
+    ) -> Result<(), AnimationEvaluationError> {
+        let Some(reflect_component) =
+            type_registry.get_type_data::<ReflectComponent>(curve.keyframes.component)
+        else {
+            return Err(AnimationEvaluationError::ComponentTypeNotReflectable);
+        };
 
-            (Interpolation::Linear, Keyframes::Rotation(keyframes)) => {
-                let Some(ref mut transform) = self.transform else {
-                    return;
-                };
+        let Some(component) = reflect_component.reflect_mut(self.entity_mut.reborrow()) else {
+            return Err(AnimationEvaluationError::ComponentNotPresent);
+        };
 
-                let rot_start = keyframes[step_start];
-                let rot_end = keyframes[step_start + 1];
+        let component = component.into_inner();
+        let Ok(property) = curve
+            .keyframes
+            .path
+            .reflect_element_mut(component.as_partial_reflect_mut())
+        else {
+            return Err(AnimationEvaluationError::PropertyNotPresent);
+        };
 
-                // Rotations are using a spherical linear interpolation
-                let rot = rot_start.slerp(rot_end, lerp);
-                transform.rotation = transform.rotation.slerp(rot, weight);
-            }
+        let type_id = property.get_represented_type_info().unwrap().type_id();
+        let reflect_animatable = type_registry
+            .get_type_data::<ReflectAnimatable>(type_id)
+            .unwrap();
 
-            (Interpolation::CubicSpline, Keyframes::Rotation(keyframes)) => {
-                let Some(ref mut transform) = self.transform else {
-                    return;
-                };
-
-                let value_start = keyframes[step_start * 3 + 1];
-                let tangent_out_start = keyframes[step_start * 3 + 2];
-                let tangent_in_end = keyframes[(step_start + 1) * 3];
-                let value_end = keyframes[(step_start + 1) * 3 + 1];
-                let result = cubic_spline_interpolation(
-                    value_start,
-                    tangent_out_start,
-                    tangent_in_end,
-                    value_end,
-                    lerp,
-                    duration,
-                );
-                transform.rotation = transform.rotation.slerp(result.normalize(), weight);
-            }
-
-            (Interpolation::Step, Keyframes::Translation(keyframes)) => {
-                if let Some(ref mut transform) = self.transform {
-                    transform.translation =
-                        transform.translation.lerp(keyframes[step_start], weight);
-                }
-            }
-
-            (Interpolation::Linear, Keyframes::Translation(keyframes)) => {
-                let Some(ref mut transform) = self.transform else {
-                    return;
-                };
-
-                let translation_start = keyframes[step_start];
-                let translation_end = keyframes[step_start + 1];
-                let result = translation_start.lerp(translation_end, lerp);
-                transform.translation = transform.translation.lerp(result, weight);
-            }
-
-            (Interpolation::CubicSpline, Keyframes::Translation(keyframes)) => {
-                let Some(ref mut transform) = self.transform else {
-                    return;
-                };
-
-                let value_start = keyframes[step_start * 3 + 1];
-                let tangent_out_start = keyframes[step_start * 3 + 2];
-                let tangent_in_end = keyframes[(step_start + 1) * 3];
-                let value_end = keyframes[(step_start + 1) * 3 + 1];
-                let result = cubic_spline_interpolation(
-                    value_start,
-                    tangent_out_start,
-                    tangent_in_end,
-                    value_end,
-                    lerp,
-                    duration,
-                );
-                transform.translation = transform.translation.lerp(result, weight);
-            }
-
-            (Interpolation::Step, Keyframes::Scale(keyframes)) => {
-                if let Some(ref mut transform) = self.transform {
-                    transform.scale = transform.scale.lerp(keyframes[step_start], weight);
-                }
-            }
-
-            (Interpolation::Linear, Keyframes::Scale(keyframes)) => {
-                let Some(ref mut transform) = self.transform else {
-                    return;
-                };
-
-                let scale_start = keyframes[step_start];
-                let scale_end = keyframes[step_start + 1];
-                let result = scale_start.lerp(scale_end, lerp);
-                transform.scale = transform.scale.lerp(result, weight);
-            }
-
-            (Interpolation::CubicSpline, Keyframes::Scale(keyframes)) => {
-                let Some(ref mut transform) = self.transform else {
-                    return;
-                };
-
-                let value_start = keyframes[step_start * 3 + 1];
-                let tangent_out_start = keyframes[step_start * 3 + 2];
-                let tangent_in_end = keyframes[(step_start + 1) * 3];
-                let value_end = keyframes[(step_start + 1) * 3 + 1];
-                let result = cubic_spline_interpolation(
-                    value_start,
-                    tangent_out_start,
-                    tangent_in_end,
-                    value_end,
-                    lerp,
-                    duration,
-                );
-                transform.scale = transform.scale.lerp(result, weight);
-            }
-
-            (Interpolation::Step, Keyframes::Weights(keyframes)) => {
-                let Some(ref mut morphs) = self.morph_weights else {
-                    return;
-                };
-
-                let target_count = morphs.weights().len();
-                let morph_start = get_keyframe(target_count, keyframes, step_start);
-                lerp_morph_weights(morphs.weights_mut(), morph_start.iter().copied(), weight);
-            }
-
-            (Interpolation::Linear, Keyframes::Weights(keyframes)) => {
-                let Some(ref mut morphs) = self.morph_weights else {
-                    return;
-                };
-
-                let target_count = morphs.weights().len();
-                let morph_start = get_keyframe(target_count, keyframes, step_start);
-                let morph_end = get_keyframe(target_count, keyframes, step_start + 1);
-                let result = morph_start
-                    .iter()
-                    .zip(morph_end)
-                    .map(|(a, b)| a.lerp(*b, lerp));
-                lerp_morph_weights(morphs.weights_mut(), result, weight);
-            }
-
-            (Interpolation::CubicSpline, Keyframes::Weights(keyframes)) => {
-                let Some(ref mut morphs) = self.morph_weights else {
-                    return;
-                };
-
-                let target_count = morphs.weights().len();
-                let morph_start = get_keyframe(target_count, keyframes, step_start * 3 + 1);
-                let tangents_out_start = get_keyframe(target_count, keyframes, step_start * 3 + 2);
-                let tangents_in_end = get_keyframe(target_count, keyframes, (step_start + 1) * 3);
-                let morph_end = get_keyframe(target_count, keyframes, (step_start + 1) * 3 + 1);
-                let result = morph_start
-                    .iter()
-                    .zip(tangents_out_start)
-                    .zip(tangents_in_end)
-                    .zip(morph_end)
-                    .map(
-                        |(((&value_start, &tangent_out_start), &tangent_in_end), &value_end)| {
-                            cubic_spline_interpolation(
-                                value_start,
-                                tangent_out_start,
-                                tangent_in_end,
-                                value_end,
-                                lerp,
-                                duration,
-                            )
-                        },
-                    );
-                lerp_morph_weights(morphs.weights_mut(), result, weight);
-            }
-        }
+        reflect_animatable.interpolate_keyframes(
+            property,
+            curve.keyframes.keyframes.try_as_reflect().unwrap(),
+            curve.interpolation,
+            step_start,
+            lerp,
+            weight,
+            duration,
+        )
     }
-}
-
-/// Update `weights` based on weights in `keyframe` with a linear interpolation
-/// on `key_lerp`.
-fn lerp_morph_weights(weights: &mut [f32], keyframe: impl Iterator<Item = f32>, key_lerp: f32) {
-    let zipped = weights.iter_mut().zip(keyframe);
-    for (morph_weight, keyframe) in zipped {
-        *morph_weight = morph_weight.lerp(keyframe, key_lerp);
-    }
-}
-
-/// Extract a keyframe from a list of keyframes by index.
-///
-/// # Panics
-///
-/// When `key_index * target_count` is larger than `keyframes`
-///
-/// This happens when `keyframes` is not formatted as described in
-/// [`Keyframes::Weights`]. A possible cause is [`AnimationClip`] not being
-/// meant to be used for the [`MorphWeights`] of the entity it's being applied to.
-fn get_keyframe(target_count: usize, keyframes: &[f32], key_index: usize) -> &[f32] {
-    let start = target_count * key_index;
-    let end = target_count * (key_index + 1);
-    &keyframes[start..end]
-}
-
-/// Helper function for cubic spline interpolation.
-fn cubic_spline_interpolation<T>(
-    value_start: T,
-    tangent_out_start: T,
-    tangent_in_end: T,
-    value_end: T,
-    lerp: f32,
-    step_duration: f32,
-) -> T
-where
-    T: Mul<f32, Output = T> + Add<Output = T>,
-{
-    value_start * (2.0 * lerp.powi(3) - 3.0 * lerp.powi(2) + 1.0)
-        + tangent_out_start * (step_duration) * (lerp.powi(3) - 2.0 * lerp.powi(2) + lerp)
-        + value_end * (-2.0 * lerp.powi(3) + 3.0 * lerp.powi(2))
-        + tangent_in_end * step_duration * (lerp.powi(3) - lerp.powi(2))
 }
 
 /// Adds animation support to an app
@@ -1222,15 +1209,40 @@ pub struct AnimationPlugin;
 
 impl Plugin for AnimationPlugin {
     fn build(&self, app: &mut App) {
+        {
+            let type_registry = app.world_mut().resource::<AppTypeRegistry>();
+            let mut type_registry = type_registry.write();
+            if let Some(morph_weights_type_data) =
+                type_registry.get_mut(TypeId::of::<MorphWeights>())
+            {
+                morph_weights_type_data.insert(MORPH_WEIGHTS_REFLECT_ANIMATABLE.clone());
+            }
+        }
+
         app.init_asset::<AnimationClip>()
             .init_asset::<AnimationGraph>()
             .init_asset_loader::<AnimationGraphAssetLoader>()
+            .init_resource::<AnimatedComponents>()
             .register_asset_reflect::<AnimationClip>()
             .register_asset_reflect::<AnimationGraph>()
             .register_type::<AnimationPlayer>()
             .register_type::<AnimationTarget>()
             .register_type::<AnimationTransitions>()
             .register_type::<NodeIndex>()
+            .register_type_data::<f32, ReflectAnimatable>()
+            .register_type_data::<Vec2, ReflectAnimatable>()
+            .register_type_data::<Vec3A, ReflectAnimatable>()
+            .register_type_data::<Vec4, ReflectAnimatable>()
+            .register_type_data::<f64, ReflectAnimatable>()
+            .register_type_data::<LinearRgba, ReflectAnimatable>()
+            .register_type_data::<Laba, ReflectAnimatable>()
+            .register_type_data::<Oklaba, ReflectAnimatable>()
+            .register_type_data::<Srgba, ReflectAnimatable>()
+            .register_type_data::<Xyza, ReflectAnimatable>()
+            .register_type_data::<Vec3, ReflectAnimatable>()
+            .register_type_data::<bool, ReflectAnimatable>()
+            .register_type_data::<Transform, ReflectAnimatable>()
+            .register_type_data::<Quat, ReflectAnimatable>()
             .add_systems(
                 PostUpdate,
                 (
@@ -1240,7 +1252,12 @@ impl Plugin for AnimationPlugin {
                     expire_completed_transitions,
                 )
                     .chain()
-                    .before(TransformSystem::TransformPropagate),
+                    .before(TransformSystem::TransformPropagate)
+                    .before(UiSystem::Prepare),
+            )
+            .add_systems(
+                PostUpdate,
+                update_animated_components.before(animate_targets),
             );
     }
 }
@@ -1310,7 +1327,7 @@ mod tests {
 
         let variable_curve = VariableCurve {
             keyframe_timestamps,
-            keyframes: crate::Keyframes::Translation(keyframes),
+            keyframes: crate::Keyframes::translation(keyframes),
             interpolation,
         };
 

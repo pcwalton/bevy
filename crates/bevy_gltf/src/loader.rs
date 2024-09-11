@@ -263,7 +263,7 @@ async fn load_gltf<'a, 'b, 'c>(
 
     #[cfg(feature = "bevy_animation")]
     let (animations, named_animations, animation_roots) = {
-        use bevy_animation::{Interpolation, Keyframes};
+        use bevy_animation::{prelude::Keyframes, Interpolation};
         use gltf::animation::util::ReadOutputs;
         let mut animations = vec![];
         let mut named_animations = HashMap::default();
@@ -294,16 +294,16 @@ async fn load_gltf<'a, 'b, 'c>(
                 let keyframes = if let Some(outputs) = reader.read_outputs() {
                     match outputs {
                         ReadOutputs::Translations(tr) => {
-                            Keyframes::Translation(tr.map(Vec3::from).collect())
+                            Keyframes::translation(tr.map(Vec3::from).collect())
                         }
-                        ReadOutputs::Rotations(rots) => Keyframes::Rotation(
+                        ReadOutputs::Rotations(rots) => Keyframes::rotation(
                             rots.into_f32().map(bevy_math::Quat::from_array).collect(),
                         ),
                         ReadOutputs::Scales(scale) => {
-                            Keyframes::Scale(scale.map(Vec3::from).collect())
+                            Keyframes::scale(scale.map(Vec3::from).collect())
                         }
                         ReadOutputs::MorphTargetWeights(weights) => {
-                            Keyframes::Weights(weights.into_f32().collect())
+                            Keyframes::weights(weights.into_f32().collect())
                         }
                     }
                 } else {
