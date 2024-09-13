@@ -12,7 +12,7 @@ use crate::{
 };
 use bevy_ptr::{ThinSlicePtr, UnsafeCellDeref};
 use bevy_utils::all_tuples;
-use std::{cell::UnsafeCell, marker::PhantomData};
+use std::{cell::UnsafeCell, marker::PhantomData, sync::Arc};
 
 /// Types that can be fetched from a [`World`] using a [`Query`].
 ///
@@ -597,7 +597,7 @@ unsafe impl<'a> QueryData for EntityMut<'a> {
 
 /// SAFETY: The accesses of `Self::ReadOnly` are a subset of the accesses of `Self`
 unsafe impl<'a> WorldQuery for FilteredEntityRef<'a> {
-    type Fetch<'w> = (UnsafeWorldCell<'w>, Access<ComponentId>);
+    type Fetch<'w> = (UnsafeWorldCell<'w>, Arc<Access<ComponentId>>);
     type Item<'w> = FilteredEntityRef<'w>;
     type State = FilteredAccess<ComponentId>;
 
@@ -619,7 +619,7 @@ unsafe impl<'a> WorldQuery for FilteredEntityRef<'a> {
     ) -> Self::Fetch<'w> {
         let mut access = Access::default();
         access.read_all_components();
-        (world, access)
+        (world, Arc::new(access))
     }
 
     #[inline]
@@ -635,7 +635,7 @@ unsafe impl<'a> WorldQuery for FilteredEntityRef<'a> {
                 access.add_component_read(id);
             }
         });
-        fetch.1 = access;
+        fetch.1 = Arc::new(access);
     }
 
     #[inline]
@@ -646,7 +646,7 @@ unsafe impl<'a> WorldQuery for FilteredEntityRef<'a> {
                 access.add_component_read(id);
             }
         });
-        fetch.1 = access;
+        fetch.1 = Arc::new(access);
     }
 
     #[inline]
@@ -704,7 +704,7 @@ unsafe impl ReadOnlyQueryData for FilteredEntityRef<'_> {}
 
 /// SAFETY: The accesses of `Self::ReadOnly` are a subset of the accesses of `Self`
 unsafe impl<'a> WorldQuery for FilteredEntityMut<'a> {
-    type Fetch<'w> = (UnsafeWorldCell<'w>, Access<ComponentId>);
+    type Fetch<'w> = (UnsafeWorldCell<'w>, Arc<Access<ComponentId>>);
     type Item<'w> = FilteredEntityMut<'w>;
     type State = FilteredAccess<ComponentId>;
 
@@ -726,7 +726,7 @@ unsafe impl<'a> WorldQuery for FilteredEntityMut<'a> {
     ) -> Self::Fetch<'w> {
         let mut access = Access::default();
         access.write_all_components();
-        (world, access)
+        (world, Arc::new(access))
     }
 
     #[inline]
@@ -747,7 +747,7 @@ unsafe impl<'a> WorldQuery for FilteredEntityMut<'a> {
                 access.add_component_write(id);
             }
         });
-        fetch.1 = access;
+        fetch.1 = Arc::new(access);
     }
 
     #[inline]
@@ -763,7 +763,7 @@ unsafe impl<'a> WorldQuery for FilteredEntityMut<'a> {
                 access.add_component_write(id);
             }
         });
-        fetch.1 = access;
+        fetch.1 = Arc::new(access);
     }
 
     #[inline]

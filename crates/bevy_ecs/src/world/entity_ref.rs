@@ -13,7 +13,7 @@ use crate::{
     world::{DeferredWorld, Mut, World},
 };
 use bevy_ptr::{OwningPtr, Ptr};
-use std::{any::TypeId, marker::PhantomData};
+use std::{any::TypeId, marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
 use super::{unsafe_world_cell::UnsafeEntityCell, Ref, ON_REMOVE, ON_REPLACE};
@@ -1895,7 +1895,7 @@ impl<'w, 'a, T: Component> VacantEntry<'w, 'a, T> {
 #[derive(Clone)]
 pub struct FilteredEntityRef<'w> {
     entity: UnsafeEntityCell<'w>,
-    access: Access<ComponentId>,
+    access: Arc<Access<ComponentId>>,
 }
 
 impl<'w> FilteredEntityRef<'w> {
@@ -1904,7 +1904,10 @@ impl<'w> FilteredEntityRef<'w> {
     /// - If `access` takes read access to a component no mutable reference to that
     ///     component can exist at the same time as the returned [`FilteredEntityMut`]
     /// - If `access` takes any access for a component `entity` must have that component.
-    pub(crate) unsafe fn new(entity: UnsafeEntityCell<'w>, access: Access<ComponentId>) -> Self {
+    pub(crate) unsafe fn new(
+        entity: UnsafeEntityCell<'w>,
+        access: Arc<Access<ComponentId>>,
+    ) -> Self {
         Self { entity, access }
     }
 
@@ -2070,7 +2073,7 @@ impl<'a> From<EntityRef<'a>> for FilteredEntityRef<'a> {
         unsafe {
             let mut access = Access::default();
             access.read_all();
-            FilteredEntityRef::new(entity.0, access)
+            FilteredEntityRef::new(entity.0, Arc::new(access))
         }
     }
 }
@@ -2082,7 +2085,7 @@ impl<'a> From<&'a EntityRef<'_>> for FilteredEntityRef<'a> {
         unsafe {
             let mut access = Access::default();
             access.read_all();
-            FilteredEntityRef::new(entity.0, access)
+            FilteredEntityRef::new(entity.0, Arc::new(access))
         }
     }
 }
@@ -2094,7 +2097,7 @@ impl<'a> From<EntityMut<'a>> for FilteredEntityRef<'a> {
         unsafe {
             let mut access = Access::default();
             access.read_all();
-            FilteredEntityRef::new(entity.0, access)
+            FilteredEntityRef::new(entity.0, Arc::new(access))
         }
     }
 }
@@ -2106,7 +2109,7 @@ impl<'a> From<&'a EntityMut<'_>> for FilteredEntityRef<'a> {
         unsafe {
             let mut access = Access::default();
             access.read_all();
-            FilteredEntityRef::new(entity.0, access)
+            FilteredEntityRef::new(entity.0, Arc::new(access))
         }
     }
 }
@@ -2118,7 +2121,7 @@ impl<'a> From<EntityWorldMut<'a>> for FilteredEntityRef<'a> {
         unsafe {
             let mut access = Access::default();
             access.read_all();
-            FilteredEntityRef::new(entity.into_unsafe_entity_cell(), access)
+            FilteredEntityRef::new(entity.into_unsafe_entity_cell(), Arc::new(access))
         }
     }
 }
@@ -2130,7 +2133,7 @@ impl<'a> From<&'a EntityWorldMut<'_>> for FilteredEntityRef<'a> {
         unsafe {
             let mut access = Access::default();
             access.read_all();
-            FilteredEntityRef::new(entity.as_unsafe_entity_cell_readonly(), access)
+            FilteredEntityRef::new(entity.as_unsafe_entity_cell_readonly(), Arc::new(access))
         }
     }
 }
@@ -2138,7 +2141,7 @@ impl<'a> From<&'a EntityWorldMut<'_>> for FilteredEntityRef<'a> {
 /// Provides mutable access to a single entity and some of its components defined by the contained [`Access`].
 pub struct FilteredEntityMut<'w> {
     entity: UnsafeEntityCell<'w>,
-    access: Access<ComponentId>,
+    access: Arc<Access<ComponentId>>,
 }
 
 impl<'w> FilteredEntityMut<'w> {
@@ -2149,7 +2152,10 @@ impl<'w> FilteredEntityMut<'w> {
     /// - If `access` takes write access to a component, no reference to that component
     ///     may exist at the same time as the returned [`FilteredEntityMut`]
     /// - If `access` takes any access for a component `entity` must have that component.
-    pub(crate) unsafe fn new(entity: UnsafeEntityCell<'w>, access: Access<ComponentId>) -> Self {
+    pub(crate) unsafe fn new(
+        entity: UnsafeEntityCell<'w>,
+        access: Arc<Access<ComponentId>>,
+    ) -> Self {
         Self { entity, access }
     }
 
@@ -2331,7 +2337,7 @@ impl<'a> From<EntityMut<'a>> for FilteredEntityMut<'a> {
             let mut access = Access::default();
             access.read_all();
             access.write_all();
-            FilteredEntityMut::new(entity.0, access)
+            FilteredEntityMut::new(entity.0, Arc::new(access))
         }
     }
 }
@@ -2344,7 +2350,7 @@ impl<'a> From<&'a mut EntityMut<'_>> for FilteredEntityMut<'a> {
             let mut access = Access::default();
             access.read_all();
             access.write_all();
-            FilteredEntityMut::new(entity.0, access)
+            FilteredEntityMut::new(entity.0, Arc::new(access))
         }
     }
 }
@@ -2357,7 +2363,7 @@ impl<'a> From<EntityWorldMut<'a>> for FilteredEntityMut<'a> {
             let mut access = Access::default();
             access.read_all();
             access.write_all();
-            FilteredEntityMut::new(entity.into_unsafe_entity_cell(), access)
+            FilteredEntityMut::new(entity.into_unsafe_entity_cell(), Arc::new(access))
         }
     }
 }
@@ -2370,7 +2376,7 @@ impl<'a> From<&'a mut EntityWorldMut<'_>> for FilteredEntityMut<'a> {
             let mut access = Access::default();
             access.read_all();
             access.write_all();
-            FilteredEntityMut::new(entity.as_unsafe_entity_cell(), access)
+            FilteredEntityMut::new(entity.as_unsafe_entity_cell(), Arc::new(access))
         }
     }
 }
