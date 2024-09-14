@@ -1075,16 +1075,63 @@ fn do_animate_targets(
             let weight = active_animation.computed_weight;
             total_weight += weight;
 
-            AnimationTargetContext::apply(
+            /*AnimationTargetContext::apply(
                 entity_mut.reborrow(),
                 curves,
                 weight / total_weight,
                 active_animation.seek_time,
-            );
+            );*/
+
+            let weight = weight / total_weight;
+            let seek_time = active_animation.seek_time;
+
+            for curve in curves {
+                //let mut entity_mut = entity_mut.reborrow();
+
+                // Some curves have only one keyframe used to set a transform
+                if curve.keyframe_timestamps.len() == 1 {
+                    match curve.keyframes.apply_single_keyframe(entity_mut, weight) {
+                        Err(err) => {
+                            panic!("Animation application failed: {:?}", err);
+                        }
+                        Ok(entity_again) => {
+                            entity_mut = entity_again;
+                        }
+                    };
+
+                    continue;
+                }
+
+                // Find the best keyframe to interpolate from
+                let step_start = curve.find_interpolation_start_keyframe(seek_time);
+
+                let timestamp_start = curve.keyframe_timestamps[step_start];
+                let timestamp_end = curve.keyframe_timestamps[step_start + 1];
+                // Compute how far we are through the keyframe, normalized to [0, 1]
+                let lerp =
+                    f32::inverse_lerp(timestamp_start, timestamp_end, seek_time).clamp(0.0, 1.0);
+
+                match curve.keyframes.apply_tweened_keyframes(
+                    entity_mut,
+                    curve.interpolation,
+                    step_start,
+                    lerp,
+                    weight,
+                    timestamp_end - timestamp_start,
+                ) {
+                    Err(err) => {
+                        panic!("Animation application failed: {:?}", err);
+                    }
+                    Ok(entity_again) => {
+                        entity_mut = entity_again;
+                    }
+                }
+            }
         }
     });
 }
 
+/*
 impl AnimationTargetContext {
     /// Applies a clip to a single animation target according to the
     /// [`AnimationTargetContext`].
@@ -1129,6 +1176,7 @@ impl AnimationTargetContext {
         }
     }
 }
+    */
 
 /// Adds animation support to an app
 #[derive(Default)]

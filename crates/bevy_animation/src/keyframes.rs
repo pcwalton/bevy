@@ -80,21 +80,21 @@ pub trait Keyframes: Debug + Send + Sync {
 
     fn keyframe_count(&self) -> usize;
 
-    fn apply_single_keyframe<'a: 'b, 'b>(
+    fn apply_single_keyframe<'a>(
         &self,
-        entity: &'a mut FilteredEntityMut<'b>,
+        entity: FilteredEntityMut<'a>,
         weight: f32,
-    ) -> Result<(), AnimationEvaluationError>;
+    ) -> Result<FilteredEntityMut<'a>, AnimationEvaluationError>;
 
-    fn apply_tweened_keyframes<'a: 'b, 'b>(
+    fn apply_tweened_keyframes<'a>(
         &self,
-        entity: &'a mut FilteredEntityMut<'b>,
+        entity: FilteredEntityMut<'a>,
         interpolation: Interpolation,
         step_start: usize,
         time: f32,
         weight: f32,
         duration: f32,
-    ) -> Result<(), AnimationEvaluationError>;
+    ) -> Result<FilteredEntityMut<'a>, AnimationEvaluationError>;
 }
 
 #[derive(Clone, Debug, Deref, DerefMut)]
@@ -470,11 +470,11 @@ where
         self.len()
     }
 
-    fn apply_single_keyframe<'a: 'b, 'b>(
+    fn apply_single_keyframe<'a>(
         &self,
-        entity: &'a mut FilteredEntityMut<'b>,
+        mut entity: FilteredEntityMut<'a>,
         weight: f32,
-    ) -> Result<(), AnimationEvaluationError> {
+    ) -> Result<FilteredEntityMut<'a>, AnimationEvaluationError> {
         let mut component = entity
             .get_mut::<P::Component>()
             .ok_or(AnimationEvaluationError::ComponentNotPresent)?;
@@ -484,18 +484,18 @@ where
             .first()
             .ok_or(AnimationEvaluationError::KeyframeNotPresent)?;
         <P::Property>::interpolate(property, value, weight);
-        Ok(())
+        Ok(entity)
     }
 
-    fn apply_tweened_keyframes<'a: 'b, 'b>(
+    fn apply_tweened_keyframes<'a>(
         &self,
-        entity: &'a mut FilteredEntityMut<'b>,
+        mut entity: FilteredEntityMut<'a>,
         interpolation: Interpolation,
         step_start: usize,
         time: f32,
         weight: f32,
         duration: f32,
-    ) -> Result<(), AnimationEvaluationError> {
+    ) -> Result<FilteredEntityMut<'a>, AnimationEvaluationError> {
         let mut component = entity
             .get_mut::<P::Component>()
             .ok_or(AnimationEvaluationError::ComponentNotPresent)?;
@@ -509,7 +509,8 @@ where
             time,
             weight,
             duration,
-        )
+        )?;
+        Ok(entity)
     }
 }
 
@@ -576,6 +577,7 @@ impl Keyframes for MorphWeightsKeyframes {
         self.weights.len() / self.morph_target_count
     }
 
+    /*
     fn apply_single_keyframe<'a: 'b, 'b>(
         &self,
         entity: &'a mut FilteredEntityMut<'b>,
@@ -624,6 +626,26 @@ impl Keyframes for MorphWeightsKeyframes {
         }
 
         Ok(())
+    }*/
+
+    fn apply_single_keyframe<'a>(
+        &self,
+        entity: FilteredEntityMut<'a>,
+        weight: f32,
+    ) -> Result<FilteredEntityMut<'a>, AnimationEvaluationError> {
+        todo!()
+    }
+
+    fn apply_tweened_keyframes<'a>(
+        &self,
+        entity: FilteredEntityMut<'a>,
+        interpolation: Interpolation,
+        step_start: usize,
+        time: f32,
+        weight: f32,
+        duration: f32,
+    ) -> Result<FilteredEntityMut<'a>, AnimationEvaluationError> {
+        todo!()
     }
 }
 
