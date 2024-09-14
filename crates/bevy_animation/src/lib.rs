@@ -46,7 +46,6 @@ use bevy_utils::{
 use fixedbitset::FixedBitSet;
 use graph::AnimationMask;
 use petgraph::{graph::NodeIndex, Direction};
-use prelude::{ReflectAnimatable, MORPH_WEIGHTS_REFLECT_ANIMATABLE};
 use serde::{Deserialize, Serialize};
 use thread_local::ThreadLocal;
 use uuid::Uuid;
@@ -76,7 +75,8 @@ pub static ANIMATION_TARGET_NAMESPACE: Uuid = Uuid::from_u128(0x3179f519d9274ff2
 /// Describes how an attribute of a [`Transform`] or [`MorphWeights`] should be animated.
 ///
 /// `keyframe_timestamps` and `keyframes` should have the same length.
-#[derive(Reflect, Clone, Debug)]
+#[derive(Reflect, Debug)]
+#[reflect(from_reflect = false)]
 pub struct VariableCurve {
     /// Timestamp for each of the keyframes.
     pub keyframe_timestamps: Vec<f32>,
@@ -87,9 +87,20 @@ pub struct VariableCurve {
     /// - for `Interpolation::Step` and `Interpolation::Linear`, each keyframe is a single value
     /// - for `Interpolation::CubicSpline`, each keyframe is made of three values for `tangent_in`,
     ///     `keyframe_value` and `tangent_out`
-    pub keyframes: Keyframes,
+    #[reflect(ignore)]
+    pub keyframes: Box<dyn Keyframes>,
     /// Interpolation method to use between keyframes.
     pub interpolation: Interpolation,
+}
+
+impl Clone for VariableCurve {
+    fn clone(&self) -> Self {
+        VariableCurve {
+            keyframe_timestamps: self.keyframe_timestamps.clone(),
+            keyframes: self.keyframes.clone_value(),
+            interpolation: self.interpolation.clone(),
+        }
+    }
 }
 
 impl VariableCurve {
@@ -177,7 +188,9 @@ pub enum Interpolation {
 /// Because animation clips refer to targets by UUID, they can target any
 /// [`AnimationTarget`] with that ID.
 #[derive(Asset, Reflect, Clone, Debug, Default)]
+#[reflect(from_reflect = false)]
 pub struct AnimationClip {
+    #[reflect(ignore)]
     curves: AnimationCurves,
     duration: f32,
 }
@@ -633,9 +646,7 @@ impl Clone for AnimationPlayer {
 
 /// The components that we might need to read or write during animation of each
 /// animation target.
-struct AnimationTargetContext<'a> {
-    entity_mut: FilteredEntityMut<'a>,
-}
+struct AnimationTargetContext;
 
 /// Information needed during the traversal of the animation graph in
 /// [`advance_animations`].
@@ -916,7 +927,7 @@ pub fn update_animated_components(
 
         for curves in animation_clip.curves.values() {
             for curve in curves {
-                animated_components.insert(curve.keyframes.component);
+                animated_components.insert(curve.keyframes.get_component_type_id());
             }
         }
     }
@@ -934,7 +945,6 @@ pub fn animate_targets(world: &mut World) {
     let system = (
         ParamBuilder::resource::<Assets<AnimationClip>>(),
         ParamBuilder::resource::<Assets<AnimationGraph>>(),
-        ParamBuilder::resource::<AppTypeRegistry>(),
         QueryParamBuilder::new(|builder| {
             // This is a read-only query of animation players and graphs.
             // Parallel animation target evaluation reads from this query.
@@ -982,16 +992,13 @@ pub fn animate_targets(world: &mut World) {
 fn do_animate_targets(
     clips: Res<Assets<AnimationClip>>,
     graphs: Res<Assets<AnimationGraph>>,
-    app_type_registry: Res<AppTypeRegistry>,
     players: Query<(&AnimationPlayer, &Handle<AnimationGraph>)>,
     mut targets: Query<FilteredEntityMut>,
 ) {
     let _span = info_span!("", "do_animate_targets");
 
-    let type_registry = app_type_registry.read();
-
     // Evaluate all animation targets in parallel.
-    targets.par_iter_mut().for_each(|entity_mut| {
+    targets.par_iter_mut().for_each(|mut entity_mut| {
         let Some(&AnimationTarget {
             id: target_id,
             player: player_id,
@@ -1025,8 +1032,6 @@ fn do_animate_targets(
             .get(&target_id)
             .cloned()
             .unwrap_or_default();
-
-        let mut target_context = AnimationTargetContext { entity_mut };
 
         // Apply the animations one after another. The way we accumulate
         // weights ensures that the order we apply them in doesn't matter.
@@ -1070,30 +1075,34 @@ fn do_animate_targets(
             let weight = active_animation.computed_weight;
             total_weight += weight;
 
-            target_context.apply(
+            AnimationTargetContext::apply(
+                entity_mut.reborrow(),
                 curves,
                 weight / total_weight,
                 active_animation.seek_time,
-                &type_registry,
             );
         }
     });
 }
 
-impl AnimationTargetContext<'_> {
+impl AnimationTargetContext {
     /// Applies a clip to a single animation target according to the
     /// [`AnimationTargetContext`].
     fn apply(
-        &mut self,
+        mut entity_mut: FilteredEntityMut,
         curves: &[VariableCurve],
         weight: f32,
         seek_time: f32,
-        type_registry: &TypeRegistry,
     ) {
         for curve in curves {
+            let mut entity_mut = entity_mut.reborrow();
+
             // Some curves have only one keyframe used to set a transform
             if curve.keyframe_timestamps.len() == 1 {
-                if let Err(err) = self.apply_single_keyframe(curve, weight, type_registry) {
+                if let Err(err) = curve
+                    .keyframes
+                    .apply_single_keyframe(&mut entity_mut, weight)
+                {
                     warn!("Animation application failed: {:?}", err);
                 }
                 continue;
@@ -1107,99 +1116,17 @@ impl AnimationTargetContext<'_> {
             // Compute how far we are through the keyframe, normalized to [0, 1]
             let lerp = f32::inverse_lerp(timestamp_start, timestamp_end, seek_time).clamp(0.0, 1.0);
 
-            if let Err(err) = self.apply_tweened_keyframe(
-                curve,
+            if let Err(err) = curve.keyframes.apply_tweened_keyframes(
+                &mut entity_mut,
+                curve.interpolation,
                 step_start,
                 lerp,
                 weight,
                 timestamp_end - timestamp_start,
-                type_registry,
             ) {
                 warn!("Animation application failed: {:?}", err);
             }
         }
-    }
-
-    fn apply_single_keyframe(
-        &mut self,
-        curve: &VariableCurve,
-        weight: f32,
-        type_registry: &TypeRegistry,
-    ) -> Result<(), AnimationEvaluationError> {
-        let Some(reflect_component) =
-            type_registry.get_type_data::<ReflectComponent>(curve.keyframes.component)
-        else {
-            return Err(AnimationEvaluationError::ComponentTypeNotReflectable);
-        };
-
-        let Some(component) = reflect_component.reflect_mut(self.entity_mut.reborrow()) else {
-            return Err(AnimationEvaluationError::ComponentNotPresent);
-        };
-
-        let component = component.into_inner();
-        let Ok(property) = curve
-            .keyframes
-            .path
-            .reflect_element_mut(component.as_partial_reflect_mut())
-        else {
-            return Err(AnimationEvaluationError::PropertyNotPresent);
-        };
-
-        let type_id = property.get_represented_type_info().unwrap().type_id();
-        let Some(reflect_animatable) = type_registry.get_type_data::<ReflectAnimatable>(type_id)
-        else {
-            return Err(AnimationEvaluationError::PropertyTypeNotAnimatable);
-        };
-
-        reflect_animatable.interpolate_keyframe(
-            property,
-            curve.keyframes.keyframes.try_as_reflect().unwrap(),
-            weight,
-        )
-    }
-
-    fn apply_tweened_keyframe(
-        &mut self,
-        curve: &VariableCurve,
-        step_start: usize,
-        lerp: f32,
-        weight: f32,
-        duration: f32,
-        type_registry: &TypeRegistry,
-    ) -> Result<(), AnimationEvaluationError> {
-        let Some(reflect_component) =
-            type_registry.get_type_data::<ReflectComponent>(curve.keyframes.component)
-        else {
-            return Err(AnimationEvaluationError::ComponentTypeNotReflectable);
-        };
-
-        let Some(component) = reflect_component.reflect_mut(self.entity_mut.reborrow()) else {
-            return Err(AnimationEvaluationError::ComponentNotPresent);
-        };
-
-        let component = component.into_inner();
-        let Ok(property) = curve
-            .keyframes
-            .path
-            .reflect_element_mut(component.as_partial_reflect_mut())
-        else {
-            return Err(AnimationEvaluationError::PropertyNotPresent);
-        };
-
-        let type_id = property.get_represented_type_info().unwrap().type_id();
-        let reflect_animatable = type_registry
-            .get_type_data::<ReflectAnimatable>(type_id)
-            .unwrap();
-
-        reflect_animatable.interpolate_keyframes(
-            property,
-            curve.keyframes.keyframes.try_as_reflect().unwrap(),
-            curve.interpolation,
-            step_start,
-            lerp,
-            weight,
-            duration,
-        )
     }
 }
 
@@ -1209,40 +1136,16 @@ pub struct AnimationPlugin;
 
 impl Plugin for AnimationPlugin {
     fn build(&self, app: &mut App) {
-        {
-            let type_registry = app.world_mut().resource::<AppTypeRegistry>();
-            let mut type_registry = type_registry.write();
-            if let Some(morph_weights_type_data) =
-                type_registry.get_mut(TypeId::of::<MorphWeights>())
-            {
-                morph_weights_type_data.insert(MORPH_WEIGHTS_REFLECT_ANIMATABLE.clone());
-            }
-        }
-
         app.init_asset::<AnimationClip>()
             .init_asset::<AnimationGraph>()
             .init_asset_loader::<AnimationGraphAssetLoader>()
             .init_resource::<AnimatedComponents>()
-            .register_asset_reflect::<AnimationClip>()
+            //.register_asset_reflect::<AnimationClip>()
             .register_asset_reflect::<AnimationGraph>()
             .register_type::<AnimationPlayer>()
             .register_type::<AnimationTarget>()
             .register_type::<AnimationTransitions>()
             .register_type::<NodeIndex>()
-            .register_type_data::<f32, ReflectAnimatable>()
-            .register_type_data::<Vec2, ReflectAnimatable>()
-            .register_type_data::<Vec3A, ReflectAnimatable>()
-            .register_type_data::<Vec4, ReflectAnimatable>()
-            .register_type_data::<f64, ReflectAnimatable>()
-            .register_type_data::<LinearRgba, ReflectAnimatable>()
-            .register_type_data::<Laba, ReflectAnimatable>()
-            .register_type_data::<Oklaba, ReflectAnimatable>()
-            .register_type_data::<Srgba, ReflectAnimatable>()
-            .register_type_data::<Xyza, ReflectAnimatable>()
-            .register_type_data::<Vec3, ReflectAnimatable>()
-            .register_type_data::<bool, ReflectAnimatable>()
-            .register_type_data::<Transform, ReflectAnimatable>()
-            .register_type_data::<Quat, ReflectAnimatable>()
             .add_systems(
                 PostUpdate,
                 (
@@ -1312,7 +1215,10 @@ impl AnimationGraphEvaluator {
 
 #[cfg(test)]
 mod tests {
-    use crate::VariableCurve;
+    use crate::{
+        prelude::{AnimatablePropertyKeyframes, Translation},
+        VariableCurve,
+    };
     use bevy_math::Vec3;
 
     fn test_variable_curve() -> VariableCurve {
@@ -1327,11 +1233,13 @@ mod tests {
 
         let variable_curve = VariableCurve {
             keyframe_timestamps,
-            keyframes: crate::Keyframes::translation(keyframes),
+            keyframes: Box::new(AnimatablePropertyKeyframes::<Translation>(keyframes)),
             interpolation,
         };
 
-        assert!(variable_curve.keyframe_timestamps.len() == variable_curve.keyframes.len());
+        assert!(
+            variable_curve.keyframe_timestamps.len() == variable_curve.keyframes.keyframe_count()
+        );
 
         // f32 doesn't impl Ord so we can't easily sort it
         let mut maybe_last_timestamp = None;
@@ -1427,7 +1335,7 @@ mod tests {
     #[test]
     fn exact_keyframe_matches_are_found_correctly() {
         let curve = test_variable_curve();
-        let second_last_keyframe = curve.keyframes.len() - 2;
+        let second_last_keyframe = curve.keyframes.keyframe_count() - 2;
 
         for i in 0..=second_last_keyframe {
             let seek_time = curve.keyframe_timestamps[i];
@@ -1441,7 +1349,7 @@ mod tests {
     fn exact_and_inexact_keyframes_correspond() {
         let curve = test_variable_curve();
 
-        let second_last_keyframe = curve.keyframes.len() - 2;
+        let second_last_keyframe = curve.keyframes.keyframe_count() - 2;
 
         for i in 0..=second_last_keyframe {
             let seek_time = curve.keyframe_timestamps[i];

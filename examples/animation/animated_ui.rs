@@ -48,7 +48,7 @@ impl AnimationInfo {
             animation_target_id,
             VariableCurve {
                 keyframe_timestamps: vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
-                keyframes: Keyframes {
+                keyframes: ReflectKeyframes {
                     component: TypeId::of::<Text>(),
                     path: ParsedPath::parse("sections[0].style.font_size")
                         .unwrap()
@@ -72,7 +72,7 @@ impl AnimationInfo {
             animation_target_id,
             VariableCurve {
                 keyframe_timestamps: vec![0.0, 1.0, 2.0, 3.0],
-                keyframes: Keyframes {
+                keyframes: ReflectKeyframes {
                     component: TypeId::of::<Text>(),
                     // The final `.0` is there to grab the `Srgba` value from the
                     // `Color` enum.
