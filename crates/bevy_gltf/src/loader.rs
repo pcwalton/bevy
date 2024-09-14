@@ -3,6 +3,9 @@ use crate::{
     GltfMeshExtras, GltfNode, GltfSceneExtras, GltfSkin,
 };
 
+use bevy_animation::prelude::{
+    AnimatablePropertyKeyframes, Keyframes, MorphWeightsKeyframes, Rotation, Scale, Translation,
+};
 #[cfg(feature = "bevy_animation")]
 use bevy_animation::{AnimationTarget, AnimationTargetId};
 use bevy_asset::{
@@ -263,7 +266,7 @@ async fn load_gltf<'a, 'b, 'c>(
 
     #[cfg(feature = "bevy_animation")]
     let (animations, named_animations, animation_roots) = {
-        use bevy_animation::{Interpolation, Keyframes};
+        use bevy_animation::Interpolation;
         use gltf::animation::util::ReadOutputs;
         let mut animations = vec![];
         let mut named_animations = HashMap::default();
@@ -294,16 +297,25 @@ async fn load_gltf<'a, 'b, 'c>(
                 let keyframes = if let Some(outputs) = reader.read_outputs() {
                     match outputs {
                         ReadOutputs::Translations(tr) => {
-                            Keyframes::Translation(tr.map(Vec3::from).collect())
+                            Box::new(AnimatablePropertyKeyframes::<Translation>(
+                                tr.map(Vec3::from).collect(),
+                            )) as Box<dyn Keyframes>
                         }
-                        ReadOutputs::Rotations(rots) => Keyframes::Rotation(
-                            rots.into_f32().map(bevy_math::Quat::from_array).collect(),
-                        ),
-                        ReadOutputs::Scales(scale) => {
-                            Keyframes::Scale(scale.map(Vec3::from).collect())
+                        ReadOutputs::Rotations(rots) => {
+                            Box::new(AnimatablePropertyKeyframes::<Rotation>(
+                                rots.into_f32().map(bevy_math::Quat::from_array).collect(),
+                            )) as Box<dyn Keyframes>
                         }
+                        ReadOutputs::Scales(scale) => Box::new(
+                            AnimatablePropertyKeyframes::<Scale>(scale.map(Vec3::from).collect()),
+                        )
+                            as Box<dyn Keyframes>,
                         ReadOutputs::MorphTargetWeights(weights) => {
-                            Keyframes::Weights(weights.into_f32().collect())
+                            let weights: Vec<_> = weights.into_f32().collect();
+                            Box::new(MorphWeightsKeyframes {
+                                morph_target_count: weights.len() / keyframe_timestamps.len(),
+                                weights,
+                            }) as Box<dyn Keyframes>
                         }
                     }
                 } else {

@@ -202,6 +202,7 @@ impl TypeInfo {
     }
 
     /// The [`TypeId`] of the underlying type.
+    #[inline]
     pub fn type_id(&self) -> TypeId {
         self.ty().id()
     }
@@ -354,6 +355,7 @@ impl Type {
     }
 
     /// Returns the [`TypeId`] of the type.
+    #[inline]
     pub fn id(&self) -> TypeId {
         self.type_id
     }
