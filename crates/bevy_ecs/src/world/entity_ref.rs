@@ -2165,6 +2165,7 @@ impl<'w> FilteredEntityMut<'w> {
     }
 
     /// Gets read-only access to all of the entity's components.
+    #[inline]
     pub fn as_readonly(&self) -> FilteredEntityRef<'_> {
         FilteredEntityRef::from(self)
     }
