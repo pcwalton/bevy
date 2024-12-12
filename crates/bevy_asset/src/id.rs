@@ -247,6 +247,27 @@ impl UntypedAssetId {
     }
 }
 
+impl From<UntypedAssetId> for [u64; 2] {
+    #[inline]
+    fn from(value: UntypedAssetId) -> Self {
+        match value {
+            UntypedAssetId::Index {
+                index: AssetIndex { generation, index },
+                ..
+            } => {
+                // The 7th byte of a UUID is the version field, which can never
+                // be 0xf in a valid UUID. Therefore we can safely use it
+                // without fear of collisions with UUID asset IDs.
+                [0x0000f000, ((generation as u64) << 32) | (index as u64)]
+            }
+            UntypedAssetId::Uuid { uuid, .. } => {
+                let (hi, lo) = uuid.as_u64_pair();
+                [hi, lo]
+            }
+        }
+    }
+}
+
 impl Display for UntypedAssetId {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut writer = f.debug_struct("UntypedAssetId");

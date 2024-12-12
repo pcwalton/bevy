@@ -338,15 +338,15 @@ fn queue_custom_mesh_pipeline(
                     batch_set_key: Opaque3dBatchSetKey {
                         draw_function: draw_function_id,
                         pipeline: pipeline_id,
-                        material_bind_group_index: None,
-                        vertex_slab: default(),
-                        index_slab: None,
-                        lightmap_slab: None,
+                        material_bind_group_index: !0,
+                        vertex_slab: !0,
+                        index_slab: !0,
+                        lightmap_slab: !0,
                     },
                     // The asset ID is arbitrary; we simply use [`AssetId::invalid`],
                     // but you can use anything you like. Note that the asset ID need
                     // not be the ID of a [`Mesh`].
-                    asset_id: AssetId::<Mesh>::invalid().untyped(),
+                    asset_id: AssetId::<Mesh>::invalid().untyped().into(),
                 },
                 (render_entity, visible_entity),
                 // This example supports batching, but if your pipeline doesn't

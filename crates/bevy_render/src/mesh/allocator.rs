@@ -154,6 +154,12 @@ pub struct MeshBufferSlice<'a> {
 #[repr(transparent)]
 pub struct SlabId(pub NonMaxU32);
 
+impl From<SlabId> for u32 {
+    fn from(value: SlabId) -> Self {
+        value.0.into()
+    }
+}
+
 /// Data for a single slab.
 #[allow(clippy::large_enum_variant)]
 enum Slab {
@@ -1025,5 +1031,13 @@ fn buffer_usages_to_str(buffer_usages: BufferUsages) -> &'static str {
         "index "
     } else {
         ""
+    }
+}
+
+#[inline]
+pub fn maybe_slab_id_to_u32(maybe_slab_id: Option<SlabId>) -> u32 {
+    match maybe_slab_id {
+        Some(slab_id) => slab_id.0.into(),
+        None => 0,
     }
 }

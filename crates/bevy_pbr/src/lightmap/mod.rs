@@ -513,3 +513,10 @@ impl From<LightmapSlotIndex> for u32 {
         value.0.get() as u32
     }
 }
+
+pub fn maybe_lightmap_slab_id_to_u32(maybe_lightmap_slab_id: Option<LightmapSlabIndex>) -> u32 {
+    match maybe_lightmap_slab_id {
+        Some(lightmap_slab_id) => lightmap_slab_id.0.into(),
+        None => !0,
+    }
+}

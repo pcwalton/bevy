@@ -32,7 +32,7 @@ use bevy_reflect::Reflect;
 use bevy_render::{
     camera::TemporalJitter,
     extract_resource::ExtractResource,
-    mesh::{Mesh3d, MeshVertexBufferLayoutRef, RenderMesh},
+    mesh::{allocator, Mesh3d, MeshVertexBufferLayoutRef, RenderMesh},
     render_asset::{PrepareAssetError, RenderAsset, RenderAssetPlugin, RenderAssets},
     render_phase::*,
     render_resource::*,
@@ -878,13 +878,12 @@ pub fn queue_material_meshes<M: Material>(
                             batch_set_key: Opaque3dBatchSetKey {
                                 draw_function: draw_opaque_pbr,
                                 pipeline: pipeline_id,
-                                material_bind_group_index: Some(material.binding.group.0),
-                                vertex_slab: vertex_slab.unwrap_or_default(),
-                                index_slab,
-                                lightmap_slab: lightmap_slab_index
-                                    .map(|lightmap_slab_index| *lightmap_slab_index),
+                                material_bind_group_index: material.binding.group.0,
+                                vertex_slab: allocator::maybe_slab_id_to_u32(vertex_slab),
+                                index_slab: allocator::maybe_slab_id_to_u32(index_slab),
+                                lightmap_slab: maybe_lightmap_slab_id_to_u32(lightmap_slab_index),
                             },
-                            asset_id: mesh_instance.mesh_asset_id.into(),
+                            asset_id: mesh_instance.mesh_asset_id.untyped().into(),
                         };
                         opaque_phase.add(
                             bin_key,

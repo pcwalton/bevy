@@ -17,6 +17,7 @@ use bevy_utils::{
     tracing::{debug, error},
     HashMap, HashSet,
 };
+use bytemuck::{Pod, Zeroable};
 use core::{future::Future, hash::Hash, mem, ops::Deref};
 use naga::valid::Capabilities;
 use std::sync::{Mutex, PoisonError};
@@ -46,18 +47,19 @@ pub enum Pipeline {
     ComputePipeline(ComputePipeline),
 }
 
-type CachedPipelineId = usize;
+type CachedPipelineId = u32;
 
 /// Index of a cached render pipeline in a [`PipelineCache`].
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Pod, Zeroable)]
+#[repr(transparent)]
 pub struct CachedRenderPipelineId(CachedPipelineId);
 
 impl CachedRenderPipelineId {
     /// An invalid cached render pipeline index, often used to initialize a variable.
-    pub const INVALID: Self = CachedRenderPipelineId(usize::MAX);
+    pub const INVALID: Self = CachedRenderPipelineId(u32::MAX);
 
     #[inline]
-    pub fn id(&self) -> usize {
+    pub fn id(&self) -> u32 {
         self.0
     }
 }
@@ -68,10 +70,10 @@ pub struct CachedComputePipelineId(CachedPipelineId);
 
 impl CachedComputePipelineId {
     /// An invalid cached compute pipeline index, often used to initialize a variable.
-    pub const INVALID: Self = CachedComputePipelineId(usize::MAX);
+    pub const INVALID: Self = CachedComputePipelineId(u32::MAX);
 
     #[inline]
-    pub fn id(&self) -> usize {
+    pub fn id(&self) -> u32 {
         self.0
     }
 }
@@ -494,7 +496,7 @@ impl PipelineCache {
     /// See [`PipelineCache::queue_render_pipeline()`].
     #[inline]
     pub fn get_render_pipeline_state(&self, id: CachedRenderPipelineId) -> &CachedPipelineState {
-        &self.pipelines[id.0].state
+        &self.pipelines[id.0 as usize].state
     }
 
     /// Get the state of a cached compute pipeline.
@@ -502,7 +504,7 @@ impl PipelineCache {
     /// See [`PipelineCache::queue_compute_pipeline()`].
     #[inline]
     pub fn get_compute_pipeline_state(&self, id: CachedComputePipelineId) -> &CachedPipelineState {
-        &self.pipelines[id.0].state
+        &self.pipelines[id.0 as usize].state
     }
 
     /// Get the render pipeline descriptor a cached render pipeline was inserted from.
@@ -513,7 +515,7 @@ impl PipelineCache {
         &self,
         id: CachedRenderPipelineId,
     ) -> &RenderPipelineDescriptor {
-        match &self.pipelines[id.0].descriptor {
+        match &self.pipelines[id.0 as usize].descriptor {
             PipelineDescriptor::RenderPipelineDescriptor(descriptor) => descriptor,
             PipelineDescriptor::ComputePipelineDescriptor(_) => unreachable!(),
         }
@@ -527,7 +529,7 @@ impl PipelineCache {
         &self,
         id: CachedComputePipelineId,
     ) -> &ComputePipelineDescriptor {
-        match &self.pipelines[id.0].descriptor {
+        match &self.pipelines[id.0 as usize].descriptor {
             PipelineDescriptor::RenderPipelineDescriptor(_) => unreachable!(),
             PipelineDescriptor::ComputePipelineDescriptor(descriptor) => descriptor,
         }
@@ -543,7 +545,7 @@ impl PipelineCache {
     #[inline]
     pub fn get_render_pipeline(&self, id: CachedRenderPipelineId) -> Option<&RenderPipeline> {
         if let CachedPipelineState::Ok(Pipeline::RenderPipeline(pipeline)) =
-            &self.pipelines[id.0].state
+            &self.pipelines[id.0 as usize].state
         {
             Some(pipeline)
         } else {
@@ -554,11 +556,11 @@ impl PipelineCache {
     /// Wait for a render pipeline to finish compiling.
     #[inline]
     pub fn block_on_render_pipeline(&mut self, id: CachedRenderPipelineId) {
-        if self.pipelines.len() <= id.0 {
+        if self.pipelines.len() <= id.0 as usize {
             self.process_queue();
         }
 
-        let state = &mut self.pipelines[id.0].state;
+        let state = &mut self.pipelines[id.0 as usize].state;
         if let CachedPipelineState::Creating(task) = state {
             *state = match bevy_tasks::block_on(task) {
                 Ok(p) => CachedPipelineState::Ok(p),
@@ -577,7 +579,7 @@ impl PipelineCache {
     #[inline]
     pub fn get_compute_pipeline(&self, id: CachedComputePipelineId) -> Option<&ComputePipeline> {
         if let CachedPipelineState::Ok(Pipeline::ComputePipeline(pipeline)) =
-            &self.pipelines[id.0].state
+            &self.pipelines[id.0 as usize].state
         {
             Some(pipeline)
         } else {
@@ -606,7 +608,7 @@ impl PipelineCache {
             .new_pipelines
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let id = CachedRenderPipelineId(self.pipelines.len() + new_pipelines.len());
+        let id = CachedRenderPipelineId((self.pipelines.len() + new_pipelines.len()) as u32);
         new_pipelines.push(CachedPipeline {
             descriptor: PipelineDescriptor::RenderPipelineDescriptor(Box::new(descriptor)),
             state: CachedPipelineState::Queued,
@@ -635,7 +637,7 @@ impl PipelineCache {
             .new_pipelines
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let id = CachedComputePipelineId(self.pipelines.len() + new_pipelines.len());
+        let id = CachedComputePipelineId((self.pipelines.len() + new_pipelines.len()) as u32);
         new_pipelines.push(CachedPipeline {
             descriptor: PipelineDescriptor::ComputePipelineDescriptor(Box::new(descriptor)),
             state: CachedPipelineState::Queued,
@@ -647,7 +649,7 @@ impl PipelineCache {
         let mut shader_cache = self.shader_cache.lock().unwrap();
         let pipelines_to_queue = shader_cache.set_shader(id, shader.clone());
         for cached_pipeline in pipelines_to_queue {
-            self.pipelines[cached_pipeline].state = CachedPipelineState::Queued;
+            self.pipelines[cached_pipeline as usize].state = CachedPipelineState::Queued;
             self.waiting_pipelines.insert(cached_pipeline);
         }
     }
@@ -656,7 +658,7 @@ impl PipelineCache {
         let mut shader_cache = self.shader_cache.lock().unwrap();
         let pipelines_to_queue = shader_cache.remove(shader);
         for cached_pipeline in pipelines_to_queue {
-            self.pipelines[cached_pipeline].state = CachedPipelineState::Queued;
+            self.pipelines[cached_pipeline as usize].state = CachedPipelineState::Queued;
             self.waiting_pipelines.insert(cached_pipeline);
         }
     }
@@ -847,20 +849,20 @@ impl PipelineCache {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             for new_pipeline in new_pipelines.drain(..) {
-                let id = pipelines.len();
+                let id = pipelines.len() as u32;
                 pipelines.push(new_pipeline);
                 waiting_pipelines.insert(id);
             }
         }
 
         for id in waiting_pipelines {
-            self.process_pipeline(&mut pipelines[id], id);
+            self.process_pipeline(&mut pipelines[id as usize], id);
         }
 
         self.pipelines = pipelines;
     }
 
-    fn process_pipeline(&mut self, cached_pipeline: &mut CachedPipeline, id: usize) {
+    fn process_pipeline(&mut self, cached_pipeline: &mut CachedPipeline, id: u32) {
         match &mut cached_pipeline.state {
             CachedPipelineState::Queued => {
                 cached_pipeline.state = match &cached_pipeline.descriptor {

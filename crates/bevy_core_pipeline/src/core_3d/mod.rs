@@ -67,16 +67,15 @@ use core::ops::Range;
 
 use bevy_render::{
     batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport},
-    mesh::allocator::SlabId,
     render_phase::PhaseItemBinKey,
     view::GpuCulling,
 };
+use bytemuck::{Pod, Zeroable};
 pub use camera_3d::*;
 pub use main_opaque_pass_3d_node::*;
 pub use main_transparent_pass_3d_node::*;
 
 use bevy_app::{App, Plugin, PostUpdate};
-use bevy_asset::UntypedAssetId;
 use bevy_color::LinearRgba;
 use bevy_ecs::{entity::EntityHashSet, prelude::*};
 use bevy_image::BevyDefault;
@@ -102,7 +101,6 @@ use bevy_render::{
     Extract, ExtractSchedule, Render, RenderApp, RenderSet,
 };
 use bevy_utils::{tracing::warn, HashMap};
-use nonmax::NonMaxU32;
 
 use crate::{
     core_3d::main_transmissive_pass_3d_node::MainTransmissivePass3dNode,
@@ -230,12 +228,48 @@ pub struct Opaque3d {
     pub extra_index: PhaseItemExtraIndex,
 }
 
+macro_rules! impl_comparisons_via_bytemuck {
+    ($ty:ty) => {
+        impl ::core::cmp::PartialEq for $ty {
+            #[inline]
+            fn eq(&self, other: &Self) -> bool {
+                ::bytemuck::bytes_of(self) == ::bytemuck::bytes_of(other)
+            }
+        }
+
+        impl ::core::cmp::Eq for $ty {
+            fn assert_receiver_is_total_eq(&self) {}
+        }
+
+        impl ::core::cmp::PartialOrd for $ty {
+            #[inline]
+            fn partial_cmp(&self, other: &Self) -> Option<::core::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl ::core::cmp::Ord for $ty {
+            fn cmp(&self, other: &Self) -> ::core::cmp::Ordering {
+                ::bytemuck::bytes_of(self).cmp(::bytemuck::bytes_of(other))
+            }
+        }
+
+        impl ::core::hash::Hash for $ty {
+            #[inline]
+            fn hash<H: ::core::hash::Hasher>(&self, state: &mut H) {
+                ::bytemuck::bytes_of(self).hash(state);
+            }
+        }
+    };
+}
+
 /// Information that must be identical in order to place opaque meshes in the
 /// same *batch set*.
 ///
 /// A batch set is a set of batches that can be multi-drawn together, if
 /// multi-draw is in use.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
 pub struct Opaque3dBatchSetKey {
     /// The identifier of the render pipeline.
     pub pipeline: CachedRenderPipelineId,
@@ -246,28 +280,31 @@ pub struct Opaque3dBatchSetKey {
     /// The ID of a bind group specific to the material instance.
     ///
     /// In the case of PBR, this is the `MaterialBindGroupIndex`.
-    pub material_bind_group_index: Option<u32>,
+    pub material_bind_group_index: u32,
 
     /// The ID of the slab of GPU memory that contains vertex data.
     ///
     /// For non-mesh items, you can fill this with 0 if your items can be
     /// multi-drawn, or with a unique value if they can't.
-    pub vertex_slab: SlabId,
+    pub vertex_slab: u32,
 
     /// The ID of the slab of GPU memory that contains index data, if present.
     ///
     /// For non-mesh items, you can safely fill this with `None`.
-    pub index_slab: Option<SlabId>,
+    pub index_slab: u32,
 
     /// Index of the slab that the lightmap resides in, if a lightmap is
     /// present.
-    pub lightmap_slab: Option<NonMaxU32>,
+    pub lightmap_slab: u32,
 }
+
+impl_comparisons_via_bytemuck!(Opaque3dBatchSetKey);
 
 /// Data that must be identical in order to *batch* phase items together.
 ///
 /// Note that a *batch set* (if multi-draw is in use) contains multiple batches.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
 pub struct Opaque3dBinKey {
     /// The key of the *batch set*.
     ///
@@ -279,14 +316,16 @@ pub struct Opaque3dBinKey {
     ///
     /// Normally, this is the ID of the mesh, but for non-mesh items it might be
     /// the ID of another type of asset.
-    pub asset_id: UntypedAssetId,
+    pub asset_id: [u64; 2],
 }
+
+impl_comparisons_via_bytemuck!(Opaque3dBinKey);
 
 impl PhaseItemBinKey for Opaque3dBinKey {
     type BatchSetKey = Opaque3dBatchSetKey;
 
     fn get_batch_set_key(&self) -> Option<Self::BatchSetKey> {
-        Some(self.batch_set_key.clone())
+        Some(self.batch_set_key)
     }
 }
 

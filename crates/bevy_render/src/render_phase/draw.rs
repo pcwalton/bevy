@@ -7,6 +7,7 @@ use bevy_ecs::{
     world::World,
 };
 use bevy_utils::TypeIdMap;
+use bytemuck::{Pod, Zeroable};
 use core::{any::TypeId, fmt::Debug, hash::Hash};
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use thiserror::Error;
@@ -47,7 +48,8 @@ pub enum DrawError {
 
 // TODO: make this generic?
 /// An identifier for a [`Draw`] function stored in [`DrawFunctions`].
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Pod, Zeroable)]
+#[repr(transparent)]
 pub struct DrawFunctionId(u32);
 
 /// Stores all [`Draw`] functions for the [`PhaseItem`] type.
