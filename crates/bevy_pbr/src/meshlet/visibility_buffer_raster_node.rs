@@ -489,7 +489,7 @@ fn downsample_depth(
     downsample_pass.set_push_constants(
         0,
         bytemuck::cast_slice(&[
-            meshlet_view_resources.depth_pyramid_mip_count,
+            meshlet_view_resources.depth_pyramid.mip_count,
             meshlet_view_resources.view_size.x,
         ]),
     );
@@ -500,7 +500,7 @@ fn downsample_depth(
         1,
     );
 
-    if meshlet_view_resources.depth_pyramid_mip_count >= 7 {
+    if meshlet_view_resources.depth_pyramid.mip_count >= 7 {
         downsample_pass.set_pipeline(downsample_depth_second_pipeline);
         downsample_pass.dispatch_workgroups(1, 1, 1);
     }

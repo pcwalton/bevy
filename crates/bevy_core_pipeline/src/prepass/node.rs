@@ -19,6 +19,23 @@ use super::{
     ViewPrepassTextures,
 };
 
+#[derive(Default)]
+pub struct EarlyPrepassNode;
+
+impl ViewNode for EarlyPrepassNode {
+    type ViewQuery = <PrepassNode as ViewNode>::ViewQuery;
+
+    fn run<'w>(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        view_query: QueryItem<'w, Self::ViewQuery>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        PrepassNode.run(graph, render_context, view_query, world)
+    }
+}
+
 /// Render node used by the prepass.
 ///
 /// By default, inserted before the main pass in the render graph.

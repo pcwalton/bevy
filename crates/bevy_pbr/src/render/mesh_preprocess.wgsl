@@ -79,7 +79,14 @@ struct PreprocessWorkItem {
 
 // The view data, including the view matrix.
 @group(0) @binding(6) var<uniform> view: View;
+#endif  // FRUSTUM_CULLING
 
+#ifdef OCCLUSION_CULLING
+// TODO: Make this a bitfield? Would have to use atomics then.
+@group(0) @binding(7) var<storage, read_write> view_visibility: array<u32>;
+#endif  // OCCLUSION_CULLING
+
+#ifdef FRUSTUM_CULLING
 // Returns true if the view frustum intersects an oriented bounding box (OBB).
 //
 // `aabb_center.w` should be 1.0.
@@ -129,6 +136,16 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let output_index = work_items[instance_index].output_index;
     let indirect_parameters_index = work_items[instance_index].indirect_parameters_index;
 
+    // If this is phase 2 of the occlusion culling pass, and we've already
+    // drawn the object, don't draw it again.
+#ifdef OCCLUSION_CULLING
+#ifndef EARLY
+    if (view_visibility[input_index] != 0) {
+        return;
+    }
+#endif  // EARLY
+#endif  // OCCLUSION_CULLING
+
     // Unpack the input matrix.
     let world_from_local_affine_transpose = current_input[input_index].world_from_local;
     let world_from_local = maths::affine3_to_square(world_from_local_affine_transpose);
@@ -169,6 +186,10 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     // Figure out the output index. In indirect mode, this involves bumping the
     // instance index in the indirect parameters structure. Otherwise, this
     // index was directly supplied to us.
+    //
+    // TODO: I guess we need two of these in the second phase? One for "stuff we
+    // need to draw in the next prepass" and then one for "stuff we need to draw
+    // in the main pass".
 #ifdef INDIRECT
     let batch_output_index =
         atomicAdd(&indirect_parameters[indirect_parameters_index].instance_count, 1u);
@@ -205,4 +226,8 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     output[mesh_output_index].previous_skin_index = current_input[input_index].previous_skin_index;
     output[mesh_output_index].material_and_lightmap_bind_group_slot =
         current_input[input_index].material_and_lightmap_bind_group_slot;
+
+#ifdef OCCLUSION_CULLING
+    view_visibility[input_index] = 1;
+#endif  // OCCLUSION_CULLING
 }
