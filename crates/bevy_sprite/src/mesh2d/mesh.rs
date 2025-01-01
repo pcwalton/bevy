@@ -439,6 +439,7 @@ impl GetFullBatchData for Mesh2dPipeline {
                     first_vertex_or_first_index: index_buffer_slice.range.start,
                     base_vertex_or_first_instance: vertex_buffer_slice.range.start,
                     first_instance: 0,
+                    original_first_instance: 0,
                 }
             }
             RenderMeshBufferInfo::NonIndexed => IndirectParameters {
@@ -449,6 +450,7 @@ impl GetFullBatchData for Mesh2dPipeline {
                 // Use `0xffffffff` as a placeholder to tell the mesh
                 // preprocessing shader that this is a non-indexed mesh.
                 first_instance: !0,
+                original_first_instance: 0,
             },
         };
 

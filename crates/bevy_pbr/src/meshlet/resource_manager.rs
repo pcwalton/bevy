@@ -634,25 +634,12 @@ pub fn prepare_meshlet_view_bind_groups(
             &entries,
         );
 
-        let downsample_depth = render_device.create_bind_group(
+        let downsample_depth = view_resources.depth_pyramid.create_bind_group(
+            &render_device,
             "meshlet_downsample_depth_bind_group",
             &resource_manager.downsample_depth_bind_group_layout,
-            &BindGroupEntries::sequential((
-                view_resources.visibility_buffer.as_entire_binding(),
-                &view_resources.depth_pyramid.mips[0],
-                &view_resources.depth_pyramid.mips[1],
-                &view_resources.depth_pyramid.mips[2],
-                &view_resources.depth_pyramid.mips[3],
-                &view_resources.depth_pyramid.mips[4],
-                &view_resources.depth_pyramid.mips[5],
-                &view_resources.depth_pyramid.mips[6],
-                &view_resources.depth_pyramid.mips[7],
-                &view_resources.depth_pyramid.mips[8],
-                &view_resources.depth_pyramid.mips[9],
-                &view_resources.depth_pyramid.mips[10],
-                &view_resources.depth_pyramid.mips[11],
-                &resource_manager.depth_pyramid_sampler,
-            )),
+            view_resources.visibility_buffer.as_entire_binding(),
+            &resource_manager.depth_pyramid_sampler,
         );
 
         let entries = BindGroupEntries::sequential((

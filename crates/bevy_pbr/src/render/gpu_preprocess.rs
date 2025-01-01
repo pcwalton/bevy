@@ -47,9 +47,6 @@ use crate::{
 /// The handle to the `mesh_preprocess.wgsl` compute shader.
 pub const MESH_PREPROCESS_SHADER_HANDLE: Handle<Shader> =
     Handle::weak_from_u128(16991728318640779533);
-/// The handle to the `mesh_preprocess_types.wgsl` compute shader.
-pub const MESH_PREPROCESS_TYPES_SHADER_HANDLE: Handle<Shader> =
-    Handle::weak_from_u128(2720440370122465935);
 
 /// The GPU workgroup size.
 const WORKGROUP_SIZE: usize = 64;
@@ -128,12 +125,6 @@ impl Plugin for GpuMeshPreprocessPlugin {
             app,
             MESH_PREPROCESS_SHADER_HANDLE,
             "mesh_preprocess.wgsl",
-            Shader::from_wgsl
-        );
-        load_internal_asset!(
-            app,
-            MESH_PREPROCESS_TYPES_SHADER_HANDLE,
-            "mesh_preprocess_types.wgsl",
             Shader::from_wgsl
         );
     }

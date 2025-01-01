@@ -83,7 +83,8 @@ struct PreprocessWorkItem {
 
 #ifdef OCCLUSION_CULLING
 // TODO: Make this a bitfield? Would have to use atomics then.
-@group(0) @binding(7) var<storage, read_write> view_visibility: array<u32>;
+@group(0) @binding(7) var<storage, write> next_phase_work_items: array<PreprocessWorkItem>;
+@group(0) @binding(7) var<storage, write> next_phase_work_items: array<PreprocessWorkItem>;
 #endif  // OCCLUSION_CULLING
 
 #ifdef FRUSTUM_CULLING
@@ -209,6 +210,7 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         } else {
             indirect_parameters[indirect_parameters_index].first_instance = mesh_output_index;
         }
+        indirect_parameters[indirect_parameters_index].original_first_instance = mesh_output_index;
     }
 #else   // INDIRECT
     let mesh_output_index = output_index;

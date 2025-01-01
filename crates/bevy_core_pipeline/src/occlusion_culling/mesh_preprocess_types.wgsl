@@ -16,4 +16,5 @@ struct IndirectParameters {
     base_vertex_or_first_instance: u32,
     // A read-only copy of `instance_index`.
     first_instance: u32,
+    original_first_instance: u32,
 }

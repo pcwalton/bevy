@@ -330,6 +330,8 @@ pub struct IndirectParameters {
     /// out `ArrayIndirectParameters`. That way, shader code can read this value
     /// at the same place, regardless of the specific structure this represents.
     pub first_instance: u32,
+
+    pub original_first_instance: u32,
 }
 
 /// The buffer containing the list of [`IndirectParameters`], for draw commands.
@@ -365,6 +367,16 @@ impl IndirectParametersBuffer {
 
     pub fn set(&mut self, index: u32, value: IndirectParameters) {
         self.buffer.set(index, value);
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
     }
 }
 

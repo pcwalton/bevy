@@ -17,8 +17,10 @@ pub mod graph {
     pub enum Node3d {
         MsaaWriteback,
         EarlyPrepass,
+        FinishEarlyCullingPhase,
         DownsampleDepth,
         Prepass,
+        FinishMainCullingPhase,
         DeferredPrepass,
         CopyDeferredLightingId,
         EndPrepasses,
