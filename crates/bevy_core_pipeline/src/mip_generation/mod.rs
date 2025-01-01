@@ -1,31 +1,33 @@
 //! Downsampling of textures to produce mipmap levels.
 
-use std::array;
+use core::array;
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Handle};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
+    component::Component,
     entity::Entity,
     query::{QueryItem, With},
-    system::{lifetimeless::Read, Commands, Query, Res, Resource},
+    schedule::IntoSystemConfigs as _,
+    system::{lifetimeless::Read, Commands, Query, Res, ResMut, Resource},
     world::{FromWorld, World},
 };
-use bevy_math::{IVec4, UVec4};
+use bevy_math::{uvec2, UVec2, UVec4};
 use bevy_render::{
     render_graph::{NodeRunError, RenderGraphApp, RenderGraphContext, ViewNode, ViewNodeRunner},
     render_resource::{
         binding_types::{sampler, storage_buffer_read_only_sized, texture_storage_2d},
-        BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, CachedComputePipelineId,
-        ComputePipelineDescriptor, Extent3d, PipelineCache, PushConstantRange, SamplerBindingType,
-        Shader, ShaderStages, StorageTextureAccess, TextureAspect, TextureDescriptor,
-        TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
-        TextureViewDimension,
+        BindGroup, BindGroupLayout, BindGroupLayoutEntries, CachedComputePipelineId,
+        ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Extent3d, PipelineCache,
+        PushConstantRange, SamplerBindingType, Shader, ShaderStages, StorageTextureAccess,
+        TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+        TextureView, TextureViewDescriptor, TextureViewDimension,
     },
     renderer::{RenderContext, RenderDevice},
     texture::TextureCache,
     view::{ExtractedView, ViewDepthTexture},
-    RenderApp,
+    Render, RenderApp, RenderSet,
 };
 
 use crate::{
@@ -65,6 +67,14 @@ impl Plugin for MipGenerationPlugin {
                     Node3d::DownsampleDepth,
                     Node3d::DeferredPrepass,
                 ),
+            )
+            .add_systems(
+                Render,
+                prepare_view_depth_pyramids.in_set(RenderSet::PrepareResources),
+            )
+            .add_systems(
+                Render,
+                prepare_downsample_depth_pipelines.in_set(RenderSet::PrepareResources),
             );
     }
 
@@ -74,7 +84,8 @@ impl Plugin for MipGenerationPlugin {
         };
         render_app
             .init_resource::<DownsampleDepthBindGroupLayout>()
-            .init_resource::<DownsampleDepthPipelines>();
+            .init_resource::<DownsampleDepthPipelines>()
+            .init_resource::<DepthPyramidDummyTexture>();
     }
 }
 
@@ -82,16 +93,36 @@ impl Plugin for MipGenerationPlugin {
 pub struct DownsampleDepthNode;
 
 impl ViewNode for DownsampleDepthNode {
-    type ViewQuery = Read<OcclusionCulling>;
+    type ViewQuery = (
+        Read<ViewDepthPyramid>,
+        Read<ViewDownsampleDepthBindGroup>,
+        Read<ViewDownsampleDepthPipelines>,
+        Read<ViewDepthTexture>,
+    );
 
     fn run<'w>(
         &self,
         graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        view_query: QueryItem<'w, Self::ViewQuery>,
+        (
+            view_depth_pyramid,
+            view_downsample_depth_bind_group,
+            view_downsample_depth_pipelines,
+            view_depth_texture,
+        ): QueryItem<'w, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        // TODO
+        let view_size = uvec2(
+            view_depth_texture.texture.width(),
+            view_depth_texture.texture.height(),
+        );
+        view_depth_pyramid.downsample_depth(
+            render_context,
+            view_size,
+            view_downsample_depth_bind_group,
+            &view_downsample_depth_pipelines.first,
+            &view_downsample_depth_pipelines.second,
+        );
         Ok(())
     }
 }
@@ -170,11 +201,54 @@ impl FromWorld for DownsampleDepthPipelines {
     }
 }
 
-pub struct ViewOcclusionDepthPyramid {
-    pub depth_pyramid: ViewDepthPyramid,
-    pub depth_pyramid_dummy_texture: TextureView,
+#[derive(Resource, Deref, DerefMut)]
+pub struct DepthPyramidDummyTexture(TextureView);
+
+impl FromWorld for DepthPyramidDummyTexture {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+
+        DepthPyramidDummyTexture(create_depth_pyramid_dummy_texture(
+            render_device,
+            "depth pyramid dummy texture",
+            "depth pyramid dummy texture view",
+        ))
+    }
 }
 
+pub fn create_depth_pyramid_dummy_texture(
+    render_device: &RenderDevice,
+    texture_label: &'static str,
+    texture_view_label: &'static str,
+) -> TextureView {
+    render_device
+        .create_texture(&TextureDescriptor {
+            label: Some(texture_label),
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::R32Float,
+            usage: TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&TextureViewDescriptor {
+            label: Some(texture_view_label),
+            format: Some(TextureFormat::R32Float),
+            dimension: Some(TextureViewDimension::D2),
+            aspect: TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+        })
+}
+
+#[derive(Component)]
 pub struct ViewDepthPyramid {
     pub all_mips: TextureView,
     pub mips: [TextureView; DEPTH_PYRAMID_MIP_COUNT],
@@ -233,46 +307,53 @@ impl ViewDepthPyramid {
             mip_count: depth_pyramid_mip_count,
         }
     }
-}
 
-pub fn create_depth_pyramid_dummy_texture(
-    render_device: &RenderDevice,
-    texture_label: &'static str,
-    texture_view_label: &'static str,
-) -> TextureView {
-    render_device
-        .create_texture(&TextureDescriptor {
-            label: Some(texture_label),
-            size: Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::R32Float,
-            usage: TextureUsages::STORAGE_BINDING,
-            view_formats: &[],
-        })
-        .create_view(&TextureViewDescriptor {
-            label: Some(texture_view_label),
-            format: Some(TextureFormat::R32Float),
-            dimension: Some(TextureViewDimension::D2),
-            aspect: TextureAspect::All,
-            base_mip_level: 0,
-            mip_level_count: Some(1),
-            base_array_layer: 0,
-            array_layer_count: Some(1),
-        })
+    pub fn downsample_depth(
+        &self,
+        render_context: &mut RenderContext,
+        view_size: UVec2,
+        downsample_depth_bind_group: &BindGroup,
+        downsample_depth_first_pipeline: &ComputePipeline,
+        downsample_depth_second_pipeline: &ComputePipeline,
+    ) {
+        let command_encoder = render_context.command_encoder();
+        let mut downsample_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("downsample depth"),
+            timestamp_writes: None,
+        });
+        downsample_pass.set_pipeline(downsample_depth_first_pipeline);
+        downsample_pass.set_push_constants(0, bytemuck::cast_slice(&[self.mip_count, view_size.x]));
+        downsample_pass.set_bind_group(0, downsample_depth_bind_group, &[]);
+        downsample_pass.dispatch_workgroups(view_size.x.div_ceil(64), view_size.y.div_ceil(64), 1);
+
+        if self.mip_count >= 7 {
+            downsample_pass.set_pipeline(downsample_depth_second_pipeline);
+            downsample_pass.dispatch_workgroups(1, 1, 1);
+        }
+    }
 }
 
 fn prepare_view_depth_pyramids(
     mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    mut texture_cache: ResMut<TextureCache>,
+    depth_pyramid_dummy_texture: Res<DepthPyramidDummyTexture>,
     views: Query<(Entity, &ExtractedView), With<OcclusionCulling>>,
 ) {
-    for (view_entity, view) in &views {}
+    for (view_entity, view) in &views {
+        commands.entity(view_entity).insert(ViewDepthPyramid::new(
+            &render_device,
+            &mut texture_cache,
+            &depth_pyramid_dummy_texture,
+            view.viewport,
+            "view depth pyramid texture",
+            "view depth pyramid texture view",
+        ));
+    }
 }
+
+#[derive(Component, Deref, DerefMut)]
+pub struct ViewDownsampleDepthBindGroup(BindGroup);
 
 fn prepare_downsample_depth_view_bind_groups(
     render_device: Res<RenderDevice>,
@@ -288,5 +369,33 @@ fn prepare_downsample_depth_view_bind_groups(
                 &
             )),
         );*/
+    }
+}
+
+#[derive(Component)]
+pub struct ViewDownsampleDepthPipelines {
+    first: ComputePipeline,
+    second: ComputePipeline,
+}
+
+fn prepare_downsample_depth_pipelines(
+    mut commands: Commands,
+    views: Query<Entity, With<OcclusionCulling>>,
+    downsample_depth_pipelines: Res<DownsampleDepthPipelines>,
+    pipeline_cache: Res<PipelineCache>,
+) {
+    for view_entity in &views {
+        let (Some(first), Some(second)) = (
+            pipeline_cache.get_compute_pipeline(downsample_depth_pipelines.first),
+            pipeline_cache.get_compute_pipeline(downsample_depth_pipelines.second),
+        ) else {
+            continue;
+        };
+        commands
+            .entity(view_entity)
+            .insert(ViewDownsampleDepthPipelines {
+                first: (*first).clone(),
+                second: (*second).clone(),
+            });
     }
 }
