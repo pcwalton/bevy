@@ -15,16 +15,15 @@ fn finish_early_culling_phase(@builtin(global_invocation_id) global_invocation_i
     }
 
     let instance_count = atomicLoad(&indirect_parameters[instance_index].instance_count);
+    atomicStore(&indirect_parameters[instance_index].instance_count, 0u);
 
     if (indirect_parameters[instance_index].first_instance == 0xffffffffu) {
         // Non-indexed mesh.
-        original_indirect_parameter_first_instances[instance_index] =
-            indirect_parameters[instance_index].base_vertex_or_first_instance;
+        original_indirect_parameter_first_instances[instance_index] = instance_count;
         indirect_parameters[instance_index].base_vertex_or_first_instance += instance_count;
     } else {
         // Indexed mesh.
-        original_indirect_parameter_first_instances[instance_index] =
-            indirect_parameters[instance_index].first_instance;
+        original_indirect_parameter_first_instances[instance_index] = instance_count;
         indirect_parameters[instance_index].first_instance += instance_count;
     }
 }
@@ -37,16 +36,15 @@ fn finish_main_culling_phase(@builtin(global_invocation_id) global_invocation_id
         return;
     }
 
-    let original_indirect_parameter_first_instance =
-        original_indirect_parameter_first_instances[instance_index];
+    let original_instance_count = original_indirect_parameter_first_instances[instance_index];
+    atomicAdd(&indirect_parameters[instance_index].instance_count, original_instance_count);
 
     if (indirect_parameters[instance_index].first_instance == 0xffffffffu) {
         // Non-indexed mesh.
-        indirect_parameters[instance_index].base_vertex_or_first_instance =
-            original_indirect_parameter_first_instance;
+        indirect_parameters[instance_index].base_vertex_or_first_instance -=
+            original_instance_count;
     } else {
         // Indexed mesh.
-        indirect_parameters[instance_index].first_instance =
-            original_indirect_parameter_first_instance;
+        indirect_parameters[instance_index].first_instance -= original_instance_count;
     }
 }

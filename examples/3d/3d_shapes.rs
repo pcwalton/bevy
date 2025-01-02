@@ -17,7 +17,6 @@ use bevy::{
         render_resource::{Extent3d, TextureDimension, TextureFormat},
     },
 };
-use bevy_render::occlusion_culling::OcclusionCulling;
 
 fn main() {
     App::new()
@@ -133,9 +132,6 @@ fn setup(
         Camera3d::default(),
         Transform::from_xyz(0.0, 7., 14.0).looking_at(Vec3::new(0., 1., 0.), Vec3::Y),
         DepthPrepass,
-        OcclusionCulling,
-        // FIXME: We need to support this
-        Msaa::Off,
     ));
 
     #[cfg(not(target_arch = "wasm32"))]

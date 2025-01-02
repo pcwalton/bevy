@@ -16,11 +16,9 @@ pub mod graph {
     #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
     pub enum Node3d {
         MsaaWriteback,
-        EarlyMeshPreprocessing,
         EarlyPrepass,
         FinishEarlyCullingPhase,
         DownsampleDepth,
-        LateMeshPreprocessing,
         Prepass,
         FinishMainCullingPhase,
         DeferredPrepass,
