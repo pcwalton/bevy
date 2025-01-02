@@ -267,7 +267,20 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
 #ifdef INDIRECT
     let batch_output_index =
         atomicAdd(&indirect_parameters[indirect_parameters_index].instance_count, 1u);
+
+    // FIXME: UGH this is ugly. Let's move initialization of first instance to a separate phase.
+#ifdef LATE
+    var mesh_output_index = batch_output_index;
+    if (indirect_parameters[indirect_parameters_index].first_instance == 0xffffffffu) {
+        mesh_output_index +=
+            indirect_parameters[indirect_parameters_index].base_vertex_or_first_instance;
+    } else {
+        mesh_output_index += indirect_parameters[indirect_parameters_index].first_instance;
+    }
+#else   // LATE
     let mesh_output_index = output_index + batch_output_index;
+#endif  // LATE
+
 #else   // INDIRECT
     let mesh_output_index = output_index;
 #endif  // INDIRECT
