@@ -83,8 +83,7 @@ struct PreprocessWorkItem {
 
 #ifdef OCCLUSION_CULLING
 // TODO: Make this a bitfield? Would have to use atomics then.
-@group(0) @binding(7) var<storage, write> next_phase_work_items: array<PreprocessWorkItem>;
-@group(0) @binding(7) var<storage, write> next_phase_work_items: array<PreprocessWorkItem>;
+@group(0) @binding(7) var<storage, read_write> view_visibility: array<u32>;
 #endif  // OCCLUSION_CULLING
 
 #ifdef FRUSTUM_CULLING
@@ -141,7 +140,7 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     // drawn the object, don't draw it again.
 #ifdef OCCLUSION_CULLING
 #ifndef EARLY
-    if (view_visibility[input_index] != 0) {
+    if (view_visibility[input_index] != 0u) {
         return;
     }
 #endif  // EARLY
@@ -210,7 +209,6 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         } else {
             indirect_parameters[indirect_parameters_index].first_instance = mesh_output_index;
         }
-        indirect_parameters[indirect_parameters_index].original_first_instance = mesh_output_index;
     }
 #else   // INDIRECT
     let mesh_output_index = output_index;
@@ -230,6 +228,6 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         current_input[input_index].material_and_lightmap_bind_group_slot;
 
 #ifdef OCCLUSION_CULLING
-    view_visibility[input_index] = 1;
+    view_visibility[input_index] = 1u;
 #endif  // OCCLUSION_CULLING
 }

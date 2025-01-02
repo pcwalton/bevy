@@ -4,7 +4,7 @@ use bevy_app::{App, Plugin};
 use bevy_ecs::{query::With, schedule::IntoSystemConfigs as _, system::Query};
 use bevy_render::{
     occlusion_culling::{
-        FinishEarlyCullingPhaseNode, FinishMainCullingPhaseNode, OcclusionCulling,
+        FinishEarlyCullingPhaseNode, FinishLateCullingPhaseNode, OcclusionCulling,
     },
     render_graph::RenderGraphApp as _,
     render_resource::TextureUsages,
@@ -36,7 +36,7 @@ impl Plugin for OcclusionCullingCorePipelinePlugin {
                 Core3d,
                 Node3d::FinishEarlyCullingPhase,
             )
-            .add_render_graph_node::<FinishMainCullingPhaseNode>(
+            .add_render_graph_node::<FinishLateCullingPhaseNode>(
                 Core3d,
                 Node3d::FinishMainCullingPhase,
             )
@@ -46,6 +46,7 @@ impl Plugin for OcclusionCullingCorePipelinePlugin {
                     Node3d::EarlyPrepass,
                     Node3d::FinishEarlyCullingPhase,
                     Node3d::DownsampleDepth,
+                    Node3d::Prepass,
                     Node3d::FinishMainCullingPhase,
                     Node3d::DeferredPrepass,
                 ),

@@ -15,6 +15,7 @@ use nonmax::NonMaxU32;
 use wgpu::{BindingResource, BufferUsages, DownlevelFlags, Features};
 
 use crate::{
+    occlusion_culling::OcclusionCulling,
     render_phase::{
         BinnedPhaseItem, BinnedRenderPhaseBatch, BinnedRenderPhaseBatchSets,
         CachedRenderPipelinePhaseItem, PhaseItemBinKey as _, PhaseItemExtraIndex, SortedPhaseItem,
@@ -42,6 +43,10 @@ impl Plugin for BatchingPlugin {
             .add_systems(
                 Render,
                 write_indirect_parameters_buffer.in_set(RenderSet::PrepareResourcesFlush),
+            )
+            .add_systems(
+                Render,
+                prepare_indirect_parameters_buffer.in_set(RenderSet::ManageViews),
             );
     }
 
@@ -249,6 +254,7 @@ pub struct PreprocessWorkItemBuffers {
     pub main_buffer: BufferVec<PreprocessWorkItem>,
     /// True if we're drawing directly instead of indirectly.
     pub no_indirect_drawing: bool,
+    pub gpu_occlusion_culling: bool,
 }
 
 /// One invocation of the preprocessing shader: i.e. one mesh instance in a
@@ -330,8 +336,6 @@ pub struct IndirectParameters {
     /// out `ArrayIndirectParameters`. That way, shader code can read this value
     /// at the same place, regardless of the specific structure this represents.
     pub first_instance: u32,
-
-    pub original_first_instance: u32,
 }
 
 /// The buffer containing the list of [`IndirectParameters`], for draw commands.
@@ -552,7 +556,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
     gpu_array_buffer: ResMut<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
     mut indirect_parameters_buffer: ResMut<IndirectParametersBuffer>,
     mut sorted_render_phases: ResMut<ViewSortedRenderPhases<I>>,
-    mut views: Query<(Entity, Has<NoIndirectDrawing>), With<ExtractedView>>,
+    mut views: Query<(Entity, Has<NoIndirectDrawing>, Has<OcclusionCulling>), With<ExtractedView>>,
     system_param_item: StaticSystemParam<GFBD::Param>,
 ) where
     I: CachedRenderPipelinePhaseItem + SortedPhaseItem,
@@ -565,7 +569,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
         ..
     } = gpu_array_buffer.into_inner();
 
-    for (view, no_indirect_drawing) in &mut views {
+    for (view, no_indirect_drawing, gpu_occlusion_culling) in &mut views {
         let Some(phase) = sorted_render_phases.get_mut(&view) else {
             continue;
         };
@@ -577,6 +581,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
                 .or_insert_with(|| PreprocessWorkItemBuffers {
                     main_buffer: BufferVec::new(BufferUsages::STORAGE),
                     no_indirect_drawing,
+                    gpu_occlusion_culling,
                 });
 
         // Walk through the list of phase items, building up batches as we go.
@@ -690,7 +695,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
     gpu_array_buffer: ResMut<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
     mut indirect_parameters_buffer: ResMut<IndirectParametersBuffer>,
     mut binned_render_phases: ResMut<ViewBinnedRenderPhases<BPI>>,
-    mut views: Query<(Entity, Has<NoIndirectDrawing>), With<ExtractedView>>,
+    mut views: Query<(Entity, Has<NoIndirectDrawing>, Has<OcclusionCulling>), With<ExtractedView>>,
     param: StaticSystemParam<GFBD::Param>,
 ) where
     BPI: BinnedPhaseItem,
@@ -704,7 +709,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
         ..
     } = gpu_array_buffer.into_inner();
 
-    for (view, no_indirect_drawing) in &mut views {
+    for (view, no_indirect_drawing, gpu_occlusion_culling) in &mut views {
         let Some(phase) = binned_render_phases.get_mut(&view) else {
             continue;
         };
@@ -717,6 +722,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                 .or_insert_with(|| PreprocessWorkItemBuffers {
                     main_buffer: BufferVec::new(BufferUsages::STORAGE),
                     no_indirect_drawing,
+                    gpu_occlusion_culling,
                 });
 
         // Prepare batchables.
@@ -931,5 +937,10 @@ pub fn write_indirect_parameters_buffer(
     indirect_parameters_buffer
         .buffer
         .write_buffer(&render_device, &render_queue);
+}
+
+pub fn prepare_indirect_parameters_buffer(
+    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffer>,
+) {
     indirect_parameters_buffer.buffer.clear();
 }
