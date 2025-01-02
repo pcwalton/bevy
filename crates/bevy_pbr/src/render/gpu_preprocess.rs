@@ -30,10 +30,7 @@ use bevy_render::{
     occlusion_culling::OcclusionCulling,
     render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext},
     render_resource::{
-        binding_types::{
-            storage_buffer, storage_buffer_read_only, texture_2d,
-            uniform_buffer,
-        },
+        binding_types::{storage_buffer, storage_buffer_read_only, texture_2d, uniform_buffer},
         BindGroup, BindGroupEntries, BindGroupLayout, BindingResource, BufferBinding, BufferUsages,
         CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
         DynamicBindGroupLayoutEntries, IntoBinding, PipelineCache, RawBufferVec, Shader,
@@ -192,7 +189,12 @@ impl Plugin for GpuMeshPreprocessPlugin {
             )
             .add_render_graph_edges(
                 Core3d,
-                (Node3d::FinishEarlyCullingPhase, NodePbr::LateGpuPreprocess, Node3d::Prepass)
+                (
+                    Node3d::FinishEarlyCullingPhase,
+                    Node3d::DownsampleDepth,
+                    NodePbr::LateGpuPreprocess,
+                    Node3d::Prepass
+                )
             );
     }
 }

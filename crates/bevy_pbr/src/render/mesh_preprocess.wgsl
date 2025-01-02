@@ -10,6 +10,7 @@
 #import bevy_pbr::mesh_types::{Mesh, MESH_FLAGS_NO_FRUSTUM_CULLING_BIT}
 #import bevy_pbr::mesh_preprocess_types::IndirectParameters
 #import bevy_pbr::occlusion_culling
+#import bevy_pbr::view_transformations::ndc_to_uv
 #import bevy_render::maths
 #import bevy_render::view::View
 
@@ -190,38 +191,39 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
 #ifdef EARLY
     view_visibility[input_index] = 1u;
 #else   // EARLY
-/*
-    let occlusion_culling_bounding_sphere_center = mesh_culling_data[input_index].aabb_center.xyz;
-    let occlusion_culling_bounding_sphere_radius =
-        length(mesh_culling_data[input_index].aabb_half_extents);
-    let occlusion_culling_bounding_sphere_center_view_space =
-        (view.view_from_world * vec4(occlusion_culling_bounding_sphere_center.xyz, 1.0)).xyz;
+    let aabb_center = mesh_culling_data[input_index].aabb_center.xyz;
+    let aabb_half_extents = mesh_culling_data[input_index].aabb_half_extents.xyz;
 
-    let aabb = project_view_space_sphere_to_screen_space_aabb(
-        occlusion_culling_bounding_sphere_center_view_space,
-        occlusion_culling_bounding_sphere_radius
-    );
+    var aabb = vec4(0.0);
+    var max_depth_view = 0.0;
+
+    for (var i = 0u; i < 8u; i += 1u) {
+        let local_pos = aabb_center + select(
+            vec3(-1.0),
+            vec3(1.0),
+            vec3((i & 1) != 0, (i & 2) != 0, (i & 4) != 0)
+        ) * aabb_half_extents;
+
+        let world_pos = (world_from_local * vec4(local_pos, 1.0)).xyz;
+        let view_pos = position_world_to_view(world_pos);
+        let ndc_pos = position_world_to_ndc(world_pos);
+        let uv_pos = ndc_to_uv(ndc_pos.xy);
+
+        if (i == 0u) {
+            aabb = vec4(uv_pos, uv_pos);
+            max_depth_view = view_pos.z;
+        } else {
+            aabb = vec4(min(aabb.xy, uv_pos), max(aabb.zw, uv_pos));
+            max_depth_view = max(max_depth_view, view_pos.z);
+        }
+    }
+
     let aabb_pixel_size = occlusion_culling::get_aabb_size_in_pixels(aabb, depth_pyramid);
-    var aabb_width_pixels = aabb_pixel_size.x;
-    var aabb_height_pixels = aabb_pixel_size.y;
-    let occluder_depth =
+    let occluder_depth_ndc =
         occlusion_culling::get_occluder_depth(aabb, aabb_pixel_size, depth_pyramid);
 
-    var mesh_visible: bool;
-    if view.clip_from_view[3][3] == 1.0 {
-        // Orthographic
-        let sphere_depth = view.clip_from_view[3][2] + (occlusion_culling_bounding_sphere_center_view_space.z + occlusion_culling_bounding_sphere_radius) * view.clip_from_view[2][2];
-        mesh_visible = sphere_depth >= occluder_depth;
-    } else {
-        // Perspective
-        let sphere_depth = -view.clip_from_view[3][2] / (occlusion_culling_bounding_sphere_center_view_space.z + occlusion_culling_bounding_sphere_radius);
-        mesh_visible = sphere_depth >= occluder_depth;
-    }*/
-
-    // HACK
-    let mesh_visible = world_from_local[3][2] >= -0.6;
-
-    if (!mesh_visible) {
+    let max_depth_ndc = view_z_to_depth_ndc(max_depth_view);
+    if (max_depth_ndc < occluder_depth_ndc) {
         return;
     }
 
@@ -233,7 +235,7 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     if (early_view_visibility != 0u) {
         return;
     }
-#endif  // LATE
+#endif  // EARLY
 #endif  // OCCLUSION_CULLING
 
     // Calculate inverse transpose.
@@ -314,5 +316,29 @@ fn project_view_space_sphere_to_screen_space_aabb(cp: vec3<f32>, r: f32) -> vec4
 
         return vec4(min_x * inv_width, -max_y * inv_height, max_x * inv_width, -min_y * inv_height) + vec4(0.5);
     }
+}
+
+/// Convert a world space position to view space
+fn position_world_to_view(world_pos: vec3<f32>) -> vec3<f32> {
+    let view_pos = view.view_from_world * vec4(world_pos, 1.0);
+    return view_pos.xyz;
+}
+
+/// Convert a world space position to ndc space
+fn position_world_to_ndc(world_pos: vec3<f32>) -> vec3<f32> {
+    let ndc_pos = view.clip_from_world * vec4(world_pos, 1.0);
+    return ndc_pos.xyz / ndc_pos.w;
+}
+
+/// Convert ndc depth to linear view z. 
+/// Note: Depth values in front of the camera will be negative as -z is forward
+fn view_z_to_depth_ndc(view_z: f32) -> f32 {
+    if (view.clip_from_view[3][3] != 1.0) {
+        // Perspective
+        return -view.clip_from_view[3][2] / view_z;
+    }
+
+    // Orthographic
+    return view.clip_from_view[3][2] + view_z * view.clip_from_view[2][2];
 }
 #endif  // OCCLUSION_CULLING
