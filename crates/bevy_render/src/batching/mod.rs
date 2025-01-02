@@ -6,7 +6,7 @@ use bevy_ecs::{
 use bytemuck::Pod;
 use nonmax::NonMaxU32;
 
-use self::gpu_preprocessing::IndirectParametersBuffer;
+use self::gpu_preprocessing::IndirectParametersBuffers;
 use crate::{render_phase::PhaseItemExtraIndex, sync_world::MainEntity};
 use crate::{
     render_phase::{
@@ -148,10 +148,9 @@ pub trait GetFullBatchData: GetBatchData {
     /// This is only used if GPU culling is enabled (which requires GPU
     /// preprocessing).
     fn write_batch_indirect_parameters(
-        param: &SystemParamItem<Self::Param>,
-        indirect_parameters_buffer: &mut IndirectParametersBuffer,
+        mesh_index: u32,
+        indirect_parameters_buffer: &mut IndirectParametersBuffers,
         indirect_parameters_offset: u32,
-        entity: MainEntity,
     );
 }
 

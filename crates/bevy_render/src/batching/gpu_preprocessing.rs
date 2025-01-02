@@ -38,10 +38,14 @@ impl Plugin for BatchingPlugin {
         };
 
         render_app
-            .insert_resource(IndirectParametersBuffer::new())
+            .insert_resource(IndirectParametersBuffers::new())
             .add_systems(
                 Render,
-                write_indirect_parameters_buffer.in_set(RenderSet::PrepareResourcesFlush),
+                write_indirect_parameters_buffers.in_set(RenderSet::PrepareResourcesFlush),
+            )
+            .add_systems(
+                Render,
+                clear_indirect_parameters_buffers.in_set(RenderSet::ManageViews),
             );
     }
 
@@ -332,43 +336,68 @@ pub struct IndirectParameters {
     pub first_instance: u32,
 }
 
-/// The buffer containing the list of [`IndirectParameters`], for draw commands.
-#[derive(Resource)]
-pub struct IndirectParametersBuffer {
-    /// The actual buffer.
-    buffer: RawBufferVec<IndirectParameters>,
+#[derive(Clone, Copy, Default, Pod, Zeroable, ShaderType)]
+#[repr(C)]
+pub struct IndirectParametersMetadata {
+    pub mesh_index: u32,
+    pub base_output_index: u32,
+    pub instance_count: u32,
 }
 
-impl IndirectParametersBuffer {
+/// The buffer containing the list of [`IndirectParameters`], for draw commands.
+#[derive(Resource)]
+pub struct IndirectParametersBuffers {
+    data: UninitBufferVec<IndirectParameters>,
+    metadata: RawBufferVec<IndirectParametersMetadata>,
+}
+
+impl IndirectParametersBuffers {
     /// Creates the indirect parameters buffer.
-    pub fn new() -> IndirectParametersBuffer {
-        IndirectParametersBuffer {
-            buffer: RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT),
+    pub fn new() -> IndirectParametersBuffers {
+        IndirectParametersBuffers {
+            data: UninitBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT),
+            metadata: RawBufferVec::new(BufferUsages::STORAGE),
         }
     }
 
     /// Returns the underlying GPU buffer.
     #[inline]
-    pub fn buffer(&self) -> Option<&Buffer> {
-        self.buffer.buffer()
+    pub fn data_buffer(&self) -> Option<&Buffer> {
+        self.data.buffer()
+    }
+
+    #[inline]
+    pub fn metadata_buffer(&self) -> Option<&Buffer> {
+        self.metadata.buffer()
     }
 
     /// Adds a new set of indirect parameters to the buffer.
     pub fn allocate(&mut self, count: u32) -> u32 {
-        let length = self.buffer.len();
-        self.buffer.reserve_internal(count as usize);
+        let length = self.data.len();
+        self.metadata.reserve_internal(count as usize);
         for _ in 0..count {
-            self.buffer.push(Zeroable::zeroed());
+            self.data.add();
+            self.metadata.push(IndirectParametersMetadata::default());
         }
         length as u32
     }
 
-    pub fn set(&mut self, index: u32, value: IndirectParameters) {
-        self.buffer.set(index, value);
+    pub fn set(&mut self, index: u32, value: IndirectParametersMetadata) {
+        self.metadata.set(index, value);
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
     }
 }
 
-impl Default for IndirectParametersBuffer {
+impl Default for IndirectParametersBuffers {
     fn default() -> Self {
         Self::new()
     }
@@ -538,7 +567,7 @@ pub fn delete_old_work_item_buffers<GFBD>(
 /// trying to combine the draws into a batch.
 pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
     gpu_array_buffer: ResMut<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
-    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffer>,
+    mut indirect_parameters_buffers: ResMut<IndirectParametersBuffers>,
     mut sorted_render_phases: ResMut<ViewSortedRenderPhases<I>>,
     mut views: Query<(Entity, Has<NoIndirectDrawing>), With<ExtractedView>>,
     system_param_item: StaticSystemParam<GFBD::Param>,
@@ -574,7 +603,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
         let mut indirect_parameters_offset = if no_indirect_drawing {
             None
         } else {
-            Some(indirect_parameters_buffer.allocate(phase.items.len() as u32))
+            Some(indirect_parameters_buffers.allocate(phase.items.len() as u32))
         };
 
         let mut first_output_index = data_buffer.len() as u32;
@@ -613,8 +642,6 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
             });
 
             // Make space in the data buffer for this instance.
-            let item = &phase.items[current_index];
-            let entity = item.main_entity();
             let output_index = data_buffer.add() as u32;
 
             // If we can't batch, break the existing batch and make a new one.
@@ -627,10 +654,9 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
                 // Start a new batch.
                 if let Some(indirect_parameters_offset) = indirect_parameters_offset {
                     GFBD::write_batch_indirect_parameters(
-                        &system_param_item,
-                        &mut indirect_parameters_buffer,
+                        current_input_index.into(),
+                        &mut indirect_parameters_buffers,
                         indirect_parameters_offset,
-                        entity,
                     );
                 };
 
@@ -676,7 +702,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
 /// Creates batches for a render phase that uses bins.
 pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
     gpu_array_buffer: ResMut<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
-    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffer>,
+    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffers>,
     mut binned_render_phases: ResMut<ViewBinnedRenderPhases<BPI>>,
     mut views: Query<(Entity, Has<NoIndirectDrawing>), With<ExtractedView>>,
     param: StaticSystemParam<GFBD::Param>,
@@ -759,10 +785,9 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                         // Start a new batch, in indirect mode.
                         let indirect_parameters_index = indirect_parameters_buffer.allocate(1);
                         GFBD::write_batch_indirect_parameters(
-                            &system_param_item,
+                            input_index.into(),
                             &mut indirect_parameters_buffer,
                             indirect_parameters_index,
-                            main_entity,
                         );
                         work_item_buffer.buffer.push(PreprocessWorkItem {
                             input_index: input_index.into(),
@@ -844,10 +869,9 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                     // We're in indirect mode, so add an indirect parameters
                     // index.
                     GFBD::write_batch_indirect_parameters(
-                        &system_param_item,
+                        input_index.into(),
                         &mut indirect_parameters_buffer,
                         *indirect_parameters_index,
-                        main_entity,
                     );
                     work_item_buffer.buffer.push(PreprocessWorkItem {
                         input_index: input_index.into(),
@@ -911,13 +935,22 @@ pub fn write_batched_instance_buffers<GFBD>(
     }
 }
 
-pub fn write_indirect_parameters_buffer(
+pub fn clear_indirect_parameters_buffers(
+    mut indirect_parameters_buffers: ResMut<IndirectParametersBuffers>,
+) {
+    indirect_parameters_buffers.data.clear();
+    indirect_parameters_buffers.metadata.clear();
+}
+
+pub fn write_indirect_parameters_buffers(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-    mut indirect_parameters_buffer: ResMut<IndirectParametersBuffer>,
+    mut indirect_parameters_buffers: ResMut<IndirectParametersBuffers>,
 ) {
-    indirect_parameters_buffer
-        .buffer
+    indirect_parameters_buffers
+        .data
+        .write_buffer(&render_device);
+    indirect_parameters_buffers
+        .metadata
         .write_buffer(&render_device, &render_queue);
-    indirect_parameters_buffer.buffer.clear();
 }

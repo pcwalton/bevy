@@ -2,6 +2,27 @@
 
 #define_import_path bevy_pbr::mesh_preprocess_types
 
+// Per-frame data that the CPU supplies to the GPU.
+struct MeshInput {
+    // The model transform.
+    world_from_local: mat3x4<f32>,
+    // The lightmap UV rect, packed into 64 bits.
+    lightmap_uv_rect: vec2<u32>,
+    // Various flags.
+    flags: u32,
+    // The index of this mesh's `MeshInput` in the `previous_input` array, if
+    // applicable. If not present, this is `u32::MAX`.
+    previous_input_index: u32,
+    first_vertex_index: u32,
+    first_index_index: u32,
+    index_count: u32,
+    current_skin_index: u32,
+    previous_skin_index: u32,
+    // Low 16 bits: index of the material inside the bind group data.
+    // High 16 bits: index of the lightmap in the binding array.
+    material_and_lightmap_bind_group_slot: u32,
+}
+
 // The `wgpu` indirect parameters structure. This is a union of two structures.
 // For more information, see the corresponding comment in
 // `gpu_preprocessing.rs`.
@@ -9,7 +30,7 @@ struct IndirectParameters {
     // `vertex_count` or `index_count`.
     vertex_count_or_index_count: u32,
     // `instance_count` in both structures.
-    instance_count: atomic<u32>,
+    instance_count: u32,
     // `first_vertex` or `first_index`.
     first_vertex_or_first_index: u32,
     // `base_vertex` or `first_instance`.
@@ -17,3 +38,10 @@ struct IndirectParameters {
     // A read-only copy of `instance_index`.
     first_instance: u32,
 }
+
+struct IndirectParametersMetadata {
+    mesh_index: u32,
+    base_output_index: u32,
+    instance_count: atomic<u32>,
+}
+
