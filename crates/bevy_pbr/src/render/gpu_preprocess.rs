@@ -10,10 +10,11 @@ use core::num::NonZero;
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Handle};
+use bevy_core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    query::{Has, QueryState, Without},
+    query::{Has, QueryState, With, Without},
     schedule::{common_conditions::resource_exists, IntoSystemConfigs as _},
     system::{lifetimeless::Read, Commands, Res, ResMut, Resource},
     world::{FromWorld, World},
@@ -23,8 +24,8 @@ use bevy_render::{
         BatchedInstanceBuffers, GpuPreprocessingSupport, IndirectParameters,
         IndirectParametersBuffer, PreprocessWorkItem,
     },
-    graph::CameraDriverLabel,
-    render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext},
+    occlusion_culling::OcclusionCulling,
+    render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext},
     render_resource::{
         binding_types::{storage_buffer, storage_buffer_read_only, uniform_buffer},
         BindGroup, BindGroupEntries, BindGroupLayout, BindingResource, BufferBinding,
@@ -64,15 +65,26 @@ pub struct GpuMeshPreprocessPlugin {
 }
 
 /// The render node for the mesh uniform building pass.
-pub struct GpuPreprocessNode {
+pub struct EarlyGpuPreprocessNode {
     view_query: QueryState<
         (
             Entity,
-            Read<PreprocessBindGroup>,
+            Read<PreprocessBindGroups>,
             Read<ViewUniformOffset>,
             Has<NoIndirectDrawing>,
         ),
         Without<SkipGpuPreprocess>,
+    >,
+}
+
+pub struct LateGpuPreprocessNode {
+    view_query: QueryState<
+        (Entity, Read<PreprocessBindGroups>, Read<ViewUniformOffset>),
+        (
+            Without<SkipGpuPreprocess>,
+            Without<NoIndirectDrawing>,
+            With<OcclusionCulling>,
+        ),
     >,
 }
 
@@ -84,7 +96,8 @@ pub struct PreprocessPipelines {
     pub direct: PreprocessPipeline,
     /// The pipeline used for GPU culling. This pipeline populates indirect
     /// parameters.
-    pub gpu_culling: PreprocessPipeline,
+    pub early_gpu_culling: PreprocessPipeline,
+    pub late_gpu_culling: PreprocessPipeline,
 }
 
 /// The pipeline for the GPU mesh preprocessing shader.
@@ -112,7 +125,10 @@ bitflags! {
 ///
 /// This goes on the view.
 #[derive(Component, Clone)]
-pub struct PreprocessBindGroup(BindGroup);
+pub struct PreprocessBindGroups {
+    early: BindGroup,
+    late: Option<BindGroup>,
+}
 
 /// Stops the `GpuPreprocessNode` attempting to generate the buffer for this view
 /// useful to avoid duplicating effort if the bind group is shared between views
@@ -141,12 +157,6 @@ impl Plugin for GpuMeshPreprocessPlugin {
             return;
         }
 
-        // Stitch the node in.
-        let gpu_preprocess_node = GpuPreprocessNode::from_world(render_app.world_mut());
-        let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
-        render_graph.add_node(NodePbr::GpuPreprocess, gpu_preprocess_node);
-        render_graph.add_node_edge(NodePbr::GpuPreprocess, CameraDriverLabel);
-
         render_app
             .init_resource::<PreprocessPipelines>()
             .init_resource::<SpecializedComputePipelines<PreprocessPipeline>>()
@@ -161,11 +171,20 @@ impl Plugin for GpuMeshPreprocessPlugin {
                         .in_set(RenderSet::PrepareBindGroups),
                     write_mesh_culling_data_buffer.in_set(RenderSet::PrepareResourcesFlush),
                 )
+            ).add_render_graph_node::<EarlyGpuPreprocessNode>(Core3d, NodePbr::EarlyGpuPreprocess)
+            .add_render_graph_node::<LateGpuPreprocessNode>(Core3d, NodePbr::LateGpuPreprocess)
+            /*.add_render_graph_edges(
+                Core3d,
+                (Node3d::StartMainPass, NodePbr::EarlyGpuPreprocess, Node3d::EarlyPrepass)
+            )*/
+            .add_render_graph_edges(
+                Core3d,
+                (Node3d::FinishEarlyCullingPhase, NodePbr::LateGpuPreprocess, Node3d::Prepass)
             );
     }
 }
 
-impl FromWorld for GpuPreprocessNode {
+impl FromWorld for EarlyGpuPreprocessNode {
     fn from_world(world: &mut World) -> Self {
         Self {
             view_query: QueryState::new(world),
@@ -173,7 +192,7 @@ impl FromWorld for GpuPreprocessNode {
     }
 }
 
-impl Node for GpuPreprocessNode {
+impl Node for EarlyGpuPreprocessNode {
     fn update(&mut self, world: &mut World) {
         self.view_query.update_archetypes(world);
     }
@@ -197,7 +216,7 @@ impl Node for GpuPreprocessNode {
             render_context
                 .command_encoder()
                 .begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("mesh preprocessing"),
+                    label: Some("early mesh preprocessing"),
                     timestamp_writes: None,
                 });
 
@@ -214,7 +233,7 @@ impl Node for GpuPreprocessNode {
             // Select the right pipeline, depending on whether GPU culling is in
             // use.
             let maybe_pipeline_id = if !no_indirect_drawing {
-                preprocess_pipelines.gpu_culling.pipeline_id
+                preprocess_pipelines.early_gpu_culling.pipeline_id
             } else {
                 preprocess_pipelines.direct.pipeline_id
             };
@@ -238,9 +257,86 @@ impl Node for GpuPreprocessNode {
             if !no_indirect_drawing {
                 dynamic_offsets.push(view_uniform_offset.offset);
             }
-            compute_pass.set_bind_group(0, &bind_group.0, &dynamic_offsets);
+            compute_pass.set_bind_group(0, &bind_group.early, &dynamic_offsets);
 
-            let workgroup_count = index_buffer.buffer.len().div_ceil(WORKGROUP_SIZE);
+            let workgroup_count = index_buffer.main_buffer.len().div_ceil(WORKGROUP_SIZE);
+            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+        }
+
+        Ok(())
+    }
+}
+
+impl FromWorld for LateGpuPreprocessNode {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            view_query: QueryState::new(world),
+        }
+    }
+}
+
+impl Node for LateGpuPreprocessNode {
+    fn update(&mut self, world: &mut World) {
+        self.view_query.update_archetypes(world);
+    }
+
+    fn run<'w>(
+        &self,
+        _: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        // Grab the [`BatchedInstanceBuffers`].
+        let BatchedInstanceBuffers {
+            work_item_buffers: ref index_buffers,
+            ..
+        } = world.resource::<BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>();
+
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let preprocess_pipelines = world.resource::<PreprocessPipelines>();
+
+        let mut compute_pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("late mesh preprocessing"),
+                    timestamp_writes: None,
+                });
+
+        // Run the compute passes.
+        for (view, bind_group, view_uniform_offset) in self.view_query.iter_manual(world) {
+            let Some(ref late_bind_group) = bind_group.late else {
+                continue;
+            };
+
+            // Grab the index buffer for this view.
+            let Some(index_buffer) = index_buffers.get(&view) else {
+                warn!("The preprocessing index buffer wasn't present");
+                continue;
+            };
+
+            let maybe_pipeline_id = preprocess_pipelines.late_gpu_culling.pipeline_id;
+
+            // Fetch the pipeline.
+            let Some(preprocess_pipeline_id) = maybe_pipeline_id else {
+                warn!("The build mesh uniforms pipeline wasn't ready");
+                return Ok(());
+            };
+
+            let Some(preprocess_pipeline) =
+                pipeline_cache.get_compute_pipeline(preprocess_pipeline_id)
+            else {
+                // This will happen while the pipeline is being compiled and is fine.
+                return Ok(());
+            };
+
+            compute_pass.set_pipeline(preprocess_pipeline);
+
+            let mut dynamic_offsets: SmallVec<[u32; 1]> = smallvec![];
+            dynamic_offsets.push(view_uniform_offset.offset);
+            compute_pass.set_bind_group(0, late_bind_group, &dynamic_offsets);
+
+            let workgroup_count = index_buffer.main_buffer.len().div_ceil(WORKGROUP_SIZE);
             compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         }
 
@@ -250,7 +346,7 @@ impl Node for GpuPreprocessNode {
 
 impl PreprocessPipelines {
     pub(crate) fn pipelines_are_loaded(&self, pipeline_cache: &PipelineCache) -> bool {
-        self.direct.is_loaded(pipeline_cache) && self.gpu_culling.is_loaded(pipeline_cache)
+        self.direct.is_loaded(pipeline_cache) && self.early_gpu_culling.is_loaded(pipeline_cache)
     }
 }
 
@@ -300,8 +396,17 @@ impl FromWorld for PreprocessPipelines {
         // GPU culling bind group parameters are a superset of those in the CPU
         // culling (direct) shader.
         let direct_bind_group_layout_entries = preprocess_direct_bind_group_layout_entries();
-        let gpu_culling_bind_group_layout_entries = preprocess_direct_bind_group_layout_entries()
-            .extend_sequential((
+        let early_gpu_culling_bind_group_layout_entries =
+            preprocess_direct_bind_group_layout_entries().extend_sequential((
+                // `indirect_parameters`
+                storage_buffer::<IndirectParameters>(/* has_dynamic_offset= */ false),
+                // `mesh_culling_data`
+                storage_buffer_read_only::<MeshCullingData>(/* has_dynamic_offset= */ false),
+                // `view`
+                uniform_buffer::<ViewUniform>(/* has_dynamic_offset= */ true),
+            ));
+        let late_gpu_culling_bind_group_layout_entries =
+            preprocess_direct_bind_group_layout_entries().extend_sequential((
                 // `indirect_parameters`
                 storage_buffer::<IndirectParameters>(/* has_dynamic_offset= */ false),
                 // `mesh_culling_data`
@@ -314,9 +419,13 @@ impl FromWorld for PreprocessPipelines {
             "build mesh uniforms direct bind group layout",
             &direct_bind_group_layout_entries,
         );
-        let gpu_culling_bind_group_layout = render_device.create_bind_group_layout(
-            "build mesh uniforms GPU culling bind group layout",
-            &gpu_culling_bind_group_layout_entries,
+        let early_gpu_culling_bind_group_layout = render_device.create_bind_group_layout(
+            "build mesh uniforms early GPU culling bind group layout",
+            &early_gpu_culling_bind_group_layout_entries,
+        );
+        let late_gpu_culling_bind_group_layout = render_device.create_bind_group_layout(
+            "build mesh uniforms late GPU culling bind group layout",
+            &late_gpu_culling_bind_group_layout_entries,
         );
 
         PreprocessPipelines {
@@ -324,8 +433,12 @@ impl FromWorld for PreprocessPipelines {
                 bind_group_layout: direct_bind_group_layout,
                 pipeline_id: None,
             },
-            gpu_culling: PreprocessPipeline {
-                bind_group_layout: gpu_culling_bind_group_layout,
+            early_gpu_culling: PreprocessPipeline {
+                bind_group_layout: early_gpu_culling_bind_group_layout,
+                pipeline_id: None,
+            },
+            late_gpu_culling: PreprocessPipeline {
+                bind_group_layout: late_gpu_culling_bind_group_layout,
                 pipeline_id: None,
             },
         }
@@ -359,7 +472,12 @@ pub fn prepare_preprocess_pipelines(
         &mut pipelines,
         PreprocessPipelineKey::empty(),
     );
-    preprocess_pipelines.gpu_culling.prepare(
+    preprocess_pipelines.early_gpu_culling.prepare(
+        &pipeline_cache,
+        &mut pipelines,
+        PreprocessPipelineKey::GPU_CULLING,
+    );
+    preprocess_pipelines.late_gpu_culling.prepare(
         &pipeline_cache,
         &mut pipelines,
         PreprocessPipelineKey::GPU_CULLING,
@@ -410,7 +528,7 @@ pub fn prepare_preprocess_bind_groups(
     };
 
     for (view, index_buffer_vec) in index_buffers {
-        let Some(index_buffer) = index_buffer_vec.buffer.buffer() else {
+        let Some(index_buffer) = index_buffer_vec.main_buffer.buffer() else {
             continue;
         };
 
@@ -418,7 +536,7 @@ pub fn prepare_preprocess_bind_groups(
         // length and the underlying buffer may be longer than the actual size
         // of the vector.
         let index_buffer_size = NonZero::<u64>::try_from(
-            index_buffer_vec.buffer.len() as u64 * u64::from(PreprocessWorkItem::min_size()),
+            index_buffer_vec.main_buffer.len() as u64 * u64::from(PreprocessWorkItem::min_size()),
         )
         .ok();
 
@@ -436,38 +554,60 @@ pub fn prepare_preprocess_bind_groups(
                 continue;
             };
 
-            PreprocessBindGroup(render_device.create_bind_group(
-                "preprocess_gpu_culling_bind_group",
-                &pipelines.gpu_culling.bind_group_layout,
-                &BindGroupEntries::sequential((
-                    current_input_buffer.as_entire_binding(),
-                    previous_input_buffer.as_entire_binding(),
-                    BindingResource::Buffer(BufferBinding {
-                        buffer: index_buffer,
-                        offset: 0,
-                        size: index_buffer_size,
-                    }),
-                    data_buffer.as_entire_binding(),
-                    indirect_parameters_buffer.as_entire_binding(),
-                    mesh_culling_data_buffer.as_entire_binding(),
-                    view_uniforms_binding,
+            PreprocessBindGroups {
+                early: render_device.create_bind_group(
+                    "preprocess_early_gpu_culling_bind_group",
+                    &pipelines.early_gpu_culling.bind_group_layout,
+                    &BindGroupEntries::sequential((
+                        current_input_buffer.as_entire_binding(),
+                        previous_input_buffer.as_entire_binding(),
+                        BindingResource::Buffer(BufferBinding {
+                            buffer: index_buffer,
+                            offset: 0,
+                            size: index_buffer_size,
+                        }),
+                        data_buffer.as_entire_binding(),
+                        indirect_parameters_buffer.as_entire_binding(),
+                        mesh_culling_data_buffer.as_entire_binding(),
+                        view_uniforms_binding.clone(),
+                    )),
+                ),
+                late: Some(render_device.create_bind_group(
+                    "preprocess_late_gpu_culling_bind_group",
+                    &pipelines.late_gpu_culling.bind_group_layout,
+                    &BindGroupEntries::sequential((
+                        current_input_buffer.as_entire_binding(),
+                        previous_input_buffer.as_entire_binding(),
+                        BindingResource::Buffer(BufferBinding {
+                            buffer: index_buffer,
+                            offset: 0,
+                            size: index_buffer_size,
+                        }),
+                        data_buffer.as_entire_binding(),
+                        indirect_parameters_buffer.as_entire_binding(),
+                        mesh_culling_data_buffer.as_entire_binding(),
+                        view_uniforms_binding,
+                    )),
                 )),
-            ))
+            }
         } else {
-            PreprocessBindGroup(render_device.create_bind_group(
-                "preprocess_direct_bind_group",
-                &pipelines.direct.bind_group_layout,
-                &BindGroupEntries::sequential((
-                    current_input_buffer.as_entire_binding(),
-                    previous_input_buffer.as_entire_binding(),
-                    BindingResource::Buffer(BufferBinding {
-                        buffer: index_buffer,
-                        offset: 0,
-                        size: index_buffer_size,
-                    }),
-                    data_buffer.as_entire_binding(),
-                )),
-            ))
+            PreprocessBindGroups {
+                early: render_device.create_bind_group(
+                    "preprocess_direct_bind_group",
+                    &pipelines.direct.bind_group_layout,
+                    &BindGroupEntries::sequential((
+                        current_input_buffer.as_entire_binding(),
+                        previous_input_buffer.as_entire_binding(),
+                        BindingResource::Buffer(BufferBinding {
+                            buffer: index_buffer,
+                            offset: 0,
+                            size: index_buffer_size,
+                        }),
+                        data_buffer.as_entire_binding(),
+                    )),
+                ),
+                late: None,
+            }
         };
 
         commands.entity(*view).insert(bind_group);

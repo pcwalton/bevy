@@ -136,7 +136,7 @@ where
     /// corresponds to each instance.
     ///
     /// This is keyed off each view. Each view has a separate buffer.
-    pub work_item_buffers: EntityHashMap<PreprocessWorkItemBuffer>,
+    pub work_item_buffers: EntityHashMap<PreprocessWorkItemBuffers>,
 
     /// The uniform data inputs for the current frame.
     ///
@@ -244,9 +244,9 @@ where
 }
 
 /// The buffer of GPU preprocessing work items for a single view.
-pub struct PreprocessWorkItemBuffer {
+pub struct PreprocessWorkItemBuffers {
     /// The buffer of work items.
-    pub buffer: BufferVec<PreprocessWorkItem>,
+    pub main_buffer: BufferVec<PreprocessWorkItem>,
     /// True if we're drawing directly instead of indirectly.
     pub no_indirect_drawing: bool,
 }
@@ -421,7 +421,7 @@ impl FromWorld for GpuPreprocessingSupport {
 impl<BD, BDI> BatchedInstanceBuffers<BD, BDI>
 where
     BD: GpuArrayBufferable + Sync + Send + 'static,
-    BDI: Pod + Default,
+    BDI: Pod + Sync + Send + Default + 'static,
 {
     /// Creates new buffers.
     pub fn new() -> Self {
@@ -446,7 +446,7 @@ where
     pub fn clear(&mut self) {
         self.data_buffer.clear();
         for work_item_buffer in self.work_item_buffers.values_mut() {
-            work_item_buffer.buffer.clear();
+            work_item_buffer.main_buffer.clear();
         }
     }
 }
@@ -454,7 +454,7 @@ where
 impl<BD, BDI> Default for BatchedInstanceBuffers<BD, BDI>
 where
     BD: GpuArrayBufferable + Sync + Send + 'static,
-    BDI: Pod + Default,
+    BDI: Pod + Default + Sync + Send + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -574,8 +574,8 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
         let work_item_buffer =
             work_item_buffers
                 .entry(view)
-                .or_insert_with(|| PreprocessWorkItemBuffer {
-                    buffer: BufferVec::new(BufferUsages::STORAGE),
+                .or_insert_with(|| PreprocessWorkItemBuffers {
+                    main_buffer: BufferVec::new(BufferUsages::STORAGE),
                     no_indirect_drawing,
                 });
 
@@ -663,7 +663,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
             // Add a new preprocessing work item so that the preprocessing
             // shader will copy the per-instance data over.
             if let Some(batch) = batch.as_ref() {
-                work_item_buffer.buffer.push(PreprocessWorkItem {
+                work_item_buffer.main_buffer.push(PreprocessWorkItem {
                     input_index: current_input_index.into(),
                     output_index: if no_indirect_drawing {
                         output_index
@@ -714,8 +714,8 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
         let work_item_buffer =
             work_item_buffers
                 .entry(view)
-                .or_insert_with(|| PreprocessWorkItemBuffer {
-                    buffer: BufferVec::new(BufferUsages::STORAGE),
+                .or_insert_with(|| PreprocessWorkItemBuffers {
+                    main_buffer: BufferVec::new(BufferUsages::STORAGE),
                     no_indirect_drawing,
                 });
 
@@ -750,7 +750,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                         // tightly-packed buffer if GPU culling discards some of
                         // the instances. Otherwise, we can just write the
                         // output index directly.
-                        work_item_buffer.buffer.push(PreprocessWorkItem {
+                        work_item_buffer.main_buffer.push(PreprocessWorkItem {
                             input_index: input_index.into(),
                             output_index: if no_indirect_drawing {
                                 output_index
@@ -776,7 +776,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                             indirect_parameters_index,
                             main_entity,
                         );
-                        work_item_buffer.buffer.push(PreprocessWorkItem {
+                        work_item_buffer.main_buffer.push(PreprocessWorkItem {
                             input_index: input_index.into(),
                             output_index: first_output_index,
                             indirect_parameters_index,
@@ -792,7 +792,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
 
                     None => {
                         // Start a new batch, in direct mode.
-                        work_item_buffer.buffer.push(PreprocessWorkItem {
+                        work_item_buffer.main_buffer.push(PreprocessWorkItem {
                             input_index: input_index.into(),
                             output_index,
                             indirect_parameters_index: 0,
@@ -861,7 +861,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                         *indirect_parameters_index,
                         main_entity,
                     );
-                    work_item_buffer.buffer.push(PreprocessWorkItem {
+                    work_item_buffer.main_buffer.push(PreprocessWorkItem {
                         input_index: input_index.into(),
                         output_index,
                         indirect_parameters_index: *indirect_parameters_index,
@@ -876,7 +876,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                         });
                     *indirect_parameters_index += 1;
                 } else {
-                    work_item_buffer.buffer.push(PreprocessWorkItem {
+                    work_item_buffer.main_buffer.push(PreprocessWorkItem {
                         input_index: input_index.into(),
                         output_index,
                         indirect_parameters_index: 0,
@@ -918,7 +918,7 @@ pub fn write_batched_instance_buffers<GFBD>(
 
     for index_buffer in index_buffers.values_mut() {
         index_buffer
-            .buffer
+            .main_buffer
             .write_buffer(&render_device, &render_queue);
     }
 }

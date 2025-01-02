@@ -4,7 +4,7 @@
 #ifdef MESHLET
 @group(0) @binding(0) var<storage, read> mip_0: array<u32>; // Per pixel
 #else   // MESHLET
-@group(0) @binding(0) var mip_0: texture_2d<f32>;
+@group(0) @binding(0) var mip_0: texture_depth_2d;
 #endif  // MESHLET
 #endif  // MESHLET_VISIBILITY_BUFFER_RASTER_PASS_OUTPUT
 @group(0) @binding(1) var mip_1: texture_storage_2d<r32float, write>;
@@ -312,7 +312,7 @@ fn load_mip_0(x: u32, y: u32) -> f32 {
 #ifdef MESHLET
     return bitcast<f32>(mip_0[i]);
 #else   // MESHLET
-    return textureLoad(mip_0, vec2(x, y), 0).r;
+    return textureLoad(mip_0, vec2(x, y), 0);
 #endif  // MESHLET
 #endif  // MESHLET_VISIBILITY_BUFFER_RASTER_PASS_OUTPUT
 }

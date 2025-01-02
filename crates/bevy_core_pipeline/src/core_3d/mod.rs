@@ -16,9 +16,11 @@ pub mod graph {
     #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
     pub enum Node3d {
         MsaaWriteback,
+        EarlyMeshPreprocessing,
         EarlyPrepass,
         FinishEarlyCullingPhase,
         DownsampleDepth,
+        LateMeshPreprocessing,
         Prepass,
         FinishMainCullingPhase,
         DeferredPrepass,
@@ -205,7 +207,6 @@ impl Plugin for Core3dPlugin {
             .add_render_graph_edges(
                 Core3d,
                 (
-                    Node3d::EarlyPrepass,
                     Node3d::Prepass,
                     Node3d::DeferredPrepass,
                     Node3d::CopyDeferredLightingId,

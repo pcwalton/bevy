@@ -38,6 +38,7 @@ use nonmax::NonMaxU32;
 pub use rangefinder::*;
 
 use crate::batching::gpu_preprocessing::GpuPreprocessingMode;
+use crate::occlusion_culling;
 use crate::sync_world::MainEntity;
 use crate::{
     batching::{
@@ -679,7 +680,11 @@ where
                     (
                         no_gpu_preprocessing::batch_and_prepare_binned_render_phase::<BPI, GFBD>
                             .run_if(resource_exists::<BatchedInstanceBuffer<GFBD::BufferData>>),
-                        gpu_preprocessing::batch_and_prepare_binned_render_phase::<BPI, GFBD>
+                        (
+                            gpu_preprocessing::batch_and_prepare_binned_render_phase::<BPI, GFBD>,
+                            occlusion_culling::prepare_occlusion_culling_visibility_buffers::<BPI, GFBD>,
+                        )
+                            .chain()
                             .run_if(
                                 resource_exists::<
                                     BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>,
@@ -758,18 +763,23 @@ where
         render_app
             .init_resource::<ViewSortedRenderPhases<SPI>>()
             .add_systems(
-                Render,
+            Render,
+            (
+                no_gpu_preprocessing::batch_and_prepare_sorted_render_phase::<SPI, GFBD>
+                    .run_if(resource_exists::<BatchedInstanceBuffer<GFBD::BufferData>>),
                 (
-                    no_gpu_preprocessing::batch_and_prepare_sorted_render_phase::<SPI, GFBD>
-                        .run_if(resource_exists::<BatchedInstanceBuffer<GFBD::BufferData>>),
-                    gpu_preprocessing::batch_and_prepare_sorted_render_phase::<SPI, GFBD>.run_if(
+                    gpu_preprocessing::batch_and_prepare_sorted_render_phase::<SPI, GFBD>,
+                    occlusion_culling::prepare_occlusion_culling_visibility_buffers::<SPI, GFBD>,
+                )
+                    .chain()
+                    .run_if(
                         resource_exists::<
                             BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>,
                         >,
                     ),
-                )
-                    .in_set(RenderSet::PrepareResources),
-            );
+            )
+                .in_set(RenderSet::PrepareResources),
+        );
     }
 }
 

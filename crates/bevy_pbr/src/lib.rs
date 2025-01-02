@@ -107,7 +107,8 @@ pub mod graph {
         /// Label for the volumetric lighting pass.
         VolumetricFog,
         /// Label for the compute shader instance data building pass.
-        GpuPreprocess,
+        EarlyGpuPreprocess,
+        LateGpuPreprocess,
         /// Label for the screen space reflections pass.
         ScreenSpaceReflections,
     }

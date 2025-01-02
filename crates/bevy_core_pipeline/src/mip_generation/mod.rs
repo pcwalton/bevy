@@ -15,15 +15,16 @@ use bevy_ecs::{
 };
 use bevy_math::{uvec2, UVec2, UVec4};
 use bevy_render::{
+    occlusion_culling::OcclusionCulling,
     render_graph::{NodeRunError, RenderGraphApp, RenderGraphContext, ViewNode, ViewNodeRunner},
     render_resource::{
-        binding_types::{sampler, storage_buffer_read_only_sized, texture_storage_2d},
+        binding_types::{sampler, texture_2d, texture_storage_2d},
         BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries,
         CachedComputePipelineId, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
         Extent3d, IntoBinding, PipelineCache, PushConstantRange, Sampler, SamplerBindingType,
         SamplerDescriptor, Shader, ShaderStages, StorageTextureAccess, TextureAspect,
-        TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
-        TextureViewDescriptor, TextureViewDimension,
+        TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+        TextureView, TextureViewDescriptor, TextureViewDimension,
     },
     renderer::{RenderContext, RenderDevice},
     texture::TextureCache,
@@ -31,10 +32,7 @@ use bevy_render::{
     Render, RenderApp, RenderSet,
 };
 
-use crate::{
-    core_3d::graph::{Core3d, Node3d},
-    occlusion_culling::OcclusionCulling,
-};
+use crate::core_3d::graph::{Core3d, Node3d};
 
 pub const DOWNSAMPLE_DEPTH_SHADER_HANDLE: Handle<Shader> =
     Handle::weak_from_u128(3876351454330663524);
@@ -77,10 +75,6 @@ impl Plugin for MipGenerationPlugin {
                 )
                     .chain()
                     .in_set(RenderSet::PrepareResources),
-            )
-            .add_systems(
-                Render,
-                prepare_downsample_depth_pipelines.in_set(RenderSet::PrepareResources),
             );
     }
 
@@ -102,22 +96,29 @@ impl ViewNode for DownsampleDepthNode {
     type ViewQuery = (
         Read<ViewDepthPyramid>,
         Read<ViewDownsampleDepthBindGroup>,
-        Read<ViewDownsampleDepthPipelines>,
         Read<ViewDepthTexture>,
     );
 
     fn run<'w>(
         &self,
-        graph: &mut RenderGraphContext,
+        _: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (
-            view_depth_pyramid,
-            view_downsample_depth_bind_group,
-            view_downsample_depth_pipelines,
-            view_depth_texture,
-        ): QueryItem<'w, Self::ViewQuery>,
+        (view_depth_pyramid, view_downsample_depth_bind_group, view_depth_texture): QueryItem<
+            'w,
+            Self::ViewQuery,
+        >,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
+        let downsample_depth_pipelines = world.resource::<DownsampleDepthPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+
+        let (Some(first_downsample_depth_pipeline), Some(second_downsample_depth_pipeline)) = (
+            pipeline_cache.get_compute_pipeline(downsample_depth_pipelines.first),
+            pipeline_cache.get_compute_pipeline(downsample_depth_pipelines.second),
+        ) else {
+            return Ok(());
+        };
+
         let view_size = uvec2(
             view_depth_texture.texture.width(),
             view_depth_texture.texture.height(),
@@ -126,8 +127,8 @@ impl ViewNode for DownsampleDepthNode {
             render_context,
             view_size,
             view_downsample_depth_bind_group,
-            &view_downsample_depth_pipelines.first,
-            &view_downsample_depth_pipelines.second,
+            first_downsample_depth_pipeline,
+            second_downsample_depth_pipeline,
         );
         Ok(())
     }
@@ -149,8 +150,7 @@ impl FromWorld for DownsampleDepthBindGroupLayout {
                 &BindGroupLayoutEntries::sequential(
                     ShaderStages::COMPUTE,
                     (
-                        // TODO: this is probably wrong, it's specialized to meshlets
-                        storage_buffer_read_only_sized(false, None),
+                        texture_2d(TextureSampleType::Depth),
                         texture_storage_2d(
                             TextureFormat::R32Float,
                             StorageTextureAccess::WriteOnly,
@@ -459,33 +459,5 @@ fn prepare_downsample_depth_view_bind_groups(
                     &downsample_depth_bind_group_layout.sampler,
                 ),
             ));
-    }
-}
-
-#[derive(Component)]
-pub struct ViewDownsampleDepthPipelines {
-    first: ComputePipeline,
-    second: ComputePipeline,
-}
-
-fn prepare_downsample_depth_pipelines(
-    mut commands: Commands,
-    views: Query<Entity, With<OcclusionCulling>>,
-    downsample_depth_pipelines: Res<DownsampleDepthPipelines>,
-    pipeline_cache: Res<PipelineCache>,
-) {
-    for view_entity in &views {
-        let (Some(first), Some(second)) = (
-            pipeline_cache.get_compute_pipeline(downsample_depth_pipelines.first),
-            pipeline_cache.get_compute_pipeline(downsample_depth_pipelines.second),
-        ) else {
-            continue;
-        };
-        commands
-            .entity(view_entity)
-            .insert(ViewDownsampleDepthPipelines {
-                first: (*first).clone(),
-                second: (*second).clone(),
-            });
     }
 }

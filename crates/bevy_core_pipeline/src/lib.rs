@@ -29,6 +29,7 @@ mod taa;
 pub mod tonemapping;
 pub mod upscaling;
 
+use occlusion_culling::OcclusionCullingCorePipelinePlugin;
 pub use skybox::Skybox;
 
 /// Experimental features that are not yet finished. Please report any issues you encounter!
@@ -111,6 +112,7 @@ impl Plugin for CorePipelinePlugin {
                 PostProcessingPlugin,
                 OrderIndependentTransparencyPlugin,
                 MipGenerationPlugin,
+                OcclusionCullingCorePipelinePlugin,
             ));
     }
 }

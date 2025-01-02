@@ -2697,7 +2697,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
         SRes<MeshAllocator>,
         Option<SRes<PreprocessPipelines>>,
     );
-    type ViewQuery = Has<PreprocessBindGroup>;
+    type ViewQuery = Has<PreprocessBindGroups>;
     type ItemQuery = ();
     #[inline]
     fn render<'w>(
