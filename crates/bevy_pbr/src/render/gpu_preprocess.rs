@@ -6,12 +6,14 @@
 //! [`MeshInputUniform`]s instead and use the GPU to calculate the remaining
 //! derived fields in [`MeshUniform`].
 
-use core::num::NonZero;
-use std::mem;
+use core::{mem, num::NonZero};
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Handle};
-use bevy_core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy_core_pipeline::{
+    core_3d::graph::{Core3d, Node3d},
+    mip_generation::ViewDepthPyramid,
+};
 use bevy_ecs::{
     component::Component,
     entity::{Entity, EntityHashMap},
@@ -28,11 +30,12 @@ use bevy_render::{
     occlusion_culling::OcclusionCulling,
     render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext},
     render_resource::{
-        binding_types::{storage_buffer, storage_buffer_read_only, uniform_buffer},
+        binding_types::{storage_buffer, storage_buffer_read_only, texture_2d, uniform_buffer},
         BindGroup, BindGroupEntries, BindGroupLayout, BindingResource, BufferBinding, BufferUsages,
         CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
-        DynamicBindGroupLayoutEntries, PipelineCache, RawBufferVec, Shader, ShaderStages,
-        ShaderType, SpecializedComputePipeline, SpecializedComputePipelines,
+        DynamicBindGroupLayoutEntries, IntoBinding, PipelineCache, RawBufferVec, Shader,
+        ShaderStages, ShaderType, SpecializedComputePipeline, SpecializedComputePipelines,
+        TextureSampleType,
     },
     renderer::{RenderContext, RenderDevice, RenderQueue},
     view::{NoIndirectDrawing, ViewUniform, ViewUniformOffset, ViewUniforms},
@@ -413,13 +416,13 @@ impl FromWorld for PreprocessPipelines {
 
         // GPU culling bind group parameters are a superset of those in the CPU
         // culling (direct) shader.
-        let direct_bind_group_layout_entries = preprocess_direct_bind_group_layout_entries();
+        let gpu_late_occlusion_culling_bind_group_layout_entries =
+            gpu_early_occlusion_culling_bind_group_layout_entries()
+                .extend_sequential((texture_2d(TextureSampleType::Float { filterable: true }),));
+        let gpu_early_occlusion_culling_bind_group_layout_entries =
+            gpu_early_occlusion_culling_bind_group_layout_entries();
         let gpu_frustum_culling_bind_group_layout_entries = gpu_culling_bind_group_layout_entries();
-        let gpu_occlusion_culling_bind_group_layout_entries =
-            gpu_culling_bind_group_layout_entries().extend_sequential((
-                // `view_visibility`
-                storage_buffer::<u32>(/* has_dynamic_offset= */ false),
-            ));
+        let direct_bind_group_layout_entries = preprocess_direct_bind_group_layout_entries();
 
         let direct_bind_group_layout = render_device.create_bind_group_layout(
             "build mesh uniforms direct bind group layout",
@@ -429,9 +432,13 @@ impl FromWorld for PreprocessPipelines {
             "build mesh uniforms GPU frustum culling bind group layout",
             &gpu_frustum_culling_bind_group_layout_entries,
         );
-        let gpu_occlusion_culling_bind_group_layout = render_device.create_bind_group_layout(
-            "build mesh uniforms GPU occlusion culling bind group layout",
-            &gpu_occlusion_culling_bind_group_layout_entries,
+        let gpu_early_occlusion_culling_bind_group_layout = render_device.create_bind_group_layout(
+            "build mesh uniforms GPU early occlusion culling bind group layout",
+            &gpu_early_occlusion_culling_bind_group_layout_entries,
+        );
+        let gpu_late_occlusion_culling_bind_group_layout = render_device.create_bind_group_layout(
+            "build mesh uniforms GPU late occlusion culling bind group layout",
+            &gpu_late_occlusion_culling_bind_group_layout_entries,
         );
 
         PreprocessPipelines {
@@ -444,11 +451,11 @@ impl FromWorld for PreprocessPipelines {
                 pipeline_id: None,
             },
             early_gpu_occlusion_culling: PreprocessPipeline {
-                bind_group_layout: gpu_occlusion_culling_bind_group_layout.clone(),
+                bind_group_layout: gpu_early_occlusion_culling_bind_group_layout,
                 pipeline_id: None,
             },
             late_gpu_occlusion_culling: PreprocessPipeline {
-                bind_group_layout: gpu_occlusion_culling_bind_group_layout,
+                bind_group_layout: gpu_late_occlusion_culling_bind_group_layout,
                 pipeline_id: None,
             },
         }
@@ -481,6 +488,13 @@ fn gpu_culling_bind_group_layout_entries() -> DynamicBindGroupLayoutEntries {
         storage_buffer_read_only::<MeshCullingData>(/* has_dynamic_offset= */ false),
         // `view`
         uniform_buffer::<ViewUniform>(/* has_dynamic_offset= */ true),
+    ))
+}
+
+fn gpu_early_occlusion_culling_bind_group_layout_entries() -> DynamicBindGroupLayoutEntries {
+    gpu_culling_bind_group_layout_entries().extend_sequential((
+        // `view_visibility`
+        storage_buffer::<u32>(/* has_dynamic_offset= */ false),
     ))
 }
 
@@ -590,6 +604,7 @@ pub fn prepare_occlusion_culling_visibility_buffers(
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_preprocess_bind_groups(
     mut commands: Commands,
+    view_depth_pyramids: Query<&ViewDepthPyramid>,
     render_device: Res<RenderDevice>,
     batched_instance_buffers: Res<BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>,
     indirect_parameters_buffer: Res<IndirectParametersBuffer>,
@@ -651,6 +666,7 @@ pub fn prepare_preprocess_bind_groups(
                 Some(mesh_culling_data_buffer),
                 Some(view_uniforms_binding),
                 Some(occlusion_culling_visibility_buffer_binding),
+                Ok(view_depth_pyramid),
             ) = (
                 indirect_parameters_buffer.buffer(),
                 mesh_culling_data_buffer.buffer(),
@@ -659,6 +675,7 @@ pub fn prepare_preprocess_bind_groups(
                     .buffers
                     .get(view)
                     .and_then(|buffer| buffer.current_frame.binding()),
+                view_depth_pyramids.get(*view),
             )
             else {
                 continue;
@@ -699,6 +716,7 @@ pub fn prepare_preprocess_bind_groups(
                         mesh_culling_data_buffer.as_entire_binding(),
                         view_uniforms_binding,
                         occlusion_culling_visibility_buffer_binding,
+                        view_depth_pyramid.all_mips.into_binding(),
                     )),
                 )),
             }

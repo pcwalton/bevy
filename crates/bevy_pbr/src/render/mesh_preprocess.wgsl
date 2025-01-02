@@ -83,7 +83,12 @@ struct PreprocessWorkItem {
 
 #ifdef OCCLUSION_CULLING
 // TODO: Make this a bitfield? Would have to use atomics then.
+// Meshlets makes this a bitfield.
 @group(0) @binding(7) var<storage, read_write> view_visibility: array<u32>;
+
+#ifndef EARLY
+@group(0) @binding(8) var depth_pyramid: texture_2d<f32>;
+#endif  // EARLY
 #endif  // OCCLUSION_CULLING
 
 #ifdef FRUSTUM_CULLING

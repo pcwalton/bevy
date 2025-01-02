@@ -89,6 +89,7 @@ pub const MESH_FUNCTIONS_HANDLE: Handle<Shader> = Handle::weak_from_u128(6300874
 pub const MESH_SHADER_HANDLE: Handle<Shader> = Handle::weak_from_u128(3252377289100772450);
 pub const SKINNING_HANDLE: Handle<Shader> = Handle::weak_from_u128(13215291596265391738);
 pub const MORPH_HANDLE: Handle<Shader> = Handle::weak_from_u128(970982813587607345);
+pub const OCCLUSION_CULLING_HANDLE: Handle<Shader> = Handle::weak_from_u128(285365001154292827);
 
 /// How many textures are allowed in the view bind group layout (`@group(0)`) before
 /// broader compatibility with WebGL and WebGPU is at risk, due to the minimum guaranteed
@@ -136,6 +137,12 @@ impl Plugin for MeshRenderPlugin {
         load_internal_asset!(app, MESH_SHADER_HANDLE, "mesh.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, SKINNING_HANDLE, "skinning.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, MORPH_HANDLE, "morph.wgsl", Shader::from_wgsl);
+        load_internal_asset!(
+            app,
+            OCCLUSION_CULLING_HANDLE,
+            "occlusion_culling.wgsl",
+            Shader::from_wgsl
+        );
 
         if app.get_sub_app(RenderApp).is_none() {
             return;

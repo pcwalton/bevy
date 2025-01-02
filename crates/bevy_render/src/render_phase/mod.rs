@@ -38,7 +38,6 @@ use nonmax::NonMaxU32;
 pub use rangefinder::*;
 
 use crate::batching::gpu_preprocessing::GpuPreprocessingMode;
-use crate::occlusion_culling;
 use crate::sync_world::MainEntity;
 use crate::{
     batching::{
