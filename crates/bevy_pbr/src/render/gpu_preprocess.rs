@@ -10,7 +10,7 @@ use core::num::NonZero;
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Handle};
-use bevy_core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy_core_pipeline::core_3d::graph::Core3d;
 use bevy_ecs::{
     component::Component,
     entity::Entity,
@@ -136,8 +136,10 @@ bitflags! {
 #[derive(Component, Clone)]
 pub struct PreprocessBindGroups {
     preprocess: BindGroup,
-    build_indirect_params: Option<BindGroup>,
 }
+
+#[derive(Resource)]
+pub struct BuildIndirectParametersBindGroup(BindGroup);
 
 /// Stops the `GpuPreprocessNode` attempting to generate the buffer for this view
 /// useful to avoid duplicating effort if the bind group is shared between views
@@ -198,7 +200,7 @@ impl Plugin for GpuMeshPreprocessPlugin {
             .add_render_graph_node::<BuildIndirectParametersNode>(Core3d, NodePbr::BuildIndirectParametersNode)
             .add_render_graph_edges(
                 Core3d,
-                (NodePbr::GpuPreprocess, NodePbr::BuildIndirectParametersNode, Node3d::Prepass)
+                (NodePbr::GpuPreprocess, NodePbr::BuildIndirectParametersNode, NodePbr::ShadowPass)
             );
     }
 }
@@ -305,6 +307,12 @@ impl Node for BuildIndirectParametersNode {
         render_context: &mut RenderContext<'w>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
+        let Some(build_indirect_params_bind_group) =
+            world.get_resource::<BuildIndirectParametersBindGroup>()
+        else {
+            return Ok(());
+        };
+
         let pipeline_cache = world.resource::<PipelineCache>();
         let preprocess_pipelines = world.resource::<PreprocessPipelines>();
         let indirect_parameters_buffers = world.resource::<IndirectParametersBuffers>();
@@ -318,34 +326,26 @@ impl Node for BuildIndirectParametersNode {
                 });
 
         // Run the compute passes.
-        for bind_groups in self.view_query.iter_manual(world) {
-            let Some(ref bind_group) = bind_groups.build_indirect_params else {
-                continue;
-            };
+        let maybe_pipeline_id = preprocess_pipelines.build_indirect_params.pipeline_id;
 
-            // Select the right pipeline, depending on whether GPU culling is in
-            // use.
-            let maybe_pipeline_id = preprocess_pipelines.build_indirect_params.pipeline_id;
+        // Fetch the pipeline.
+        let Some(build_indirect_params_pipeline_id) = maybe_pipeline_id else {
+            warn!("The build indirect parameters pipeline wasn't ready");
+            return Ok(());
+        };
 
-            // Fetch the pipeline.
-            let Some(build_indirect_params_pipeline_id) = maybe_pipeline_id else {
-                warn!("The build indirect parameters pipeline wasn't ready");
-                return Ok(());
-            };
+        let Some(build_indirect_params_pipeline) =
+            pipeline_cache.get_compute_pipeline(build_indirect_params_pipeline_id)
+        else {
+            // This will happen while the pipeline is being compiled and is fine.
+            return Ok(());
+        };
 
-            let Some(build_indirect_params_pipeline) =
-                pipeline_cache.get_compute_pipeline(build_indirect_params_pipeline_id)
-            else {
-                // This will happen while the pipeline is being compiled and is fine.
-                return Ok(());
-            };
+        compute_pass.set_pipeline(build_indirect_params_pipeline);
+        compute_pass.set_bind_group(0, &build_indirect_params_bind_group.0, &[]);
 
-            compute_pass.set_pipeline(build_indirect_params_pipeline);
-            compute_pass.set_bind_group(0, bind_group, &[]);
-
-            let workgroup_count = indirect_parameters_buffers.len().div_ceil(WORKGROUP_SIZE);
-            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-        }
+        let workgroup_count = indirect_parameters_buffers.len().div_ceil(WORKGROUP_SIZE);
+        compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
 
         Ok(())
     }
@@ -568,6 +568,8 @@ pub fn prepare_preprocess_bind_groups(
         return;
     };
 
+    let mut any_indirect = false;
+
     for (view, index_buffer_vec) in index_buffers {
         let Some(index_buffer) = index_buffer_vec.buffer.buffer() else {
             continue;
@@ -581,15 +583,15 @@ pub fn prepare_preprocess_bind_groups(
         )
         .ok();
 
+        any_indirect = any_indirect || !index_buffer_vec.no_indirect_drawing;
+
         let bind_group = if !index_buffer_vec.no_indirect_drawing {
             let (
                 Some(indirect_parameters_metadata_buffer),
-                Some(indirect_parameters_data_buffer),
                 Some(mesh_culling_data_buffer),
                 Some(view_uniforms_binding),
             ) = (
                 indirect_parameters_buffer.metadata_buffer(),
-                indirect_parameters_buffer.data_buffer(),
                 mesh_culling_data_buffer.buffer(),
                 view_uniforms.uniforms.binding(),
             )
@@ -615,15 +617,6 @@ pub fn prepare_preprocess_bind_groups(
                         view_uniforms_binding,
                     )),
                 ),
-                build_indirect_params: Some(render_device.create_bind_group(
-                    "build_indirect_parameters_bind_group",
-                    &pipelines.build_indirect_params.bind_group_layout,
-                    &BindGroupEntries::sequential((
-                        current_input_buffer.as_entire_binding(),
-                        indirect_parameters_metadata_buffer.as_entire_binding(),
-                        indirect_parameters_data_buffer.as_entire_binding(),
-                    )),
-                )),
             }
         } else {
             PreprocessBindGroups {
@@ -641,11 +634,29 @@ pub fn prepare_preprocess_bind_groups(
                         data_buffer.as_entire_binding(),
                     )),
                 ),
-                build_indirect_params: None,
             }
         };
 
         commands.entity(*view).insert(bind_group);
+    }
+
+    if any_indirect {
+        if let (Some(indirect_parameters_metadata_buffer), Some(indirect_parameters_data_buffer)) = (
+            indirect_parameters_buffer.metadata_buffer(),
+            indirect_parameters_buffer.data_buffer(),
+        ) {
+            commands.insert_resource(BuildIndirectParametersBindGroup(
+                render_device.create_bind_group(
+                    "build_indirect_parameters_bind_group",
+                    &pipelines.build_indirect_params.bind_group_layout,
+                    &BindGroupEntries::sequential((
+                        current_input_buffer.as_entire_binding(),
+                        indirect_parameters_metadata_buffer.as_entire_binding(),
+                        indirect_parameters_data_buffer.as_entire_binding(),
+                    )),
+                ),
+            ));
+        }
     }
 }
 
