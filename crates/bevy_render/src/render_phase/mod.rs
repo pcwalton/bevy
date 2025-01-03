@@ -36,8 +36,10 @@ pub use draw_state::*;
 use encase::{internal::WriteInto, ShaderSize};
 use nonmax::NonMaxU32;
 pub use rangefinder::*;
+use wgpu::Features;
 
 use crate::batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport};
+use crate::renderer::RenderDevice;
 use crate::sync_world::MainEntity;
 use crate::{
     batching::{
@@ -189,6 +191,7 @@ pub enum BinnedRenderPhaseBatchSets<BK> {
 pub struct BinnedRenderPhaseBatchSet<BK> {
     pub(crate) batches: Vec<BinnedRenderPhaseBatch>,
     pub(crate) bin_key: BK,
+    pub(crate) index: u32,
 }
 
 impl<BK> BinnedRenderPhaseBatchSets<BK> {
@@ -452,6 +455,11 @@ where
         let draw_functions = world.resource::<DrawFunctions<BPI>>();
         let mut draw_functions = draw_functions.write();
 
+        let render_device = world.resource::<RenderDevice>();
+        let multi_draw_indirect_count_supported = render_device
+            .features()
+            .contains(Features::MULTI_DRAW_INDIRECT_COUNT);
+
         match self.batch_sets {
             BinnedRenderPhaseBatchSets::DynamicUniforms(ref batch_sets) => {
                 debug_assert_eq!(self.batchable_mesh_keys.len(), batch_sets.len());
@@ -518,6 +526,12 @@ where
                         continue;
                     };
 
+                    let batch_set_index = if multi_draw_indirect_count_supported {
+                        NonMaxU32::new(batch_set.index)
+                    } else {
+                        None
+                    };
+
                     let binned_phase_item = BPI::new(
                         batch_set_key.clone(),
                         batch_set.bin_key.clone(),
@@ -528,10 +542,12 @@ where
                             PhaseItemExtraIndex::DynamicOffset(ref dynamic_offset) => {
                                 PhaseItemExtraIndex::DynamicOffset(*dynamic_offset)
                             }
-                            PhaseItemExtraIndex::IndirectParametersIndex(ref range) => {
-                                PhaseItemExtraIndex::IndirectParametersIndex(
-                                    range.start..(range.start + batch_set.batches.len() as u32),
-                                )
+                            PhaseItemExtraIndex::IndirectParametersIndex { ref range, .. } => {
+                                PhaseItemExtraIndex::IndirectParametersIndex {
+                                    range: range.start
+                                        ..(range.start + batch_set.batches.len() as u32),
+                                    batch_set_index,
+                                }
                             }
                         },
                     );
@@ -581,10 +597,11 @@ where
                                 let first_indirect_parameters_index_for_entity =
                                     u32::from(*first_indirect_parameters_index)
                                         + entity_index as u32;
-                                PhaseItemExtraIndex::IndirectParametersIndex(
-                                    first_indirect_parameters_index_for_entity
+                                PhaseItemExtraIndex::IndirectParametersIndex {
+                                    range: first_indirect_parameters_index_for_entity
                                         ..(first_indirect_parameters_index_for_entity + 1),
-                                )
+                                    batch_set_index: None,
+                                }
                             }
                         },
                     },
@@ -721,10 +738,11 @@ impl UnbatchableBinnedEntityIndexSet {
                     u32::from(*first_indirect_parameters_index) + entity_index;
                 Some(UnbatchableBinnedEntityIndices {
                     instance_index: instance_range.start + entity_index,
-                    extra_index: PhaseItemExtraIndex::IndirectParametersIndex(
-                        first_indirect_parameters_index_for_this_batch
+                    extra_index: PhaseItemExtraIndex::IndirectParametersIndex {
+                        range: first_indirect_parameters_index_for_this_batch
                             ..(first_indirect_parameters_index_for_this_batch + 1),
-                    ),
+                        batch_set_index: None,
+                    },
                 })
             }
             UnbatchableBinnedEntityIndexSet::Dense(ref indices) => {
@@ -886,12 +904,17 @@ impl UnbatchableBinnedEntityIndexSet {
                             first_indirect_parameters_index: None,
                         }
                     }
-                    PhaseItemExtraIndex::IndirectParametersIndex(ref range) => {
+                    PhaseItemExtraIndex::IndirectParametersIndex {
+                        range: ref indirect_parameters_index,
+                        ..
+                    } => {
                         // This is the first entity we've seen, and we have compute
                         // shaders. Initialize the fast path.
                         *self = UnbatchableBinnedEntityIndexSet::Sparse {
                             instance_range: indices.instance_index..indices.instance_index + 1,
-                            first_indirect_parameters_index: NonMaxU32::new(range.start),
+                            first_indirect_parameters_index: NonMaxU32::new(
+                                indirect_parameters_index.start,
+                            ),
                         }
                     }
                 }
@@ -905,7 +928,10 @@ impl UnbatchableBinnedEntityIndexSet {
                     && indices.extra_index == PhaseItemExtraIndex::None)
                     || first_indirect_parameters_index.is_some_and(
                         |first_indirect_parameters_index| match indices.extra_index {
-                            PhaseItemExtraIndex::IndirectParametersIndex(ref this_range) => {
+                            PhaseItemExtraIndex::IndirectParametersIndex {
+                                range: ref this_range,
+                                ..
+                            } => {
                                 u32::from(first_indirect_parameters_index) + instance_range.end
                                     - instance_range.start
                                     == this_range.start
@@ -1095,6 +1121,8 @@ pub trait PhaseItem: Sized + Send + Sync + 'static {
     /// Returns a pair of mutable references to both the batch range and extra
     /// index.
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex);
+
+    fn indexed(&self) -> bool;
 }
 
 /// The "extra index" associated with some [`PhaseItem`]s, alongside the
@@ -1125,7 +1153,10 @@ pub enum PhaseItemExtraIndex {
     /// An index into the buffer that specifies the indirect parameters for this
     /// [`PhaseItem`]'s drawcall. This is used when indirect mode is on (as used
     /// for GPU culling).
-    IndirectParametersIndex(Range<u32>),
+    IndirectParametersIndex {
+        range: Range<u32>,
+        batch_set_index: Option<NonMaxU32>,
+    },
 }
 
 impl PhaseItemExtraIndex {
@@ -1135,9 +1166,11 @@ impl PhaseItemExtraIndex {
         indirect_parameters_index: Option<NonMaxU32>,
     ) -> PhaseItemExtraIndex {
         match indirect_parameters_index {
-            Some(indirect_parameters_index) => PhaseItemExtraIndex::IndirectParametersIndex(
-                u32::from(indirect_parameters_index)..(u32::from(indirect_parameters_index) + 1),
-            ),
+            Some(indirect_parameters_index) => PhaseItemExtraIndex::IndirectParametersIndex {
+                range: u32::from(indirect_parameters_index)
+                    ..(u32::from(indirect_parameters_index) + 1),
+                batch_set_index: None,
+            },
             None => PhaseItemExtraIndex::None,
         }
     }
@@ -1168,7 +1201,7 @@ pub trait BinnedPhaseItem: PhaseItem {
     /// reduces the need for rebinding between bins and improves performance.
     type BinKey: Clone + Send + Sync + PartialEq + Eq + Ord + Hash;
 
-    type BatchSetKey: Clone + Send + Sync + PartialEq + Eq + Ord + Hash;
+    type BatchSetKey: PhaseItemBatchSetKey;
 
     /// Creates a new binned phase item from the key and per-entity data.
     ///
@@ -1182,6 +1215,10 @@ pub trait BinnedPhaseItem: PhaseItem {
         batch_range: Range<u32>,
         extra_index: PhaseItemExtraIndex,
     ) -> Self;
+}
+
+pub trait PhaseItemBatchSetKey: Clone + Send + Sync + PartialEq + Eq + Ord + Hash {
+    fn indexed(&self) -> bool;
 }
 
 /// Represents phase items that must be sorted. The `SortKey` specifies the

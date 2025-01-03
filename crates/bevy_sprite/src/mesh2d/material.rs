@@ -7,7 +7,9 @@ use crate::{
 use bevy_app::{App, Plugin};
 use bevy_asset::{Asset, AssetApp, AssetId, AssetServer, Handle};
 use bevy_core_pipeline::{
-    core_2d::{AlphaMask2d, AlphaMask2dBinKey, Opaque2d, Opaque2dBinKey, Transparent2d},
+    core_2d::{
+        AlphaMask2d, AlphaMask2dBinKey, BatchSetKey2d, Opaque2d, Opaque2dBinKey, Transparent2d,
+    },
     tonemapping::{DebandDither, Tonemapping},
 };
 use bevy_derive::{Deref, DerefMut};
@@ -577,7 +579,7 @@ pub fn queue_material2d_meshes<M: Material2d>(
                         material_bind_group_id: material_2d.get_bind_group_id().0,
                     };
                     opaque_phase.add(
-                        (),
+                        BatchSetKey2d,
                         bin_key,
                         (*render_entity, *visible_entity),
                         BinnedRenderPhaseType::mesh(
@@ -594,7 +596,7 @@ pub fn queue_material2d_meshes<M: Material2d>(
                         material_bind_group_id: material_2d.get_bind_group_id().0,
                     };
                     alpha_mask_phase.add(
-                        (),
+                        BatchSetKey2d,
                         bin_key,
                         (*render_entity, *visible_entity),
                         BinnedRenderPhaseType::mesh(

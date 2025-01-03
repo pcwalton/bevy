@@ -35,6 +35,7 @@ use bevy_ecs::prelude::*;
 use bevy_math::Mat4;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::mesh::allocator::SlabId;
+use bevy_render::render_phase::PhaseItemBatchSetKey;
 use bevy_render::sync_world::MainEntity;
 use bevy_render::{
     render_phase::{
@@ -184,6 +185,12 @@ pub struct OpaqueNoLightmap3dBatchSetKey {
     pub index_slab: Option<SlabId>,
 }
 
+impl PhaseItemBatchSetKey for OpaqueNoLightmap3dBatchSetKey {
+    fn indexed(&self) -> bool {
+        self.index_slab.is_some()
+    }
+}
+
 // TODO: Try interning these.
 /// The data used to bin each opaque 3D object in the prepass and deferred pass.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -225,6 +232,11 @@ impl PhaseItem for Opaque3dPrepass {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.batch_set_key.index_slab.is_some()
     }
 }
 
@@ -308,6 +320,11 @@ impl PhaseItem for AlphaMask3dPrepass {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.batch_set_key.index_slab.is_some()
     }
 }
 

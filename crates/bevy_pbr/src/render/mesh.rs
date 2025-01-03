@@ -20,7 +20,8 @@ use bevy_math::{Affine3, Rect, UVec2, Vec3, Vec4};
 use bevy_render::{
     batching::{
         gpu_preprocessing::{
-            self, GpuPreprocessingSupport, IndirectParameters, IndirectParametersBuffer,
+            self, GpuPreprocessingSupport, IndirectBatchSet, IndirectParametersBuffers,
+            IndirectParametersIndexed, IndirectParametersMetadata, IndirectParametersNonIndexed,
             InstanceInputUniformBuffer,
         },
         no_gpu_preprocessing, GetBatchData, GetFullBatchData, NoAutomaticBatching,
@@ -356,6 +357,8 @@ pub struct MeshInputUniform {
     /// [`MeshAllocator`]). This value stores the offset of the first vertex in
     /// this mesh in that buffer.
     pub first_vertex_index: u32,
+    pub first_index_index: u32,
+    pub index_count: u32,
     /// The current skin index, or `u32::MAX` if there's no skin.
     pub current_skin_index: u32,
     /// The previous skin index, or `u32::MAX` if there's no previous skin.
@@ -365,6 +368,8 @@ pub struct MeshInputUniform {
     /// Low 16 bits: index of the material inside the bind group data.
     /// High 16 bits: index of the lightmap in the binding array.
     pub material_and_lightmap_bind_group_slot: u32,
+    pub pad_a: u32,
+    pub pad_b: u32,
 }
 
 /// Information about each mesh instance needed to cull it on GPU.
@@ -912,11 +917,23 @@ impl RenderMeshInstanceGpuBuilder {
         render_lightmaps: &RenderLightmaps,
         skin_indices: &SkinIndices,
     ) -> u32 {
-        let first_vertex_index = match mesh_allocator.mesh_vertex_slice(&self.shared.mesh_asset_id)
-        {
-            Some(mesh_vertex_slice) => mesh_vertex_slice.range.start,
-            None => 0,
-        };
+        let (first_vertex_index, vertex_count) =
+            match mesh_allocator.mesh_vertex_slice(&self.shared.mesh_asset_id) {
+                Some(mesh_vertex_slice) => (
+                    mesh_vertex_slice.range.start,
+                    mesh_vertex_slice.range.end - mesh_vertex_slice.range.start,
+                ),
+                None => (0, 0),
+            };
+        let (mesh_is_indexed, first_index_index, index_count) =
+            match mesh_allocator.mesh_index_slice(&self.shared.mesh_asset_id) {
+                Some(mesh_index_slice) => (
+                    true,
+                    mesh_index_slice.range.start,
+                    mesh_index_slice.range.end - mesh_index_slice.range.start,
+                ),
+                None => (false, !0, !0),
+            };
 
         let current_skin_index = match skin_indices.current.get(&entity) {
             Some(skin_indices) => skin_indices.index(),
@@ -943,11 +960,19 @@ impl RenderMeshInstanceGpuBuilder {
             flags: self.mesh_flags.bits(),
             previous_input_index: u32::MAX,
             first_vertex_index,
+            first_index_index,
+            index_count: if mesh_is_indexed {
+                index_count
+            } else {
+                vertex_count
+            },
             current_skin_index,
             previous_skin_index,
             material_and_lightmap_bind_group_slot: u32::from(
                 self.shared.material_bindings_index.slot,
             ) | ((lightmap_slot as u32) << 16),
+            pad_a: 0,
+            pad_b: 0,
         };
 
         // Did the last frame contain this entity as well?
@@ -1705,85 +1730,32 @@ impl GetFullBatchData for MeshPipeline {
     }
 
     fn write_batch_indirect_parameters(
-        (mesh_instances, _, meshes, mesh_allocator, _): &SystemParamItem<Self::Param>,
-        indirect_parameters_buffer: &mut IndirectParametersBuffer,
+        mesh_index: u32,
+        indexed: bool,
+        batch_set_index: Option<NonMaxU32>,
+        indirect_parameters_buffer: &mut IndirectParametersBuffers,
         indirect_parameters_offset: u32,
-        main_entity: MainEntity,
     ) {
-        write_batch_indirect_parameters(
-            mesh_instances,
-            meshes,
-            mesh_allocator,
-            indirect_parameters_buffer,
-            indirect_parameters_offset,
-            main_entity,
-        );
-    }
-}
-
-/// Pushes a set of [`IndirectParameters`] onto the [`IndirectParametersBuffer`]
-/// for the given mesh instance, and returns the index of those indirect
-/// parameters.
-fn write_batch_indirect_parameters(
-    mesh_instances: &RenderMeshInstances,
-    meshes: &RenderAssets<RenderMesh>,
-    mesh_allocator: &MeshAllocator,
-    indirect_parameters_buffer: &mut IndirectParametersBuffer,
-    indirect_parameters_offset: u32,
-    main_entity: MainEntity,
-) {
-    // This should only be called during GPU building.
-    let RenderMeshInstances::GpuBuilding(ref mesh_instances) = *mesh_instances else {
-        error!(
-            "`write_batch_indirect_parameters_index` should never be called in CPU mesh uniform \
-                building mode"
-        );
-        return;
-    };
-
-    let Some(mesh_instance) = mesh_instances.get(&main_entity) else {
-        return;
-    };
-    let Some(mesh) = meshes.get(mesh_instance.mesh_asset_id) else {
-        return;
-    };
-    let Some(vertex_buffer_slice) = mesh_allocator.mesh_vertex_slice(&mesh_instance.mesh_asset_id)
-    else {
-        return;
-    };
-
-    // Note that `IndirectParameters` covers both of these structures, even
-    // though they actually have distinct layouts. See the comment above that
-    // type for more information.
-    let indirect_parameters = match mesh.buffer_info {
-        RenderMeshBufferInfo::Indexed {
-            count: index_count, ..
-        } => {
-            let Some(index_buffer_slice) =
-                mesh_allocator.mesh_index_slice(&mesh_instance.mesh_asset_id)
-            else {
-                return;
-            };
-            IndirectParameters {
-                vertex_or_index_count: index_count,
-                instance_count: 0,
-                first_vertex_or_first_index: index_buffer_slice.range.start,
-                base_vertex_or_first_instance: vertex_buffer_slice.range.start,
-                first_instance: 0,
-            }
-        }
-        RenderMeshBufferInfo::NonIndexed => IndirectParameters {
-            vertex_or_index_count: mesh.vertex_count,
+        // Note that `IndirectParameters` covers both of these structures, even
+        // though they actually have distinct layouts. See the comment above that
+        // type for more information.
+        let indirect_parameters = IndirectParametersMetadata {
+            mesh_index,
+            base_output_index: indirect_parameters_offset,
+            batch_set_index: match batch_set_index {
+                Some(batch_set_index) => u32::from(batch_set_index),
+                None => !0,
+            },
             instance_count: 0,
-            first_vertex_or_first_index: vertex_buffer_slice.range.start,
-            base_vertex_or_first_instance: 0,
-            // Use `0xffffffff` as a placeholder to tell the mesh preprocessing
-            // shader that this is a non-indexed mesh.
-            first_instance: !0,
-        },
-    };
+        };
 
-    indirect_parameters_buffer.set(indirect_parameters_offset, indirect_parameters);
+        if indexed {
+            indirect_parameters_buffer.set_indexed(indirect_parameters_offset, indirect_parameters);
+        } else {
+            indirect_parameters_buffer
+                .set_non_indexed(indirect_parameters_offset, indirect_parameters);
+        }
+    }
 }
 
 bitflags::bitflags! {
@@ -2690,12 +2662,12 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
     type Param = (
         SRes<RenderAssets<RenderMesh>>,
         SRes<RenderMeshInstances>,
-        SRes<IndirectParametersBuffer>,
+        SRes<IndirectParametersBuffers>,
         SRes<PipelineCache>,
         SRes<MeshAllocator>,
         Option<SRes<PreprocessPipelines>>,
     );
-    type ViewQuery = Has<PreprocessBindGroup>;
+    type ViewQuery = Has<PreprocessBindGroups>;
     type ItemQuery = ();
     #[inline]
     fn render<'w>(
@@ -2738,26 +2710,6 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
             return RenderCommandResult::Skip;
         };
 
-        // Calculate the indirect offset, and look up the buffer.
-        let indirect_parameters = match item.extra_index() {
-            PhaseItemExtraIndex::None | PhaseItemExtraIndex::DynamicOffset(_) => None,
-            PhaseItemExtraIndex::IndirectParametersIndex(indices) => {
-                match indirect_parameters_buffer.buffer() {
-                    None => {
-                        warn!(
-                            "Not rendering mesh because indirect parameters buffer wasn't present"
-                        );
-                        return RenderCommandResult::Skip;
-                    }
-                    Some(buffer) => Some((
-                        indices.start as u64 * size_of::<IndirectParameters>() as u64,
-                        indices.end - indices.start,
-                        buffer,
-                    )),
-                }
-            }
-        };
-
         pass.set_vertex_buffer(0, vertex_buffer_slice.buffer.slice(..));
 
         let batch_range = item.batch_range();
@@ -2777,8 +2729,8 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
 
                 pass.set_index_buffer(index_buffer_slice.buffer.slice(..), 0, *index_format);
 
-                match indirect_parameters {
-                    None => {
+                match item.extra_index() {
+                    PhaseItemExtraIndex::None | PhaseItemExtraIndex::DynamicOffset(_) => {
                         pass.draw_indexed(
                             index_buffer_slice.range.start
                                 ..(index_buffer_slice.range.start + *count),
@@ -2786,33 +2738,87 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
                             batch_range.clone(),
                         );
                     }
-                    Some((
-                        indirect_parameters_offset,
-                        indirect_parameters_count,
-                        indirect_parameters_buffer,
-                    )) => {
-                        pass.multi_draw_indexed_indirect(
-                            indirect_parameters_buffer,
-                            indirect_parameters_offset,
-                            indirect_parameters_count,
-                        );
+                    PhaseItemExtraIndex::IndirectParametersIndex {
+                        range: indirect_parameters_range,
+                        batch_set_index,
+                    } => {
+                        let (Some(indirect_parameters_buffer), Some(batch_sets_buffer)) = (
+                            indirect_parameters_buffer.indexed_data_buffer(),
+                            indirect_parameters_buffer.indexed_batch_sets_buffer(),
+                        ) else {
+                            warn!(
+                                "Not rendering mesh because indirect parameters buffer wasn't present"
+                            );
+                            return RenderCommandResult::Skip;
+                        };
+                        let indirect_parameters_offset = indirect_parameters_range.start as u64
+                            * size_of::<IndirectParametersIndexed>() as u64;
+                        let indirect_parameters_count =
+                            indirect_parameters_range.end - indirect_parameters_range.start;
+                        match batch_set_index {
+                            Some(batch_set_index) => {
+                                let count_offset = u32::from(batch_set_index)
+                                    * (size_of::<IndirectBatchSet>() as u32);
+                                pass.multi_draw_indexed_indirect_count(
+                                    indirect_parameters_buffer,
+                                    indirect_parameters_offset,
+                                    batch_sets_buffer,
+                                    count_offset as u64,
+                                    indirect_parameters_count,
+                                );
+                            }
+                            None => {
+                                pass.multi_draw_indexed_indirect(
+                                    indirect_parameters_buffer,
+                                    indirect_parameters_offset,
+                                    indirect_parameters_count,
+                                );
+                            }
+                        }
                     }
                 }
             }
-            RenderMeshBufferInfo::NonIndexed => match indirect_parameters {
-                None => {
+            RenderMeshBufferInfo::NonIndexed => match item.extra_index() {
+                PhaseItemExtraIndex::None | PhaseItemExtraIndex::DynamicOffset(_) => {
                     pass.draw(vertex_buffer_slice.range, batch_range.clone());
                 }
-                Some((
-                    indirect_parameters_offset,
-                    indirect_parameters_count,
-                    indirect_parameters_buffer,
-                )) => {
-                    pass.multi_draw_indirect(
-                        indirect_parameters_buffer,
-                        indirect_parameters_offset,
-                        indirect_parameters_count,
-                    );
+                PhaseItemExtraIndex::IndirectParametersIndex {
+                    range: indirect_parameters_range,
+                    batch_set_index,
+                } => {
+                    let (Some(indirect_parameters_buffer), Some(batch_sets_buffer)) = (
+                        indirect_parameters_buffer.non_indexed_data_buffer(),
+                        indirect_parameters_buffer.non_indexed_batch_sets_buffer(),
+                    ) else {
+                        warn!(
+                            "Not rendering mesh because indirect parameters buffer wasn't present"
+                        );
+                        return RenderCommandResult::Skip;
+                    };
+                    let indirect_parameters_offset = indirect_parameters_range.start as u64
+                        * size_of::<IndirectParametersNonIndexed>() as u64;
+                    let indirect_parameters_count =
+                        indirect_parameters_range.end - indirect_parameters_range.start;
+                    match batch_set_index {
+                        Some(batch_set_index) => {
+                            let count_offset =
+                                u32::from(batch_set_index) * (size_of::<IndirectBatchSet>() as u32);
+                            pass.multi_draw_indirect_count(
+                                indirect_parameters_buffer,
+                                indirect_parameters_offset,
+                                batch_sets_buffer,
+                                count_offset as u64,
+                                indirect_parameters_count,
+                            );
+                        }
+                        None => {
+                            pass.multi_draw_indirect(
+                                indirect_parameters_buffer,
+                                indirect_parameters_offset,
+                                indirect_parameters_count,
+                            );
+                        }
+                    }
                 }
             },
         }

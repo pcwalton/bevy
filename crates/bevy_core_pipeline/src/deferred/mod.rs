@@ -71,6 +71,10 @@ impl PhaseItem for Opaque3dDeferred {
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
+
+    fn indexed(&self) -> bool {
+        self.batch_set_key.index_slab.is_some()
+    }
 }
 
 impl BinnedPhaseItem for Opaque3dDeferred {
@@ -154,6 +158,10 @@ impl PhaseItem for AlphaMask3dDeferred {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    fn indexed(&self) -> bool {
+        self.batch_set_key.index_slab.is_some()
     }
 }
 

@@ -133,6 +133,10 @@ impl PhaseItem for TransparentUi {
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
+
+    fn indexed(&self) -> bool {
+        true
+    }
 }
 
 impl SortedPhaseItem for TransparentUi {

@@ -66,9 +66,7 @@ pub const DEPTH_TEXTURE_SAMPLING_SUPPORTED: bool = true;
 use core::ops::Range;
 
 use bevy_render::{
-    batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport},
-    mesh::allocator::SlabId,
-    view::NoIndirectDrawing,
+    batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport}, mesh::allocator::SlabId, render_phase::PhaseItemBatchSetKey, view::NoIndirectDrawing
 };
 pub use camera_3d::*;
 pub use main_opaque_pass_3d_node::*;
@@ -268,6 +266,12 @@ pub struct Opaque3dBatchSetKey {
     pub lightmap_slab: Option<NonMaxU32>,
 }
 
+impl PhaseItemBatchSetKey for Opaque3dBatchSetKey {
+    fn indexed(&self) -> bool {
+        self.index_slab.is_some()
+    }
+}
+
 /// Data that must be identical in order to *batch* phase items together.
 ///
 /// Note that a *batch set* (if multi-draw is in use) contains multiple batches.
@@ -312,6 +316,11 @@ impl PhaseItem for Opaque3d {
 
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.batch_set_key.index_slab.is_some()
     }
 }
 
@@ -391,6 +400,11 @@ impl PhaseItem for AlphaMask3d {
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.batch_set_key.index_slab.is_some()
+    }
 }
 
 impl BinnedPhaseItem for AlphaMask3d {
@@ -429,6 +443,7 @@ pub struct Transmissive3d {
     pub draw_function: DrawFunctionId,
     pub batch_range: Range<u32>,
     pub extra_index: PhaseItemExtraIndex,
+    pub indexed: bool,
 }
 
 impl PhaseItem for Transmissive3d {
@@ -477,6 +492,11 @@ impl PhaseItem for Transmissive3d {
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.indexed
+    }
 }
 
 impl SortedPhaseItem for Transmissive3d {
@@ -508,6 +528,7 @@ pub struct Transparent3d {
     pub draw_function: DrawFunctionId,
     pub batch_range: Range<u32>,
     pub extra_index: PhaseItemExtraIndex,
+    pub indexed: bool,
 }
 
 impl PhaseItem for Transparent3d {
@@ -543,6 +564,11 @@ impl PhaseItem for Transparent3d {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.indexed
     }
 }
 

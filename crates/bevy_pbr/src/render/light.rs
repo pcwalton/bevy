@@ -1733,6 +1733,12 @@ pub struct ShadowBatchSetKey {
     pub index_slab: Option<SlabId>,
 }
 
+impl PhaseItemBatchSetKey for ShadowBatchSetKey {
+    fn indexed(&self) -> bool {
+        self.index_slab.is_some()
+    }
+}
+
 /// Data used to bin each object in the shadow map phase.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ShadowBinKey {
@@ -1773,6 +1779,10 @@ impl PhaseItem for Shadow {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    fn indexed(&self) -> bool {
+        self.batch_set_key.index_slab.is_some()
     }
 }
 

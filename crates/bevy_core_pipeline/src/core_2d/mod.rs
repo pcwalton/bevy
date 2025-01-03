@@ -33,7 +33,7 @@ pub mod graph {
 use core::ops::Range;
 
 use bevy_asset::UntypedAssetId;
-use bevy_render::batching::gpu_preprocessing::GpuPreprocessingMode;
+use bevy_render::{batching::gpu_preprocessing::GpuPreprocessingMode, render_phase::PhaseItemBatchSetKey};
 use bevy_utils::HashMap;
 pub use camera_2d::*;
 pub use main_opaque_pass_2d_node::*;
@@ -129,7 +129,7 @@ pub struct Opaque2d {
     ///
     /// Objects in a single batch set can potentially be multi-drawn together,
     /// if it's enabled and the current platform supports it.
-    pub batch_set_key: (),
+    pub batch_set_key: BatchSetKey2d,
     /// The key, which determines which can be batched.
     pub bin_key: Opaque2dBinKey,
     /// An entity from which data will be fetched, including the mesh if
@@ -190,12 +190,16 @@ impl PhaseItem for Opaque2d {
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
+
+    fn indexed(&self) -> bool {
+        true
+    }
 }
 
 impl BinnedPhaseItem for Opaque2d {
     // Since 2D meshes presently can't be multidrawn, the batch set key is
     // irrelevant.
-    type BatchSetKey = ();
+    type BatchSetKey = BatchSetKey2d;
 
     type BinKey = Opaque2dBinKey;
 
@@ -216,6 +220,15 @@ impl BinnedPhaseItem for Opaque2d {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct BatchSetKey2d;
+
+impl PhaseItemBatchSetKey for BatchSetKey2d {
+    fn indexed(&self) -> bool {
+        true
+    }
+}
+
 impl CachedRenderPipelinePhaseItem for Opaque2d {
     #[inline]
     fn cached_pipeline(&self) -> CachedRenderPipelineId {
@@ -229,7 +242,7 @@ pub struct AlphaMask2d {
     ///
     /// Objects in a single batch set can potentially be multi-drawn together,
     /// if it's enabled and the current platform supports it.
-    pub batch_set_key: (),
+    pub batch_set_key: BatchSetKey2d,
     /// The key, which determines which can be batched.
     pub bin_key: AlphaMask2dBinKey,
     /// An entity from which data will be fetched, including the mesh if
@@ -291,12 +304,17 @@ impl PhaseItem for AlphaMask2d {
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.batch_set_key.indexed()
+    }
 }
 
 impl BinnedPhaseItem for AlphaMask2d {
     // Since 2D meshes presently can't be multidrawn, the batch set key is
     // irrelevant.
-    type BatchSetKey = ();
+    type BatchSetKey = BatchSetKey2d;
 
     type BinKey = AlphaMask2dBinKey;
 
@@ -368,6 +386,10 @@ impl PhaseItem for Transparent2d {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    fn indexed(&self) -> bool {
+        true
     }
 }
 
