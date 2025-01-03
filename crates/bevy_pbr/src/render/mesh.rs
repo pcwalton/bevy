@@ -20,8 +20,7 @@ use bevy_math::{Affine3, Rect, UVec2, Vec3, Vec4};
 use bevy_render::{
     batching::{
         gpu_preprocessing::{
-            self, GpuPreprocessingSupport, IndirectParameters, IndirectParametersBuffers,
-            IndirectParametersMetadata, InstanceInputUniformBuffer,
+            self, GpuPreprocessingSupport, IndirectParametersBuffers, IndirectParametersIndexed, IndirectParametersMetadata, IndirectParametersNonIndexed, InstanceInputUniformBuffer
         },
         no_gpu_preprocessing, GetBatchData, GetFullBatchData, NoAutomaticBatching,
     },
@@ -1730,6 +1729,7 @@ impl GetFullBatchData for MeshPipeline {
 
     fn write_batch_indirect_parameters(
         mesh_index: u32,
+        indexed: bool,
         indirect_parameters_buffer: &mut IndirectParametersBuffers,
         indirect_parameters_offset: u32,
     ) {
@@ -1742,7 +1742,12 @@ impl GetFullBatchData for MeshPipeline {
             instance_count: 0,
         };
 
-        indirect_parameters_buffer.set(indirect_parameters_offset, indirect_parameters);
+        if indexed {
+            indirect_parameters_buffer.set_indexed(indirect_parameters_offset, indirect_parameters);
+        } else {
+            indirect_parameters_buffer
+                .set_non_indexed(indirect_parameters_offset, indirect_parameters);
+        }
     }
 }
 
@@ -2698,26 +2703,6 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
             return RenderCommandResult::Skip;
         };
 
-        // Calculate the indirect offset, and look up the buffer.
-        let indirect_parameters = match item.extra_index() {
-            PhaseItemExtraIndex::None | PhaseItemExtraIndex::DynamicOffset(_) => None,
-            PhaseItemExtraIndex::IndirectParametersIndex(indices) => {
-                match indirect_parameters_buffer.data_buffer() {
-                    None => {
-                        warn!(
-                            "Not rendering mesh because indirect parameters buffer wasn't present"
-                        );
-                        return RenderCommandResult::Skip;
-                    }
-                    Some(buffer) => Some((
-                        indices.start as u64 * size_of::<IndirectParameters>() as u64,
-                        indices.end - indices.start,
-                        buffer,
-                    )),
-                }
-            }
-        };
-
         pass.set_vertex_buffer(0, vertex_buffer_slice.buffer.slice(..));
 
         let batch_range = item.batch_range();
@@ -2737,8 +2722,8 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
 
                 pass.set_index_buffer(index_buffer_slice.buffer.slice(..), 0, *index_format);
 
-                match indirect_parameters {
-                    None => {
+                match item.extra_index() {
+                    PhaseItemExtraIndex::None | PhaseItemExtraIndex::DynamicOffset(_) => {
                         pass.draw_indexed(
                             index_buffer_slice.range.start
                                 ..(index_buffer_slice.range.start + *count),
@@ -2746,11 +2731,18 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
                             batch_range.clone(),
                         );
                     }
-                    Some((
-                        indirect_parameters_offset,
-                        indirect_parameters_count,
-                        indirect_parameters_buffer,
-                    )) => {
+                    PhaseItemExtraIndex::IndirectParametersIndex(indices) => {
+                        let Some(indirect_parameters_buffer) =
+                            indirect_parameters_buffer.indexed_data_buffer()
+                        else {
+                            warn!(
+                                "Not rendering mesh because indirect parameters buffer wasn't present"
+                            );
+                            return RenderCommandResult::Skip;
+                        };
+                        let indirect_parameters_offset =
+                            indices.start as u64 * size_of::<IndirectParametersIndexed>() as u64;
+                        let indirect_parameters_count = indices.end - indices.start;
                         pass.multi_draw_indexed_indirect(
                             indirect_parameters_buffer,
                             indirect_parameters_offset,
@@ -2759,15 +2751,22 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
                     }
                 }
             }
-            RenderMeshBufferInfo::NonIndexed => match indirect_parameters {
-                None => {
+            RenderMeshBufferInfo::NonIndexed => match item.extra_index() {
+                PhaseItemExtraIndex::None | PhaseItemExtraIndex::DynamicOffset(_) => {
                     pass.draw(vertex_buffer_slice.range, batch_range.clone());
                 }
-                Some((
-                    indirect_parameters_offset,
-                    indirect_parameters_count,
-                    indirect_parameters_buffer,
-                )) => {
+                PhaseItemExtraIndex::IndirectParametersIndex(indices) => {
+                    let Some(indirect_parameters_buffer) =
+                        indirect_parameters_buffer.non_indexed_data_buffer()
+                    else {
+                        warn!(
+                            "Not rendering mesh because indirect parameters buffer wasn't present"
+                        );
+                        return RenderCommandResult::Skip;
+                    };
+                    let indirect_parameters_offset =
+                        indices.start as u64 * size_of::<IndirectParametersNonIndexed>() as u64;
+                    let indirect_parameters_count = indices.end - indices.start;
                     pass.multi_draw_indirect(
                         indirect_parameters_buffer,
                         indirect_parameters_offset,

@@ -161,6 +161,10 @@ impl PhaseItemBinKey for Opaque2dBinKey {
     fn get_batch_set_key(&self) -> Option<Self::BatchSetKey> {
         None
     }
+
+    fn indexed(&self) -> bool {
+        true
+    }
 }
 
 impl PhaseItem for Opaque2d {
@@ -194,6 +198,10 @@ impl PhaseItem for Opaque2d {
 
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    fn indexed(&self) -> bool {
+        true
     }
 }
 
@@ -285,6 +293,11 @@ impl PhaseItem for AlphaMask2d {
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.key.indexed()
+    }
 }
 
 impl BinnedPhaseItem for AlphaMask2d {
@@ -310,6 +323,10 @@ impl PhaseItemBinKey for AlphaMask2dBinKey {
 
     fn get_batch_set_key(&self) -> Option<Self::BatchSetKey> {
         None
+    }
+
+    fn indexed(&self) -> bool {
+        true
     }
 }
 
@@ -364,6 +381,10 @@ impl PhaseItem for Transparent2d {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    fn indexed(&self) -> bool {
+        true
     }
 }
 

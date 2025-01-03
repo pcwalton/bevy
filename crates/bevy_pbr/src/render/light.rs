@@ -1742,6 +1742,10 @@ impl PhaseItemBinKey for ShadowBinKey {
     fn get_batch_set_key(&self) -> Option<Self::BatchSetKey> {
         Some(self.batch_set_key.clone())
     }
+
+    fn indexed(&self) -> bool {
+        self.batch_set_key.index_slab.is_some()
+    }
 }
 
 impl PhaseItem for Shadow {
@@ -1777,6 +1781,10 @@ impl PhaseItem for Shadow {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    fn indexed(&self) -> bool {
+        self.key.batch_set_key.index_slab.is_some()
     }
 }
 

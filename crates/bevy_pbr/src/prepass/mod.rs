@@ -958,13 +958,13 @@ pub fn queue_prepass_material_meshes<M: Material>(
                 }
             };
 
+            let (vertex_slab, index_slab) = mesh_allocator.mesh_slabs(&mesh_instance.mesh_asset_id);
+
             match mesh_key
                 .intersection(MeshPipelineKey::BLEND_RESERVED_BITS | MeshPipelineKey::MAY_DISCARD)
             {
                 MeshPipelineKey::BLEND_OPAQUE | MeshPipelineKey::BLEND_ALPHA_TO_COVERAGE => {
                     if deferred {
-                        let (vertex_slab, index_slab) =
-                            mesh_allocator.mesh_slabs(&mesh_instance.mesh_asset_id);
                         opaque_deferred_phase.as_mut().unwrap().add(
                             Opaque3dBinKey {
                                 batch_set_key: Opaque3dBatchSetKey {
@@ -988,6 +988,8 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                     draw_function: opaque_draw_prepass,
                                     pipeline: pipeline_id,
                                     material_bind_group_index: Some(material.binding.group.0),
+                                    vertex_slab: vertex_slab.unwrap_or_default(),
+                                    index_slab,
                                 },
                                 asset_id: mesh_instance.mesh_asset_id.into(),
                             },
@@ -1004,6 +1006,8 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                 draw_function: alpha_mask_draw_deferred,
                                 pipeline: pipeline_id,
                                 material_bind_group_index: Some(material.binding.group.0),
+                                vertex_slab: vertex_slab.unwrap_or_default(),
+                                index_slab,
                             },
                             asset_id: mesh_instance.mesh_asset_id.into(),
                         };
@@ -1018,6 +1022,8 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                 draw_function: alpha_mask_draw_prepass,
                                 pipeline: pipeline_id,
                                 material_bind_group_index: Some(material.binding.group.0),
+                                vertex_slab: vertex_slab.unwrap_or_default(),
+                                index_slab,
                             },
                             asset_id: mesh_instance.mesh_asset_id.into(),
                         };

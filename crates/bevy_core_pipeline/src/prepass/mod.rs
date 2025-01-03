@@ -34,6 +34,7 @@ use bevy_asset::UntypedAssetId;
 use bevy_ecs::prelude::*;
 use bevy_math::Mat4;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
+use bevy_render::mesh::allocator::SlabId;
 use bevy_render::render_phase::PhaseItemBinKey;
 use bevy_render::sync_world::MainEntity;
 use bevy_render::{
@@ -166,6 +167,9 @@ pub struct OpaqueNoLightmap3dBatchSetKey {
     ///
     /// In the case of PBR, this is the `MaterialBindGroupIndex`.
     pub material_bind_group_index: Option<u32>,
+
+    pub vertex_slab: SlabId,
+    pub index_slab: Option<SlabId>,
 }
 
 // TODO: Try interning these.
@@ -187,6 +191,10 @@ impl PhaseItemBinKey for OpaqueNoLightmap3dBinKey {
 
     fn get_batch_set_key(&self) -> Option<Self::BatchSetKey> {
         Some(self.batch_set_key.clone())
+    }
+
+    fn indexed(&self) -> bool {
+        self.batch_set_key.index_slab.is_some()
     }
 }
 
@@ -223,6 +231,11 @@ impl PhaseItem for Opaque3dPrepass {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.key.batch_set_key.index_slab.is_some()
     }
 }
 
@@ -297,6 +310,11 @@ impl PhaseItem for AlphaMask3dPrepass {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.key.batch_set_key.index_slab.is_some()
     }
 }
 

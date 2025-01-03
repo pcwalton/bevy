@@ -149,7 +149,8 @@ pub trait GetFullBatchData: GetBatchData {
     /// preprocessing).
     fn write_batch_indirect_parameters(
         mesh_index: u32,
-        indirect_parameters_buffer: &mut IndirectParametersBuffers,
+        indexed: bool,
+        indirect_parameters_buffers: &mut IndirectParametersBuffers,
         indirect_parameters_offset: u32,
     );
 }

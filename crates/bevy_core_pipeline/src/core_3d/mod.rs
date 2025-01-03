@@ -288,6 +288,10 @@ impl PhaseItemBinKey for Opaque3dBinKey {
     fn get_batch_set_key(&self) -> Option<Self::BatchSetKey> {
         Some(self.batch_set_key.clone())
     }
+
+    fn indexed(&self) -> bool {
+        self.batch_set_key.index_slab.is_some()
+    }
 }
 
 impl PhaseItem for Opaque3d {
@@ -322,6 +326,11 @@ impl PhaseItem for Opaque3d {
 
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.key.batch_set_key.index_slab.is_some()
     }
 }
 
@@ -392,6 +401,11 @@ impl PhaseItem for AlphaMask3d {
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.key.batch_set_key.index_slab.is_some()
+    }
 }
 
 impl BinnedPhaseItem for AlphaMask3d {
@@ -427,6 +441,7 @@ pub struct Transmissive3d {
     pub draw_function: DrawFunctionId,
     pub batch_range: Range<u32>,
     pub extra_index: PhaseItemExtraIndex,
+    pub indexed: bool,
 }
 
 impl PhaseItem for Transmissive3d {
@@ -475,6 +490,11 @@ impl PhaseItem for Transmissive3d {
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
     }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.indexed
+    }
 }
 
 impl SortedPhaseItem for Transmissive3d {
@@ -506,6 +526,7 @@ pub struct Transparent3d {
     pub draw_function: DrawFunctionId,
     pub batch_range: Range<u32>,
     pub extra_index: PhaseItemExtraIndex,
+    pub indexed: bool,
 }
 
 impl PhaseItem for Transparent3d {
@@ -541,6 +562,11 @@ impl PhaseItem for Transparent3d {
     #[inline]
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex) {
         (&mut self.batch_range, &mut self.extra_index)
+    }
+
+    #[inline]
+    fn indexed(&self) -> bool {
+        self.indexed
     }
 }
 

@@ -1001,6 +1001,8 @@ pub trait PhaseItem: Sized + Send + Sync + 'static {
     /// Returns a pair of mutable references to both the batch range and extra
     /// index.
     fn batch_range_and_extra_index_mut(&mut self) -> (&mut Range<u32>, &mut PhaseItemExtraIndex);
+
+    fn indexed(&self) -> bool;
 }
 
 /// The "extra index" associated with some [`PhaseItem`]s, alongside the
@@ -1105,6 +1107,8 @@ pub trait PhaseItemBinKey: Clone + Send + Sync + PartialEq + Eq + Ord + Hash {
     /// If this returns `None`, no batches in this phase item can be grouped
     /// together into batch sets.
     fn get_batch_set_key(&self) -> Option<Self::BatchSetKey>;
+
+    fn indexed(&self) -> bool;
 }
 
 /// Represents phase items that must be sorted. The `SortKey` specifies the

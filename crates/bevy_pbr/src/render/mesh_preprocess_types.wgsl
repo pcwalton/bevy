@@ -26,16 +26,23 @@ struct MeshInput {
 // The `wgpu` indirect parameters structure. This is a union of two structures.
 // For more information, see the corresponding comment in
 // `gpu_preprocessing.rs`.
-struct IndirectParameters {
+struct IndirectParametersIndexed {
     // `vertex_count` or `index_count`.
-    vertex_count_or_index_count: u32,
+    index_count: u32,
     // `instance_count` in both structures.
     instance_count: u32,
     // `first_vertex` or `first_index`.
-    first_vertex_or_first_index: u32,
+    first_index: u32,
     // `base_vertex` or `first_instance`.
-    base_vertex_or_first_instance: u32,
+    base_vertex: u32,
     // A read-only copy of `instance_index`.
+    first_instance: u32,
+}
+
+struct IndirectParametersNonIndexed {
+    vertex_count: u32,
+    instance_count: u32,
+    base_vertex: u32,
     first_instance: u32,
 }
 

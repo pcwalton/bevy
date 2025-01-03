@@ -1,10 +1,22 @@
 // Building indirect parameters
 
-#import bevy_pbr::mesh_preprocess_types::{IndirectParameters, IndirectParametersMetadata, MeshInput}
+#import bevy_pbr::mesh_preprocess_types::{
+    IndirectParametersIndexed,
+    IndirectParametersNonIndexed,
+    IndirectParametersMetadata,
+    MeshInput
+}
 
 @group(0) @binding(0) var<storage> current_input: array<MeshInput>;
 @group(0) @binding(1) var<storage> indirect_parameters_metadata: array<IndirectParametersMetadata>;
-@group(0) @binding(2) var<storage, read_write> indirect_parameters: array<IndirectParameters>;
+
+#ifdef INDEXED
+@group(0) @binding(2) var<storage, read_write> indirect_parameters:
+    array<IndirectParametersIndexed>;
+#else   // INDEXED
+@group(0) @binding(2) var<storage, read_write> indirect_parameters:
+    array<IndirectParametersNonIndexed>;
+#endif  // INDEXED
 
 @compute
 @workgroup_size(64)
@@ -21,21 +33,13 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let instance_count = atomicLoad(&indirect_parameters_metadata[instance_index].instance_count);
 
     indirect_parameters[instance_index].instance_count = instance_count;
+    indirect_parameters[instance_index].first_instance = base_output_index;
+    indirect_parameters[instance_index].base_vertex = current_input[mesh_index].first_vertex_index;
 
-    //if ((indirect_parameters[instance_index].flags & MESH_FLAGS_INDEXED_BIT) != 0) {
-        indirect_parameters[instance_index].vertex_count_or_index_count =
-            current_input[mesh_index].index_count;
-        indirect_parameters[instance_index].first_vertex_or_first_index =
-            current_input[mesh_index].first_index_index;
-        indirect_parameters[instance_index].base_vertex_or_first_instance =
-            current_input[mesh_index].first_vertex_index;
-        indirect_parameters[instance_index].first_instance = base_output_index;
-    /*} else {
-        indirect_parameters[instance_index].vertex_count_or_index_count =
-            current_input[mesh_index].vertex_count;
-        indirect_parameters[instance_index].first_vertex_or_first_index =
-            current_input[mesh_index].first_vertex_index;
-        indirect_parameters[instance_index].base_vertex_or_first_instance = base_output_index;
-        indirect_parameters[instance_index].first_instance = 0xffffffffu;
-    }*/
+#ifdef INDEXED
+    indirect_parameters[instance_index].index_count = current_input[mesh_index].index_count;
+    indirect_parameters[instance_index].first_index = current_input[mesh_index].first_index_index;
+#else   // INDEXED
+    indirect_parameters[instance_index].vertex_count = current_input[mesh_index].index_count;
+#endif  // INDEXED
 }
