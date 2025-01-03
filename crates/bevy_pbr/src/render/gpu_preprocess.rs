@@ -21,9 +21,9 @@ use bevy_ecs::{
 };
 use bevy_render::{
     batching::gpu_preprocessing::{
-        BatchedInstanceBuffers, GpuPreprocessingSupport, IndirectParametersBuffers,
-        IndirectParametersIndexed, IndirectParametersMetadata, IndirectParametersNonIndexed,
-        PreprocessWorkItem, PreprocessWorkItemBuffer,
+        BatchedInstanceBuffers, GpuPreprocessingSupport, IndirectBatchSet,
+        IndirectParametersBuffers, IndirectParametersIndexed, IndirectParametersMetadata,
+        IndirectParametersNonIndexed, PreprocessWorkItem, PreprocessWorkItemBuffer,
     },
     render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext},
     render_resource::{
@@ -503,6 +503,7 @@ impl FromWorld for PreprocessPipelines {
                 // `view`
                 uniform_buffer::<ViewUniform>(/* has_dynamic_offset= */ true),
             ));
+
         let build_indexed_indirect_params_bind_group_layout_entries =
             build_indirect_params_bind_group_layout_entries()
                 .extend_sequential((storage_buffer::<IndirectParametersIndexed>(false),));
@@ -572,6 +573,7 @@ fn build_indirect_params_bind_group_layout_entries() -> DynamicBindGroupLayoutEn
         (
             storage_buffer_read_only::<MeshInputUniform>(false),
             storage_buffer_read_only::<IndirectParametersMetadata>(false),
+            storage_buffer::<IndirectBatchSet>(false),
         ),
     )
 }
@@ -672,7 +674,7 @@ pub fn prepare_preprocess_bind_groups(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     batched_instance_buffers: Res<BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>,
-    indirect_parameters_buffer: Res<IndirectParametersBuffers>,
+    indirect_parameters_buffers: Res<IndirectParametersBuffers>,
     mesh_culling_data_buffer: Res<MeshCullingDataBuffer>,
     view_uniforms: Res<ViewUniforms>,
     pipelines: Res<PreprocessPipelines>,
@@ -739,7 +741,7 @@ pub fn prepare_preprocess_bind_groups(
 
                 let indexed_bind_group = match (
                     indexed_buffer.buffer(),
-                    indirect_parameters_buffer.indexed_metadata_buffer(),
+                    indirect_parameters_buffers.indexed_metadata_buffer(),
                 ) {
                     (
                         Some(indexed_work_item_buffer),
@@ -775,7 +777,7 @@ pub fn prepare_preprocess_bind_groups(
 
                 let non_indexed_bind_group = match (
                     non_indexed_buffer.buffer(),
-                    indirect_parameters_buffer.non_indexed_metadata_buffer(),
+                    indirect_parameters_buffers.non_indexed_metadata_buffer(),
                 ) {
                     (
                         Some(non_indexed_work_item_buffer),
@@ -828,7 +830,7 @@ pub fn prepare_preprocess_bind_groups(
             &render_device,
             &pipelines,
             current_input_buffer,
-            &indirect_parameters_buffer,
+            &indirect_parameters_buffers,
         );
     }
 }
@@ -844,16 +846,19 @@ fn create_build_indirect_parameters_bind_groups(
         indexed: match (
             indirect_parameters_buffer.indexed_metadata_buffer(),
             indirect_parameters_buffer.indexed_data_buffer(),
+            indirect_parameters_buffer.indexed_batch_sets_buffer(),
         ) {
             (
                 Some(indexed_indirect_parameters_metadata_buffer),
                 Some(indexed_indirect_parameters_data_buffer),
+                Some(indexed_batch_sets_buffer),
             ) => Some(render_device.create_bind_group(
                 "build_indexed_indirect_parameters_bind_group",
                 &pipelines.build_indexed_indirect_params.bind_group_layout,
                 &BindGroupEntries::sequential((
                     current_input_buffer.as_entire_binding(),
                     indexed_indirect_parameters_metadata_buffer.as_entire_binding(),
+                    indexed_batch_sets_buffer.as_entire_binding(),
                     indexed_indirect_parameters_data_buffer.as_entire_binding(),
                 )),
             )),
@@ -862,10 +867,12 @@ fn create_build_indirect_parameters_bind_groups(
         non_indexed: match (
             indirect_parameters_buffer.non_indexed_metadata_buffer(),
             indirect_parameters_buffer.non_indexed_data_buffer(),
+            indirect_parameters_buffer.non_indexed_batch_sets_buffer(),
         ) {
             (
                 Some(non_indexed_indirect_parameters_metadata_buffer),
                 Some(non_indexed_indirect_parameters_data_buffer),
+                Some(non_indexed_batch_sets_buffer),
             ) => Some(
                 render_device.create_bind_group(
                     "build_non_indexed_indirect_parameters_bind_group",
@@ -875,6 +882,7 @@ fn create_build_indirect_parameters_bind_groups(
                     &BindGroupEntries::sequential((
                         current_input_buffer.as_entire_binding(),
                         non_indexed_indirect_parameters_metadata_buffer.as_entire_binding(),
+                        non_indexed_batch_sets_buffer.as_entire_binding(),
                         non_indexed_indirect_parameters_data_buffer.as_entire_binding(),
                     )),
                 ),

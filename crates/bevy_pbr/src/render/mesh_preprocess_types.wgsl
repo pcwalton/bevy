@@ -49,6 +49,11 @@ struct IndirectParametersNonIndexed {
 struct IndirectParametersMetadata {
     mesh_index: u32,
     base_output_index: u32,
+    batch_set_index: u32,
     instance_count: atomic<u32>,
 }
 
+struct IndirectBatchSet {
+    indirect_parameters_count: atomic<u32>,
+    indirect_parameters_base: u32,
+}

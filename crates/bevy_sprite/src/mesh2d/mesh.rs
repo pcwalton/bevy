@@ -406,6 +406,7 @@ impl GetFullBatchData for Mesh2dPipeline {
     fn write_batch_indirect_parameters(
         input_index: u32,
         indexed: bool,
+        batch_set_index: Option<NonMaxU32>,
         indirect_parameters_buffer: &mut bevy_render::batching::gpu_preprocessing::IndirectParametersBuffers,
         indirect_parameters_offset: u32,
     ) {
@@ -415,6 +416,10 @@ impl GetFullBatchData for Mesh2dPipeline {
         let indirect_parameters = IndirectParametersMetadata {
             mesh_index: input_index,
             base_output_index: indirect_parameters_offset,
+            batch_set_index: match batch_set_index {
+                None => !0,
+                Some(batch_set_index) => u32::from(batch_set_index),
+            },
             instance_count: 0,
         };
 

@@ -20,7 +20,9 @@ use bevy_math::{Affine3, Rect, UVec2, Vec3, Vec4};
 use bevy_render::{
     batching::{
         gpu_preprocessing::{
-            self, GpuPreprocessingSupport, IndirectParametersBuffers, IndirectParametersIndexed, IndirectParametersMetadata, IndirectParametersNonIndexed, InstanceInputUniformBuffer
+            self, GpuPreprocessingSupport, IndirectBatchSet, IndirectParametersBuffers,
+            IndirectParametersIndexed, IndirectParametersMetadata, IndirectParametersNonIndexed,
+            InstanceInputUniformBuffer,
         },
         no_gpu_preprocessing, GetBatchData, GetFullBatchData, NoAutomaticBatching,
     },
@@ -1730,6 +1732,7 @@ impl GetFullBatchData for MeshPipeline {
     fn write_batch_indirect_parameters(
         mesh_index: u32,
         indexed: bool,
+        batch_set_index: Option<NonMaxU32>,
         indirect_parameters_buffer: &mut IndirectParametersBuffers,
         indirect_parameters_offset: u32,
     ) {
@@ -1739,6 +1742,10 @@ impl GetFullBatchData for MeshPipeline {
         let indirect_parameters = IndirectParametersMetadata {
             mesh_index,
             base_output_index: indirect_parameters_offset,
+            batch_set_index: match batch_set_index {
+                Some(batch_set_index) => u32::from(batch_set_index),
+                None => !0,
+            },
             instance_count: 0,
         };
 
@@ -2731,23 +2738,41 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
                             batch_range.clone(),
                         );
                     }
-                    PhaseItemExtraIndex::IndirectParametersIndex(indices) => {
-                        let Some(indirect_parameters_buffer) =
-                            indirect_parameters_buffer.indexed_data_buffer()
-                        else {
+                    PhaseItemExtraIndex::IndirectParametersIndex(indirect_parameters_index) => {
+                        let (Some(indirect_parameters_buffer), Some(batch_sets_buffer)) = (
+                            indirect_parameters_buffer.indexed_data_buffer(),
+                            indirect_parameters_buffer.indexed_batch_sets_buffer(),
+                        ) else {
                             warn!(
                                 "Not rendering mesh because indirect parameters buffer wasn't present"
                             );
                             return RenderCommandResult::Skip;
                         };
-                        let indirect_parameters_offset =
-                            indices.start as u64 * size_of::<IndirectParametersIndexed>() as u64;
-                        let indirect_parameters_count = indices.end - indices.start;
-                        pass.multi_draw_indexed_indirect(
-                            indirect_parameters_buffer,
-                            indirect_parameters_offset,
-                            indirect_parameters_count,
-                        );
+                        let indirect_parameters_offset = indirect_parameters_index.range.start
+                            as u64
+                            * size_of::<IndirectParametersIndexed>() as u64;
+                        let indirect_parameters_count = indirect_parameters_index.range.end
+                            - indirect_parameters_index.range.start;
+                        match indirect_parameters_index.batch_set_index {
+                            Some(batch_set_index) => {
+                                let count_offset = u32::from(batch_set_index)
+                                    * (size_of::<IndirectBatchSet>() as u32);
+                                pass.multi_draw_indexed_indirect_count(
+                                    indirect_parameters_buffer,
+                                    indirect_parameters_offset,
+                                    batch_sets_buffer,
+                                    count_offset as u64,
+                                    indirect_parameters_count,
+                                );
+                            }
+                            None => {
+                                pass.multi_draw_indexed_indirect(
+                                    indirect_parameters_buffer,
+                                    indirect_parameters_offset,
+                                    indirect_parameters_count,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -2755,23 +2780,40 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
                 PhaseItemExtraIndex::None | PhaseItemExtraIndex::DynamicOffset(_) => {
                     pass.draw(vertex_buffer_slice.range, batch_range.clone());
                 }
-                PhaseItemExtraIndex::IndirectParametersIndex(indices) => {
-                    let Some(indirect_parameters_buffer) =
-                        indirect_parameters_buffer.non_indexed_data_buffer()
-                    else {
+                PhaseItemExtraIndex::IndirectParametersIndex(indirect_parameters_index) => {
+                    let (Some(indirect_parameters_buffer), Some(batch_sets_buffer)) = (
+                        indirect_parameters_buffer.non_indexed_data_buffer(),
+                        indirect_parameters_buffer.non_indexed_batch_sets_buffer(),
+                    ) else {
                         warn!(
                             "Not rendering mesh because indirect parameters buffer wasn't present"
                         );
                         return RenderCommandResult::Skip;
                     };
-                    let indirect_parameters_offset =
-                        indices.start as u64 * size_of::<IndirectParametersNonIndexed>() as u64;
-                    let indirect_parameters_count = indices.end - indices.start;
-                    pass.multi_draw_indirect(
-                        indirect_parameters_buffer,
-                        indirect_parameters_offset,
-                        indirect_parameters_count,
-                    );
+                    let indirect_parameters_offset = indirect_parameters_index.range.start as u64
+                        * size_of::<IndirectParametersNonIndexed>() as u64;
+                    let indirect_parameters_count =
+                        indirect_parameters_index.range.end - indirect_parameters_index.range.start;
+                    match indirect_parameters_index.batch_set_index {
+                        Some(batch_set_index) => {
+                            let count_offset =
+                                u32::from(batch_set_index) * (size_of::<IndirectBatchSet>() as u32);
+                            pass.multi_draw_indirect_count(
+                                indirect_parameters_buffer,
+                                indirect_parameters_offset,
+                                batch_sets_buffer,
+                                count_offset as u64,
+                                indirect_parameters_count,
+                            );
+                        }
+                        None => {
+                            pass.multi_draw_indirect(
+                                indirect_parameters_buffer,
+                                indirect_parameters_offset,
+                                indirect_parameters_count,
+                            );
+                        }
+                    }
                 }
             },
         }

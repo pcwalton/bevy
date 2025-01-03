@@ -447,11 +447,17 @@ where
                             PhaseItemExtraIndex::DynamicOffset(ref dynamic_offset) => {
                                 PhaseItemExtraIndex::DynamicOffset(*dynamic_offset)
                             }
-                            PhaseItemExtraIndex::IndirectParametersIndex(ref range) => {
-                                PhaseItemExtraIndex::IndirectParametersIndex(
-                                    range.start..(range.start + batch_set.len() as u32),
-                                )
-                            }
+                            PhaseItemExtraIndex::IndirectParametersIndex(
+                                ref phase_item_indirect_parameters_index,
+                            ) => PhaseItemExtraIndex::IndirectParametersIndex(
+                                PhaseItemIndirectParametersIndex {
+                                    range: phase_item_indirect_parameters_index.range.start
+                                        ..(phase_item_indirect_parameters_index.range.start
+                                            + batch_set.len() as u32),
+                                    batch_set_index: phase_item_indirect_parameters_index
+                                        .batch_set_index,
+                                },
+                            ),
                         },
                     );
 
@@ -500,8 +506,11 @@ where
                                     u32::from(*first_indirect_parameters_index)
                                         + entity_index as u32;
                                 PhaseItemExtraIndex::IndirectParametersIndex(
-                                    first_indirect_parameters_index_for_entity
-                                        ..(first_indirect_parameters_index_for_entity + 1),
+                                    PhaseItemIndirectParametersIndex {
+                                        range: first_indirect_parameters_index_for_entity
+                                            ..(first_indirect_parameters_index_for_entity + 1),
+                                        batch_set_index: None,
+                                    },
                                 )
                             }
                         },
@@ -628,8 +637,11 @@ impl UnbatchableBinnedEntityIndexSet {
                 Some(UnbatchableBinnedEntityIndices {
                     instance_index: instance_range.start + entity_index,
                     extra_index: PhaseItemExtraIndex::IndirectParametersIndex(
-                        first_indirect_parameters_index_for_this_batch
-                            ..(first_indirect_parameters_index_for_this_batch + 1),
+                        PhaseItemIndirectParametersIndex {
+                            range: first_indirect_parameters_index_for_this_batch
+                                ..(first_indirect_parameters_index_for_this_batch + 1),
+                            batch_set_index: None,
+                        },
                     ),
                 })
             }
@@ -792,12 +804,14 @@ impl UnbatchableBinnedEntityIndexSet {
                             first_indirect_parameters_index: None,
                         }
                     }
-                    PhaseItemExtraIndex::IndirectParametersIndex(ref range) => {
+                    PhaseItemExtraIndex::IndirectParametersIndex(ref indirect_parameters_index) => {
                         // This is the first entity we've seen, and we have compute
                         // shaders. Initialize the fast path.
                         *self = UnbatchableBinnedEntityIndexSet::Sparse {
                             instance_range: indices.instance_index..indices.instance_index + 1,
-                            first_indirect_parameters_index: NonMaxU32::new(range.start),
+                            first_indirect_parameters_index: NonMaxU32::new(
+                                indirect_parameters_index.range.start,
+                            ),
                         }
                     }
                 }
@@ -811,10 +825,12 @@ impl UnbatchableBinnedEntityIndexSet {
                     && indices.extra_index == PhaseItemExtraIndex::None)
                     || first_indirect_parameters_index.is_some_and(
                         |first_indirect_parameters_index| match indices.extra_index {
-                            PhaseItemExtraIndex::IndirectParametersIndex(ref this_range) => {
+                            PhaseItemExtraIndex::IndirectParametersIndex(
+                                ref this_indirect_parameters_index,
+                            ) => {
                                 u32::from(first_indirect_parameters_index) + instance_range.end
                                     - instance_range.start
-                                    == this_range.start
+                                    == this_indirect_parameters_index.range.start
                             }
                             PhaseItemExtraIndex::DynamicOffset(_) | PhaseItemExtraIndex::None => {
                                 false
@@ -1033,23 +1049,17 @@ pub enum PhaseItemExtraIndex {
     /// An index into the buffer that specifies the indirect parameters for this
     /// [`PhaseItem`]'s drawcall. This is used when indirect mode is on (as used
     /// for GPU culling).
-    IndirectParametersIndex(Range<u32>),
+    IndirectParametersIndex(PhaseItemIndirectParametersIndex),
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct PhaseItemIndirectParametersIndex {
+    pub range: Range<u32>,
+    /// This will be set if we're using `multi_draw_indirect_count`.
+    pub batch_set_index: Option<NonMaxU32>,
 }
 
 impl PhaseItemExtraIndex {
-    /// Returns either an indirect parameters index or
-    /// [`PhaseItemExtraIndex::None`], as appropriate.
-    pub fn maybe_indirect_parameters_index(
-        indirect_parameters_index: Option<NonMaxU32>,
-    ) -> PhaseItemExtraIndex {
-        match indirect_parameters_index {
-            Some(indirect_parameters_index) => PhaseItemExtraIndex::IndirectParametersIndex(
-                u32::from(indirect_parameters_index)..(u32::from(indirect_parameters_index) + 1),
-            ),
-            None => PhaseItemExtraIndex::None,
-        }
-    }
-
     /// Returns either a dynamic offset index or [`PhaseItemExtraIndex::None`],
     /// as appropriate.
     pub fn maybe_dynamic_offset(dynamic_offset: Option<NonMaxU32>) -> PhaseItemExtraIndex {
