@@ -16,7 +16,9 @@ pub mod graph {
     #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
     pub enum Node3d {
         MsaaWriteback,
-        Prepass,
+        EarlyPrepass,
+        DownsampleDepth,
+        LatePrepass,
         DeferredPrepass,
         CopyDeferredLightingId,
         EndPrepasses,
@@ -114,8 +116,9 @@ use crate::{
     },
     dof::DepthOfFieldNode,
     prepass::{
-        node::PrepassNode, AlphaMask3dPrepass, DeferredPrepass, DepthPrepass, MotionVectorPrepass,
-        NormalPrepass, Opaque3dPrepass, OpaqueNoLightmap3dBatchSetKey, OpaqueNoLightmap3dBinKey,
+        node::{EarlyPrepassNode, LatePrepassNode},
+        AlphaMask3dPrepass, DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass,
+        Opaque3dPrepass, OpaqueNoLightmap3dBatchSetKey, OpaqueNoLightmap3dBinKey,
         ViewPrepassTextures, MOTION_VECTOR_PREPASS_FORMAT, NORMAL_PREPASS_FORMAT,
     },
     skybox::SkyboxPlugin,
@@ -169,7 +172,8 @@ impl Plugin for Core3dPlugin {
 
         render_app
             .add_render_sub_graph(Core3d)
-            .add_render_graph_node::<ViewNodeRunner<PrepassNode>>(Core3d, Node3d::Prepass)
+            .add_render_graph_node::<ViewNodeRunner<EarlyPrepassNode>>(Core3d, Node3d::EarlyPrepass)
+            .add_render_graph_node::<ViewNodeRunner<LatePrepassNode>>(Core3d, Node3d::LatePrepass)
             .add_render_graph_node::<ViewNodeRunner<DeferredGBufferPrepassNode>>(
                 Core3d,
                 Node3d::DeferredPrepass,
@@ -200,7 +204,7 @@ impl Plugin for Core3dPlugin {
             .add_render_graph_edges(
                 Core3d,
                 (
-                    Node3d::Prepass,
+                    Node3d::LatePrepass,
                     Node3d::DeferredPrepass,
                     Node3d::CopyDeferredLightingId,
                     Node3d::EndPrepasses,

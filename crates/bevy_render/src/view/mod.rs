@@ -11,6 +11,7 @@ use crate::{
         ManualTextureViews, MipBias, NormalizedRenderTarget, TemporalJitter,
     },
     extract_component::ExtractComponentPlugin,
+    occlusion_culling::OcclusionCulling,
     prelude::Shader,
     primitives::Frustum,
     render_asset::RenderAssets,
@@ -109,9 +110,11 @@ impl Plugin for ViewPlugin {
             .register_type::<Visibility>()
             .register_type::<VisibleEntities>()
             .register_type::<ColorGrading>()
+            .register_type::<OcclusionCulling>()
             // NOTE: windows.is_changed() handles cases where a window was resized
             .add_plugins((
                 ExtractComponentPlugin::<Msaa>::default(),
+                ExtractComponentPlugin::<OcclusionCulling>::default(),
                 VisibilityPlugin,
                 VisibilityRangePlugin,
             ));

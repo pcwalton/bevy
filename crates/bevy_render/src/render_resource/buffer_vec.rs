@@ -60,6 +60,18 @@ impl<T: NoUninit> RawBufferVec<T> {
         }
     }
 
+    pub fn from_slice(buffer_usage: BufferUsages, slice: &[T]) -> Self {
+        Self {
+            values: slice.to_vec(),
+            buffer: None,
+            capacity: slice.len(),
+            item_size: size_of::<T>(),
+            buffer_usage,
+            label: None,
+            changed: true,
+        }
+    }
+
     /// Returns a handle to the buffer, if the data has been uploaded.
     #[inline]
     pub fn buffer(&self) -> Option<&Buffer> {
@@ -199,6 +211,15 @@ impl<T: NoUninit> RawBufferVec<T> {
 
     pub fn values_mut(&mut self) -> &mut Vec<T> {
         &mut self.values
+    }
+}
+
+impl<T> RawBufferVec<T> where T: NoUninit + Default {
+    pub fn grow_set(&mut self, index: u32, value: T) {
+        while index as usize + 1 > self.len() {
+            self.values.push(T::default());
+        }
+        self.values[index as usize] = value;
     }
 }
 

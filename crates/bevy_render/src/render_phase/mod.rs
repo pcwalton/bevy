@@ -878,11 +878,13 @@ where
                 (
                     no_gpu_preprocessing::batch_and_prepare_sorted_render_phase::<SPI, GFBD>
                         .run_if(resource_exists::<BatchedInstanceBuffer<GFBD::BufferData>>),
-                    gpu_preprocessing::batch_and_prepare_sorted_render_phase::<SPI, GFBD>.run_if(
-                        resource_exists::<
-                            BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>,
-                        >,
-                    ),
+                    gpu_preprocessing::batch_and_prepare_sorted_render_phase::<SPI, GFBD>
+                        .chain()
+                        .run_if(
+                            resource_exists::<
+                                BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>,
+                            >,
+                        ),
                 )
                     .in_set(RenderSet::PrepareResources),
             );

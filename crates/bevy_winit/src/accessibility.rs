@@ -181,7 +181,7 @@ fn should_update_accessibility_nodes(
 
 fn update_accessibility_nodes(
     mut adapters: NonSendMut<AccessKitAdapters>,
-    focus: Res<InputFocus>,
+    focus: Option<Res<InputFocus>>,
     primary_window: Query<(Entity, &Window), With<PrimaryWindow>>,
     nodes: Query<(
         Entity,
@@ -191,6 +191,7 @@ fn update_accessibility_nodes(
     )>,
     node_entities: Query<Entity, With<AccessibilityNode>>,
 ) {
+    let Some(focus) = focus else { return };
     let Ok((primary_window_id, primary_window)) = primary_window.get_single() else {
         return;
     };

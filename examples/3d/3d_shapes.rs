@@ -10,12 +10,14 @@ use std::f32::consts::PI;
 use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
 use bevy::{
     color::palettes::basic::SILVER,
+    core_pipeline::prepass::DepthPrepass,
     prelude::*,
     render::{
         render_asset::RenderAssetUsages,
         render_resource::{Extent3d, TextureDimension, TextureFormat},
     },
 };
+use bevy_render::occlusion_culling::OcclusionCulling;
 
 fn main() {
     App::new()
@@ -130,6 +132,9 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 7., 14.0).looking_at(Vec3::new(0., 1., 0.), Vec3::Y),
+        Msaa::Off,
+        DepthPrepass,
+        OcclusionCulling,
     ));
 
     #[cfg(not(target_arch = "wasm32"))]
