@@ -28,6 +28,7 @@ use bevy_render::{
     },
     camera::Camera,
     mesh::*,
+    occlusion_culling::OcclusionCulling,
     primitives::Aabb,
     render_asset::RenderAssets,
     render_phase::{
@@ -1246,9 +1247,12 @@ pub fn extract_meshes_for_gpu_building(
     mut removed_visibilities_query: Extract<RemovedComponents<ViewVisibility>>,
     mut removed_global_transforms_query: Extract<RemovedComponents<GlobalTransform>>,
     mut removed_meshes_query: Extract<RemovedComponents<Mesh3d>>,
-    cameras_query: Extract<Query<(), (With<Camera>, Without<NoIndirectDrawing>)>>,
+    gpu_culling_query: Extract<Query<(), (With<Camera>, Without<NoIndirectDrawing>)>>,
+    occlusion_culling_query: Extract<Query<(), (With<Camera>, With<OcclusionCulling>)>>,
 ) {
-    let any_gpu_culling = !cameras_query.is_empty();
+    let any_gpu_culling = !gpu_culling_query.is_empty();
+    let any_occlusion_culling = !occlusion_culling_query.is_empty();
+
     for render_mesh_instance_queue in render_mesh_instance_queues.iter_mut() {
         render_mesh_instance_queue.init(any_gpu_culling);
     }
@@ -1312,9 +1316,11 @@ pub fn extract_meshes_for_gpu_building(
 
             let gpu_mesh_culling_data = any_gpu_culling.then(|| MeshCullingData::new(aabb));
 
-            let previous_input_index = if shared
-                .flags
-                .contains(RenderMeshInstanceFlags::HAS_PREVIOUS_TRANSFORM)
+            // FIXME: I think retained is messing us up here
+            let previous_input_index = if any_occlusion_culling
+                || shared
+                    .flags
+                    .contains(RenderMeshInstanceFlags::HAS_PREVIOUS_TRANSFORM)
             {
                 render_mesh_instances
                     .get(&MainEntity::from(entity))

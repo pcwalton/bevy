@@ -140,7 +140,8 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
 #ifdef EARLY
     // If this is phase 1 of the occlusion culling pass, only draw the object if
     // it was visible the previous frame.
-    if (previous_frame_view_visibility[previous_input_index].visibility != 2u) {
+    if (previous_input_index == 0xffffffffu ||
+            previous_frame_view_visibility[previous_input_index].visibility != 2u) {
         return;
     }
 #endif  // EARLY

@@ -51,9 +51,9 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
 
     var indirect_parameters_index = instance_index;
 #ifdef MULTI_DRAW_INDIRECT_COUNT_SUPPORTED
-    //if (instance_count == 0u) {
-     //   return;
-    //}
+    if (instance_count == 0u) {
+        return;
+    }
 
     if (batch_set_index != 0xffffffffu) {
         let indirect_parameters_base =
@@ -61,7 +61,7 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         let indirect_parameters_offset =
             atomicAdd(&indirect_batch_sets[batch_set_index].indirect_parameters_count, 1u);
 
-        //indirect_parameters_index = indirect_parameters_base + indirect_parameters_offset;
+        indirect_parameters_index = indirect_parameters_base + indirect_parameters_offset;
     }
 #endif  // MULTI_DRAW_INDIRECT_COUNT_SUPPORTED
 
