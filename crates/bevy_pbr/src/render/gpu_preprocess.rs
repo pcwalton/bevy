@@ -1347,7 +1347,7 @@ pub fn prepare_preprocess_bind_groups(
 
     let (Some(current_input_buffer), Some(previous_input_buffer), Some(data_buffer)) = (
         current_input_buffer_vec.buffer().buffer(),
-        previous_input_buffer_vec.buffer().buffer(),
+        previous_input_buffer_vec.buffer(),
         data_buffer_vec.buffer(),
     ) else {
         return;

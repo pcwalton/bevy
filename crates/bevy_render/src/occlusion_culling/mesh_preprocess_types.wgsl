@@ -10,9 +10,6 @@ struct MeshInput {
     lightmap_uv_rect: vec2<u32>,
     // Various flags.
     flags: u32,
-    // The index of this mesh's `MeshInput` in the `previous_input` array, if
-    // applicable. If not present, this is `u32::MAX`.
-    previous_input_index: u32,
     first_vertex_index: u32,
     first_index_index: u32,
     index_count: u32,
@@ -21,6 +18,9 @@ struct MeshInput {
     // Low 16 bits: index of the material inside the bind group data.
     // High 16 bits: index of the lightmap in the binding array.
     material_and_lightmap_bind_group_slot: u32,
+    pad_a: u32,
+    pad_b: u32,
+    pad_c: u32,
 }
 
 // The `wgpu` indirect parameters structure. This is a union of two structures.

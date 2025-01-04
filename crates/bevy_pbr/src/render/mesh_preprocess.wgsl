@@ -134,14 +134,11 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let output_index = work_items[instance_index].output_index;
     let indirect_parameters_index = work_items[instance_index].indirect_parameters_index;
 
-    let previous_input_index = current_input[input_index].previous_input_index;
-
 #ifdef OCCLUSION_CULLING
 #ifdef EARLY
     // If this is phase 1 of the occlusion culling pass, only draw the object if
     // it was visible the previous frame.
-    if (previous_input_index == 0xffffffffu ||
-            previous_frame_view_visibility[previous_input_index].visibility != 2u) {
+    if (previous_frame_view_visibility[input_index].visibility != 2u) {
         return;
     }
 #endif  // EARLY
@@ -237,12 +234,7 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let local_from_world_transpose_b = local_from_world_transpose[2].z;
 
     // Look up the previous model matrix.
-    var previous_world_from_local: mat3x4<f32>;
-    if (previous_input_index == 0xffffffff) {
-        previous_world_from_local = world_from_local_affine_transpose;
-    } else {
-        previous_world_from_local = previous_input[previous_input_index].world_from_local;
-    }
+    let previous_world_from_local = previous_input[input_index].world_from_local;
 
     // Figure out the output index. In indirect mode, this involves bumping the
     // instance index in the indirect parameters structure. Otherwise, this

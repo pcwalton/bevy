@@ -152,13 +152,7 @@ where
     pub current_input_buffer: InstanceInputUniformBuffer<BDI>,
 
     /// The uniform data inputs for the previous frame.
-    ///
-    /// The indices don't generally line up between `current_input_buffer`
-    /// and `previous_input_buffer`, because, among other reasons, entities
-    /// can spawn or despawn between frames. Instead, each current buffer
-    /// data input uniform is expected to contain the index of the
-    /// corresponding buffer data input uniform in this list.
-    pub previous_input_buffer: InstanceInputUniformBuffer<BDI>,
+    pub previous_input_buffer: RawBufferVec<BDI>,
 }
 
 /// Holds the GPU buffer of instance input data, which is the data about each
@@ -247,6 +241,10 @@ where
 
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
+    }
+
+    pub fn into_buffer(self) -> RawBufferVec<BDI> {
+        self.buffer
     }
 }
 
@@ -612,7 +610,7 @@ where
             data_buffer: UninitBufferVec::new(BufferUsages::STORAGE),
             work_item_buffers: EntityHashMap::default(),
             current_input_buffer: InstanceInputUniformBuffer::new(),
-            previous_input_buffer: InstanceInputUniformBuffer::new(),
+            previous_input_buffer: RawBufferVec::new(BufferUsages::STORAGE),
         }
     }
 
@@ -1249,9 +1247,7 @@ pub fn write_batched_instance_buffers<GFBD>(
     current_input_buffer
         .buffer
         .write_buffer(&render_device, &render_queue);
-    previous_input_buffer
-        .buffer
-        .write_buffer(&render_device, &render_queue);
+    previous_input_buffer.write_buffer(&render_device, &render_queue);
 
     for phase_work_item_buffers in index_buffers.values_mut() {
         for index_buffer in phase_work_item_buffers.values_mut() {

@@ -1,4 +1,4 @@
-use core::mem::size_of;
+use core::mem::{self, size_of};
 
 use crate::material_bind_groups::{MaterialBindGroupIndex, MaterialBindGroupSlot};
 use allocator::MeshAllocator;
@@ -354,11 +354,6 @@ pub struct MeshInputUniform {
     pub lightmap_uv_rect: UVec2,
     /// Various [`MeshFlags`].
     pub flags: u32,
-    /// The index of this mesh's [`MeshInputUniform`] in the previous frame's
-    /// buffer, if applicable.
-    ///
-    /// This is used for TAA. If not present, this will be `u32::MAX`.
-    pub previous_input_index: u32,
     /// The index of this mesh's first vertex in the vertex buffer.
     ///
     /// Multiple meshes can be packed into a single vertex buffer (see
@@ -378,6 +373,7 @@ pub struct MeshInputUniform {
     pub material_and_lightmap_bind_group_slot: u32,
     pub pad_a: u32,
     pub pad_b: u32,
+    pub pad_c: u32,
 }
 
 /// Information about each mesh instance needed to cull it on GPU.
@@ -583,8 +579,6 @@ pub struct RenderMeshInstanceGpuBuilder {
     /// (MSB: most significant bit; LSB: least significant bit.)
     /// ```
     pub lightmap_uv_rect: UVec2,
-    /// The index of the previous mesh input.
-    pub previous_input_index: Option<NonMaxU32>,
     /// Various flags.
     pub mesh_flags: MeshFlags,
 }
@@ -919,7 +913,7 @@ impl RenderMeshInstanceGpuBuilder {
         entity: MainEntity,
         render_mesh_instances: &mut MainEntityHashMap<RenderMeshInstanceGpu>,
         current_input_buffer: &mut InstanceInputUniformBuffer<MeshInputUniform>,
-        previous_input_buffer: &mut InstanceInputUniformBuffer<MeshInputUniform>,
+        previous_input_buffer: &mut RawBufferVec<MeshInputUniform>,
         mesh_allocator: &MeshAllocator,
         mesh_material_ids: &RenderMeshMaterialIds,
         render_lightmaps: &RenderLightmaps,
@@ -962,11 +956,10 @@ impl RenderMeshInstanceGpuBuilder {
         };
 
         // Create the mesh input uniform.
-        let mut mesh_input_uniform = MeshInputUniform {
+        let mesh_input_uniform = MeshInputUniform {
             world_from_local: self.world_from_local.to_transpose(),
             lightmap_uv_rect: self.lightmap_uv_rect,
             flags: self.mesh_flags.bits(),
-            previous_input_index: u32::MAX,
             first_vertex_index,
             first_index_index,
             index_count: if mesh_is_indexed {
@@ -981,6 +974,7 @@ impl RenderMeshInstanceGpuBuilder {
             ) | ((lightmap_slot as u32) << 16),
             pad_a: 0,
             pad_b: 0,
+            pad_c: 0,
         };
 
         // Did the last frame contain this entity as well?
@@ -995,8 +989,7 @@ impl RenderMeshInstanceGpuBuilder {
                 // Save the old mesh input uniform. The mesh preprocessing
                 // shader will need it to compute motion vectors.
                 let previous_mesh_input_uniform = current_input_buffer.get(current_uniform_index);
-                let previous_input_index = previous_input_buffer.add(previous_mesh_input_uniform);
-                mesh_input_uniform.previous_input_index = previous_input_index;
+                previous_input_buffer.grow_set(current_uniform_index, previous_mesh_input_uniform);
 
                 // Write in the new mesh input uniform.
                 current_input_buffer.set(current_uniform_index, mesh_input_uniform);
@@ -1014,6 +1007,7 @@ impl RenderMeshInstanceGpuBuilder {
             Entry::Vacant(vacant_entry) => {
                 // No, this is a new entity. Push its data on to the buffer.
                 current_uniform_index = current_input_buffer.add(mesh_input_uniform);
+                previous_input_buffer.grow_set(current_uniform_index, mesh_input_uniform);
 
                 vacant_entry.insert(RenderMeshInstanceGpu {
                     translation: self.world_from_local.translation,
@@ -1251,21 +1245,12 @@ pub fn extract_meshes_for_gpu_building(
     occlusion_culling_query: Extract<Query<(), (With<Camera>, With<OcclusionCulling>)>>,
 ) {
     let any_gpu_culling = !gpu_culling_query.is_empty();
-    let any_occlusion_culling = !occlusion_culling_query.is_empty();
 
     for render_mesh_instance_queue in render_mesh_instance_queues.iter_mut() {
         render_mesh_instance_queue.init(any_gpu_culling);
     }
 
     // Collect render mesh instances. Build up the uniform buffer.
-
-    let RenderMeshInstances::GpuBuilding(ref mut render_mesh_instances) = *render_mesh_instances
-    else {
-        panic!(
-            "`extract_meshes_for_gpu_building` should only be called if we're \
-            using GPU `MeshUniform` building"
-        );
-    };
 
     // Find all meshes that have changed, and record information needed to
     // construct the `MeshInputUniform` for them.
@@ -1316,25 +1301,11 @@ pub fn extract_meshes_for_gpu_building(
 
             let gpu_mesh_culling_data = any_gpu_culling.then(|| MeshCullingData::new(aabb));
 
-            // FIXME: I think retained is messing us up here
-            let previous_input_index = if any_occlusion_culling
-                || shared
-                    .flags
-                    .contains(RenderMeshInstanceFlags::HAS_PREVIOUS_TRANSFORM)
-            {
-                render_mesh_instances
-                    .get(&MainEntity::from(entity))
-                    .map(|render_mesh_instance| render_mesh_instance.current_uniform_index)
-            } else {
-                None
-            };
-
             let gpu_mesh_instance_builder = RenderMeshInstanceGpuBuilder {
                 shared,
                 world_from_local: (&transform.affine()).into(),
                 lightmap_uv_rect,
                 mesh_flags,
-                previous_input_index,
             };
 
             queue.push(
@@ -1418,7 +1389,11 @@ pub fn collect_meshes_for_gpu_building(
         ..
     } = batched_instance_buffers.into_inner();
 
+    // FIXME: This is slow. We should mark what was dirty last frame and only
+    // copy those meshes over. This adds complexity, so I don't want to do it
+    // right now.
     previous_input_buffer.clear();
+    previous_input_buffer.extend(current_input_buffer.buffer().values().iter().cloned());
 
     // Build the [`RenderMeshInstance`]s and [`MeshInputUniform`]s.
 
@@ -1485,7 +1460,9 @@ pub fn collect_meshes_for_gpu_building(
     }
 
     // Buffers can't be empty. Make sure there's something in the previous input buffer.
-    previous_input_buffer.ensure_nonempty();
+    if previous_input_buffer.is_empty() {
+        previous_input_buffer.push(MeshInputUniform::default());
+    }
 }
 
 /// All data needed to construct a pipeline for rendering 3D meshes.
