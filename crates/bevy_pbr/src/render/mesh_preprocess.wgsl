@@ -8,7 +8,7 @@
 // so that TAA works.
 
 #import bevy_pbr::mesh_types::{Mesh, MESH_FLAGS_NO_FRUSTUM_CULLING_BIT}
-#import bevy_pbr::mesh_preprocess_types::IndirectParametersMetadata
+#import bevy_pbr::mesh_preprocess_types::{IndirectParametersMetadata, MeshInput}
 #import bevy_pbr::occlusion_culling
 #import bevy_pbr::view_transformations::ndc_to_uv
 #import bevy_render::maths
@@ -36,6 +36,13 @@ struct PreprocessWorkItem {
     // The index of the `IndirectParameters` in `indirect_parameters` that we
     // write to.
     indirect_parameters_index: u32,
+}
+
+struct ViewVisibility {
+    visibility: u32,
+    debug_max_depth_view: f32,
+    debug_max_depth_ndc: f32,
+    debug_occluder_depth_ndc: f32,
 }
 
 // The current frame's `MeshInput`.
@@ -68,10 +75,10 @@ struct PreprocessWorkItem {
 #ifdef OCCLUSION_CULLING
 // TODO: Make this a bitfield? Would have to use atomics then.
 // Meshlets makes this a bitfield.
-@group(0) @binding(7) var<storage, read_write> view_visibility: array<u32>;
+@group(0) @binding(7) var<storage, read_write> view_visibility: array<ViewVisibility>;
 
 #ifdef EARLY
-@group(0) @binding(8) var<storage, read> previous_frame_view_visibility: array<u32>;
+@group(0) @binding(8) var<storage, read> previous_frame_view_visibility: array<ViewVisibility>;
 #else   // EARLY
 @group(0) @binding(8) var depth_pyramid: texture_2d<f32>;
 #endif  // EARLY
@@ -127,24 +134,13 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let output_index = work_items[instance_index].output_index;
     let indirect_parameters_index = work_items[instance_index].indirect_parameters_index;
 
-    // FIXME: This is inefficient. Not sure what the best way to avoid doing it is though.
-    // Maybe a flag to say whether we're the first mesh in a batch?
-#ifdef INDIRECT
-#ifndef LATE
-    if (indirect_parameters[indirect_parameters_index].first_instance == 0xffffffffu) {
-        indirect_parameters[indirect_parameters_index].base_vertex_or_first_instance =
-            output_index;
-    } else {
-        indirect_parameters[indirect_parameters_index].first_instance = output_index;
-    }
-#endif  // LATE
-#endif  // INDIRECT
+    let previous_input_index = current_input[input_index].previous_input_index;
 
 #ifdef OCCLUSION_CULLING
 #ifdef EARLY
     // If this is phase 1 of the occlusion culling pass, only draw the object if
     // it was visible the previous frame.
-    if (previous_frame_view_visibility[input_index] != 2u) {
+    if (previous_frame_view_visibility[previous_input_index].visibility != 2u) {
         return;
     }
 #endif  // EARLY
@@ -171,8 +167,9 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     // Occlusion cull if necessary.
 #ifdef OCCLUSION_CULLING
 #ifdef EARLY
-    view_visibility[input_index] = 1u;
+    view_visibility[input_index].visibility = 1u;
 #else   // EARLY
+
     let aabb_center = mesh_culling_data[input_index].aabb_center.xyz;
     let aabb_half_extents = mesh_culling_data[input_index].aabb_half_extents.xyz;
 
@@ -200,17 +197,25 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         }
     }
 
+    // Clip to near plane to avoid NDC depth becoming negative.
+    max_depth_view = min(-view.clip_from_view[3][2], max_depth_view);
+
     let aabb_pixel_size = occlusion_culling::get_aabb_size_in_pixels(aabb, depth_pyramid);
     let occluder_depth_ndc =
         occlusion_culling::get_occluder_depth(aabb, aabb_pixel_size, depth_pyramid);
 
     let max_depth_ndc = view_z_to_depth_ndc(max_depth_view);
+
+    view_visibility[input_index].debug_max_depth_view = max_depth_view;
+    view_visibility[input_index].debug_max_depth_ndc = max_depth_ndc;
+    view_visibility[input_index].debug_occluder_depth_ndc = occluder_depth_ndc;
+
     if (max_depth_ndc < occluder_depth_ndc) {
         return;
     }
 
-    let early_view_visibility = view_visibility[input_index];
-    view_visibility[input_index] = 2u;
+    let early_view_visibility = view_visibility[input_index].visibility;
+    view_visibility[input_index].visibility = 2u;
 
     // Now if this is phase 2 of the occlusion culling pass, and we've already
     // drawn the object, don't draw it again.
@@ -231,7 +236,6 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let local_from_world_transpose_b = local_from_world_transpose[2].z;
 
     // Look up the previous model matrix.
-    let previous_input_index = current_input[input_index].previous_input_index;
     var previous_world_from_local: mat3x4<f32>;
     if (previous_input_index == 0xffffffff) {
         previous_world_from_local = world_from_local_affine_transpose;
@@ -318,8 +322,7 @@ fn position_world_to_ndc(world_pos: vec3<f32>) -> vec3<f32> {
     return ndc_pos.xyz / ndc_pos.w;
 }
 
-/// Convert ndc depth to linear view z. 
-/// Note: Depth values in front of the camera will be negative as -z is forward
+/// Convert linear view z to ndc.
 fn view_z_to_depth_ndc(view_z: f32) -> f32 {
     if (view.clip_from_view[3][3] != 1.0) {
         // Perspective

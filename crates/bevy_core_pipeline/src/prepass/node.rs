@@ -62,7 +62,7 @@ impl ViewNode for LatePrepassNode {
         query: QueryItem<'w, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        run_prepass(graph, render_context, query, world, "main prepass")
+        run_prepass(graph, render_context, query, world, "late prepass")
     }
 }
 
@@ -147,9 +147,7 @@ fn run_prepass<'w>(
         }
 
         // Opaque draws
-        if !opaque_prepass_phase.batchable_mesh_keys.is_empty()
-            || !opaque_prepass_phase.unbatchable_mesh_keys.is_empty()
-        {
+        if !opaque_prepass_phase.is_empty() {
             #[cfg(feature = "trace")]
             let _opaque_prepass_span = info_span!("opaque_prepass").entered();
             if let Err(err) = opaque_prepass_phase.render(&mut render_pass, world, view_entity) {

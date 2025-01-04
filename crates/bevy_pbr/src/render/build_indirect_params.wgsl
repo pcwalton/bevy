@@ -34,17 +34,26 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let base_output_index = indirect_parameters_metadata[instance_index].base_output_index;
     let batch_set_index = indirect_parameters_metadata[instance_index].batch_set_index;
 
-#ifdef EARLY
-    let instance_count = atomicLoad(&indirect_parameters_metadata[instance_index].early_instance_count);
-#else   // EARLY
-    let instance_count = atomicLoad(&indirect_parameters_metadata[instance_index].late_instance_count);
-#endif  // EARLY
+    let early_instance_count =
+        atomicLoad(&indirect_parameters_metadata[instance_index].early_instance_count);
+    let late_instance_count =
+        atomicLoad(&indirect_parameters_metadata[instance_index].late_instance_count);
+
+#ifdef EARLY_PHASE
+    let instance_count = early_instance_count;
+#else   // EARLY_PHASE
+#ifdef LATE_PHASE
+    let instance_count = late_instance_count;
+#else   // LATE_PHASE
+    let instance_count = early_instance_count + late_instance_count;
+#endif  // LATE_PHASE
+#endif  // EARLY_PHASE
 
     var indirect_parameters_index = instance_index;
 #ifdef MULTI_DRAW_INDIRECT_COUNT_SUPPORTED
-    if (instance_count == 0u) {
-        return;
-    }
+    //if (instance_count == 0u) {
+     //   return;
+    //}
 
     if (batch_set_index != 0xffffffffu) {
         let indirect_parameters_base =
@@ -52,22 +61,18 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         let indirect_parameters_offset =
             atomicAdd(&indirect_batch_sets[batch_set_index].indirect_parameters_count, 1u);
 
-        indirect_parameters_index = indirect_parameters_base + indirect_parameters_offset;
+        //indirect_parameters_index = indirect_parameters_base + indirect_parameters_offset;
     }
 #endif  // MULTI_DRAW_INDIRECT_COUNT_SUPPORTED
 
-#ifdef OCCLUSION_CULLING
-#ifdef EARLY
     indirect_parameters[indirect_parameters_index].instance_count = instance_count;
+
+#ifdef LATE_PHASE
     indirect_parameters[indirect_parameters_index].first_instance =
-        base_output_index + instance_count;
-#else   // EARLY
-    indirect_parameters[indirect_parameters_index].instance_count += instance_count;
+        base_output_index + early_instance_count;
+#else   // LATE_PHASE
     indirect_parameters[indirect_parameters_index].first_instance = base_output_index;
-#endif  // EARLY
-#else   // OCCLUSION_CULLING
-    indirect_parameters[indirect_parameters_index].first_instance = base_output_index;
-#endif  // OCCLUSION_CULLING
+#endif  // LATE_PHASE
 
     indirect_parameters[indirect_parameters_index].base_vertex =
         current_input[mesh_index].first_vertex_index;

@@ -110,8 +110,9 @@ pub mod graph {
         LateGpuPreprocess,
         /// Label for the screen space reflections pass.
         ScreenSpaceReflections,
-        EarlyBuildIndirectParameters,
-        LateBuildIndirectParameters,
+        EarlyPrepassBuildIndirectParameters,
+        LatePrepassBuildIndirectParameters,
+        MainBuildIndirectParameters,
     }
 }
 
