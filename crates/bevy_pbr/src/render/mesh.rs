@@ -1745,13 +1745,14 @@ impl GetFullBatchData for MeshPipeline {
     fn write_batch_indirect_parameters(
         mesh_index: u32,
         indexed: bool,
+        base_output_index: u32,
         batch_set_index: Option<NonMaxU32>,
         indirect_parameters_buffer: &mut IndirectParametersBuffers,
         indirect_parameters_offset: u32,
     ) {
         let indirect_parameters = IndirectParametersMetadata {
             mesh_index,
-            base_output_index: indirect_parameters_offset,
+            base_output_index,
             batch_set_index: match batch_set_index {
                 Some(batch_set_index) => u32::from(batch_set_index),
                 None => !0,

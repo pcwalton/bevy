@@ -114,7 +114,8 @@ fn setup(
 
     commands.spawn((
         PointLight {
-            shadows_enabled: true,
+            //shadows_enabled: true,
+            shadows_enabled: false,
             intensity: 10_000_000.,
             range: 100.0,
             shadow_depth_bias: 0.2,

@@ -42,7 +42,7 @@ struct ViewVisibility {
     visibility: u32,
     debug_max_depth_view: f32,
     debug_max_depth_ndc: f32,
-    debug_occluder_depth_ndc: f32,
+    already_drawn: u32,
 }
 
 // The current frame's `MeshInput`.
@@ -140,8 +140,8 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
 #ifdef EARLY
     // If this is phase 1 of the occlusion culling pass, only draw the object if
     // it was visible the previous frame.
-    if (previous_input_index == 0xffffffffu ||
-            previous_frame_view_visibility[previous_input_index].visibility != 2u) {
+    if (/*previous_input_index == 0xffffffffu ||
+            previous_frame_view_visibility[previous_input_index].visibility != 2u*/true) {
         return;
     }
 #endif  // EARLY
@@ -209,7 +209,6 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
 
     view_visibility[input_index].debug_max_depth_view = max_depth_view;
     view_visibility[input_index].debug_max_depth_ndc = max_depth_ndc;
-    view_visibility[input_index].debug_occluder_depth_ndc = occluder_depth_ndc;
 
     if (max_depth_ndc < occluder_depth_ndc) {
         return;
@@ -220,6 +219,7 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
 
     // Now if this is phase 2 of the occlusion culling pass, and we've already
     // drawn the object, don't draw it again.
+    view_visibility[input_index].already_drawn = select(0u, 1u, early_view_visibility != 0u);
     if (early_view_visibility != 0u) {
         return;
     }

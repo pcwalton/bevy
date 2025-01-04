@@ -1,5 +1,7 @@
 //! Batching functionality when GPU preprocessing is in use.
 
+use core::any::TypeId;
+
 use bevy_app::{App, Plugin};
 use bevy_ecs::{
     entity::{Entity, EntityHashMap},
@@ -9,7 +11,7 @@ use bevy_ecs::{
     world::{FromWorld, World},
 };
 use bevy_encase_derive::ShaderType;
-use bevy_utils::{default, tracing::error};
+use bevy_utils::{default, tracing::error, Entry, HashMap, RandomState, TypeIdMap};
 use bytemuck::{Pod, Zeroable};
 use nonmax::NonMaxU32;
 use wgpu::{BindingResource, BufferUsages, DownlevelFlags, Features};
@@ -24,6 +26,7 @@ use crate::{
     },
     render_resource::{Buffer, BufferVec, GpuArrayBufferable, RawBufferVec, UninitBufferVec},
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
+    sync_world::MainEntity,
     view::{ExtractedView, NoIndirectDrawing},
     Render, RenderApp, RenderSet,
 };
@@ -141,7 +144,7 @@ where
     /// corresponds to each instance.
     ///
     /// This is keyed off each view. Each view has a separate buffer.
-    pub work_item_buffers: EntityHashMap<PreprocessWorkItemBuffers>,
+    pub work_item_buffers: EntityHashMap<TypeIdMap<PreprocessWorkItemBuffers>>,
 
     /// The uniform data inputs for the current frame.
     ///
@@ -554,6 +557,10 @@ impl IndirectParametersBuffers {
             });
         }
     }
+
+    pub fn get_next_batch_set_index(&self, indexed: bool) -> Option<NonMaxU32> {
+        NonMaxU32::new(self.batch_set_count(indexed) as u32)
+    }
 }
 
 impl Default for IndirectParametersBuffers {
@@ -621,16 +628,18 @@ where
     /// Clears out the buffers in preparation for a new frame.
     pub fn clear(&mut self) {
         self.data_buffer.clear();
-        for work_item_buffers in self.work_item_buffers.values_mut() {
-            match *work_item_buffers {
-                PreprocessWorkItemBuffers::Direct(ref mut buffer_vec) => buffer_vec.clear(),
-                PreprocessWorkItemBuffers::Indirect {
-                    ref mut indexed,
-                    ref mut non_indexed,
-                    ..
-                } => {
-                    indexed.clear();
-                    non_indexed.clear();
+        for phase_work_item_buffers in self.work_item_buffers.values_mut() {
+            for work_item_buffers in phase_work_item_buffers.values_mut() {
+                match *work_item_buffers {
+                    PreprocessWorkItemBuffers::Direct(ref mut buffer_vec) => buffer_vec.clear(),
+                    PreprocessWorkItemBuffers::Indirect {
+                        ref mut indexed,
+                        ref mut non_indexed,
+                        ..
+                    } => {
+                        indexed.clear();
+                        non_indexed.clear();
+                    }
                 }
             }
         }
@@ -763,9 +772,13 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
         };
 
         // Create the work item buffer if necessary.
-        let work_item_buffer = work_item_buffers.entry(view).or_insert_with(|| {
-            PreprocessWorkItemBuffers::new(no_indirect_drawing, gpu_occlusion_culling)
-        });
+        let work_item_buffer = work_item_buffers
+            .entry(view)
+            .or_insert_with(|| TypeIdMap::default())
+            .entry(TypeId::of::<I>())
+            .or_insert_with(|| {
+                PreprocessWorkItemBuffers::new(no_indirect_drawing, gpu_occlusion_culling)
+            });
 
         // Walk through the list of phase items, building up batches as we go.
         let mut batch: Option<SortedRenderBatch<GFBD>> = None;
@@ -829,6 +842,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
                     GFBD::write_batch_indirect_parameters(
                         current_input_index.into(),
                         item_is_indexed,
+                        output_index,
                         None,
                         &mut indirect_parameters_buffers,
                         indirect_parameters_index,
@@ -848,7 +862,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
             // Add a new preprocessing work item so that the preprocessing
             // shader will copy the per-instance data over.
             if let Some(batch) = batch.as_ref() {
-                work_item_buffer.push(
+                /*work_item_buffer.push(
                     item_is_indexed,
                     PreprocessWorkItem {
                         input_index: current_input_index.into(),
@@ -862,7 +876,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
                             None => 0,
                         },
                     },
-                );
+                );*/
             }
         }
 
@@ -893,15 +907,21 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
     } = gpu_array_buffer.into_inner();
 
     for (view, no_indirect_drawing, gpu_occlusion_culling) in &mut views {
+        let mut seen_input_indices = HashMap::new();
+
         let Some(phase) = binned_render_phases.get_mut(&view) else {
             continue;
         };
 
         // Create the work item buffer if necessary; otherwise, just mark it as
         // used this frame.
-        let work_item_buffer = work_item_buffers.entry(view).or_insert_with(|| {
-            PreprocessWorkItemBuffers::new(no_indirect_drawing, gpu_occlusion_culling)
-        });
+        let work_item_buffer = work_item_buffers
+            .entry(view)
+            .or_insert_with(|| TypeIdMap::default())
+            .entry(TypeId::of::<BPI>())
+            .or_insert_with(|| {
+                PreprocessWorkItemBuffers::new(no_indirect_drawing, gpu_occlusion_culling)
+            });
 
         // Prepare multidrawables.
 
@@ -919,6 +939,13 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                         continue;
                     };
                     let output_index = data_buffer.add() as u32;
+
+                    check_seen_input_indices(
+                        &mut seen_input_indices,
+                        input_index,
+                        entity,
+                        main_entity,
+                    );
 
                     match batch {
                         Some(ref mut batch) => {
@@ -945,13 +972,12 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                             // Start a new batch, in indirect mode.
                             let indirect_parameters_index =
                                 indirect_parameters_buffers.allocate(batch_set_key.indexed(), 1);
-                            let batch_set_index = NonMaxU32::new(
-                                indirect_parameters_buffers.batch_set_count(batch_set_key.indexed())
-                                    as u32,
-                            );
+                            let batch_set_index = indirect_parameters_buffers
+                                .get_next_batch_set_index(batch_set_key.indexed());
                             GFBD::write_batch_indirect_parameters(
                                 input_index.into(),
                                 batch_set_key.indexed(),
+                                output_index,
                                 batch_set_index,
                                 &mut indirect_parameters_buffers,
                                 indirect_parameters_index,
@@ -1017,6 +1043,8 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                 };
                 let output_index = data_buffer.add() as u32;
 
+                check_seen_input_indices(&mut seen_input_indices, input_index, entity, main_entity);
+
                 match batch {
                     Some(ref mut batch) => {
                         batch.instance_range.end = output_index + 1;
@@ -1053,12 +1081,12 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                         // Start a new batch, in indirect mode.
                         let indirect_parameters_index =
                             indirect_parameters_buffers.allocate(key.0.indexed(), 1);
-                        let batch_set_index = NonMaxU32::new(
-                            indirect_parameters_buffers.batch_set_count(key.0.indexed()) as u32,
-                        );
+                        let batch_set_index =
+                            indirect_parameters_buffers.get_next_batch_set_index(key.0.indexed());
                         GFBD::write_batch_indirect_parameters(
                             input_index.into(),
                             key.0.indexed(),
+                            output_index,
                             batch_set_index,
                             &mut indirect_parameters_buffers,
                             indirect_parameters_index,
@@ -1143,12 +1171,14 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                 )
             };
 
-            for &(_, main_entity) in &unbatchables.entities {
+            for &(entity, main_entity) in &unbatchables.entities {
                 let Some(input_index) = GFBD::get_binned_index(&system_param_item, main_entity)
                 else {
                     continue;
                 };
                 let output_index = data_buffer.add() as u32;
+
+                check_seen_input_indices(&mut seen_input_indices, input_index, entity, main_entity);
 
                 if let Some(ref mut indirect_parameters_index) = indirect_parameters_offset {
                     // We're in indirect mode, so add an indirect parameters
@@ -1156,6 +1186,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                     GFBD::write_batch_indirect_parameters(
                         input_index.into(),
                         key.0.indexed(),
+                        output_index,
                         None,
                         &mut indirect_parameters_buffers,
                         *indirect_parameters_index,
@@ -1222,18 +1253,20 @@ pub fn write_batched_instance_buffers<GFBD>(
         .buffer
         .write_buffer(&render_device, &render_queue);
 
-    for index_buffer in index_buffers.values_mut() {
-        match *index_buffer {
-            PreprocessWorkItemBuffers::Direct(ref mut buffer_vec) => {
-                buffer_vec.write_buffer(&render_device, &render_queue);
-            }
-            PreprocessWorkItemBuffers::Indirect {
-                ref mut indexed,
-                ref mut non_indexed,
-                ..
-            } => {
-                indexed.write_buffer(&render_device, &render_queue);
-                non_indexed.write_buffer(&render_device, &render_queue);
+    for phase_work_item_buffers in index_buffers.values_mut() {
+        for index_buffer in phase_work_item_buffers.values_mut() {
+            match *index_buffer {
+                PreprocessWorkItemBuffers::Direct(ref mut buffer_vec) => {
+                    buffer_vec.write_buffer(&render_device, &render_queue);
+                }
+                PreprocessWorkItemBuffers::Indirect {
+                    ref mut indexed,
+                    ref mut non_indexed,
+                    ..
+                } => {
+                    indexed.write_buffer(&render_device, &render_queue);
+                    non_indexed.write_buffer(&render_device, &render_queue);
+                }
             }
         }
     }
@@ -1275,4 +1308,25 @@ pub fn write_indirect_parameters_buffers(
     indirect_parameters_buffers
         .non_indexed_batch_sets
         .write_buffer(&render_device, &render_queue);
+}
+
+fn check_seen_input_indices(
+    seen_input_indices: &mut HashMap<NonMaxU32, (Entity, MainEntity), RandomState>,
+    input_index: NonMaxU32,
+    new_entity: Entity,
+    new_main_entity: MainEntity,
+) {
+    match seen_input_indices.entry(input_index) {
+        Entry::Occupied(occupied_entry) => {
+            println!(
+                "mesh is duplicated, expect trouble: {:?},{:?} / {:?}",
+                new_entity,
+                new_main_entity,
+                occupied_entry.get()
+            );
+        }
+        Entry::Vacant(vacant_entry) => {
+            vacant_entry.insert((new_entity, new_main_entity));
+        }
+    }
 }

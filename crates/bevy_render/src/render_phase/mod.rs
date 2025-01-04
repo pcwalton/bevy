@@ -456,9 +456,10 @@ where
         let mut draw_functions = draw_functions.write();
 
         let render_device = world.resource::<RenderDevice>();
-        let multi_draw_indirect_count_supported = render_device
+        /*let multi_draw_indirect_count_supported = render_device
             .features()
-            .contains(Features::MULTI_DRAW_INDIRECT_COUNT);
+            .contains(Features::MULTI_DRAW_INDIRECT_COUNT);*/
+        let multi_draw_indirect_count_supported = false;
 
         match self.batch_sets {
             BinnedRenderPhaseBatchSets::DynamicUniforms(ref batch_sets) => {

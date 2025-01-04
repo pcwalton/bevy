@@ -14,6 +14,7 @@ use bevy_core_pipeline::{
     core_3d::graph::{Core3d, Node3d},
     mip_generation::ViewDepthPyramid,
 };
+use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     component::Component,
     entity::{Entity, EntityHashMap},
@@ -42,7 +43,7 @@ use bevy_render::{
     view::{NoIndirectDrawing, ViewUniform, ViewUniformOffset, ViewUniforms},
     Render, RenderApp, RenderSet,
 };
-use bevy_utils::{tracing::warn, Entry};
+use bevy_utils::{tracing::warn, Entry, TypeIdMap};
 use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 use smallvec::{smallvec, SmallVec};
@@ -197,8 +198,11 @@ bitflags! {
 /// The compute shader bind group for the mesh uniform building pass.
 ///
 /// This goes on the view.
-#[derive(Component, Clone)]
-pub enum PreprocessBindGroups {
+#[derive(Component, Clone, Deref, DerefMut)]
+pub struct PreprocessBindGroups(pub TypeIdMap<PhasePreprocessBindGroups>);
+
+#[derive(Clone)]
+pub enum PhasePreprocessBindGroups {
     Direct(BindGroup),
     IndirectFrustumCulling {
         indexed: Option<BindGroup>,
@@ -341,8 +345,8 @@ impl Node for EarlyGpuPreprocessNode {
         for (view, bind_groups, view_uniform_offset, no_indirect_drawing, occlusion_culling) in
             self.view_query.iter_manual(world)
         {
-            // Grab the index buffer for this view.
-            let Some(index_buffer) = index_buffers.get(&view) else {
+            // Grab the work item buffers for this view.
+            let Some(phase_work_item_buffers) = index_buffers.get(&view) else {
                 warn!("The preprocessing index buffer wasn't present");
                 continue;
             };
@@ -376,54 +380,65 @@ impl Node for EarlyGpuPreprocessNode {
 
             compute_pass.set_pipeline(preprocess_pipeline);
 
-            let mut dynamic_offsets: SmallVec<[u32; 1]> = smallvec![];
-            if !no_indirect_drawing {
-                dynamic_offsets.push(view_uniform_offset.offset);
-            }
+            for (phase_type_id, work_item_buffers) in phase_work_item_buffers {
+                let Some(phase_bind_groups) = bind_groups.get(phase_type_id) else {
+                    continue;
+                };
 
-            match bind_groups {
-                PreprocessBindGroups::Direct(bind_group) => {
-                    let PreprocessWorkItemBuffers::Direct(work_item_buffer) = index_buffer else {
-                        continue;
-                    };
-                    compute_pass.set_bind_group(0, bind_group, &dynamic_offsets);
-                    let workgroup_count = work_item_buffer.len().div_ceil(WORKGROUP_SIZE);
-                    if workgroup_count > 0 {
-                        compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-                    }
+                let mut dynamic_offsets: SmallVec<[u32; 1]> = smallvec![];
+                if !no_indirect_drawing {
+                    dynamic_offsets.push(view_uniform_offset.offset);
                 }
 
-                PreprocessBindGroups::IndirectFrustumCulling {
-                    indexed: maybe_indexed_bind_group,
-                    non_indexed: maybe_non_indexed_bind_group,
-                }
-                | PreprocessBindGroups::IndirectOcclusionCulling {
-                    early_indexed: maybe_indexed_bind_group,
-                    early_non_indexed: maybe_non_indexed_bind_group,
-                    ..
-                } => {
-                    let PreprocessWorkItemBuffers::Indirect {
-                        indexed: indexed_buffer,
-                        non_indexed: non_indexed_buffer,
-                        ..
-                    } = index_buffer
-                    else {
-                        continue;
-                    };
-
-                    if let Some(indexed_bind_group) = maybe_indexed_bind_group {
-                        compute_pass.set_bind_group(0, indexed_bind_group, &dynamic_offsets);
-                        let workgroup_count = indexed_buffer.len().div_ceil(WORKGROUP_SIZE);
+                match *phase_bind_groups {
+                    PhasePreprocessBindGroups::Direct(ref bind_group) => {
+                        let PreprocessWorkItemBuffers::Direct(work_item_buffer) = work_item_buffers
+                        else {
+                            continue;
+                        };
+                        compute_pass.set_bind_group(0, bind_group, &dynamic_offsets);
+                        let workgroup_count = work_item_buffer.len().div_ceil(WORKGROUP_SIZE);
                         if workgroup_count > 0 {
                             compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
                         }
                     }
 
-                    if let Some(non_indexed_bind_group) = maybe_non_indexed_bind_group {
-                        compute_pass.set_bind_group(0, non_indexed_bind_group, &dynamic_offsets);
-                        let workgroup_count = non_indexed_buffer.len().div_ceil(WORKGROUP_SIZE);
-                        if workgroup_count > 0 {
-                            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+                    PhasePreprocessBindGroups::IndirectFrustumCulling {
+                        indexed: ref maybe_indexed_bind_group,
+                        non_indexed: ref maybe_non_indexed_bind_group,
+                    }
+                    | PhasePreprocessBindGroups::IndirectOcclusionCulling {
+                        early_indexed: ref maybe_indexed_bind_group,
+                        early_non_indexed: ref maybe_non_indexed_bind_group,
+                        ..
+                    } => {
+                        let PreprocessWorkItemBuffers::Indirect {
+                            indexed: indexed_buffer,
+                            non_indexed: non_indexed_buffer,
+                            ..
+                        } = work_item_buffers
+                        else {
+                            continue;
+                        };
+
+                        if let Some(indexed_bind_group) = maybe_indexed_bind_group {
+                            compute_pass.set_bind_group(0, indexed_bind_group, &dynamic_offsets);
+                            let workgroup_count = indexed_buffer.len().div_ceil(WORKGROUP_SIZE);
+                            if workgroup_count > 0 {
+                                compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+                            }
+                        }
+
+                        if let Some(non_indexed_bind_group) = maybe_non_indexed_bind_group {
+                            compute_pass.set_bind_group(
+                                0,
+                                non_indexed_bind_group,
+                                &dynamic_offsets,
+                            );
+                            let workgroup_count = non_indexed_buffer.len().div_ceil(WORKGROUP_SIZE);
+                            if workgroup_count > 0 {
+                                compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+                            }
                         }
                     }
                 }
@@ -496,22 +511,9 @@ impl Node for LateGpuPreprocessNode {
 
         // Run the compute passes.
         for (view, bind_groups, view_uniform_offset) in self.view_query.iter_manual(world) {
-            let PreprocessBindGroups::IndirectOcclusionCulling {
-                late_indexed: ref late_indexed_bind_group,
-                late_non_indexed: ref late_non_indexed_bind_group,
-                ..
-            } = bind_groups
-            else {
-                continue;
-            };
-
             // Grab the work item buffers for this view.
-            let Some(&PreprocessWorkItemBuffers::Indirect {
-                indexed: ref indexed_work_item_buffer,
-                non_indexed: ref non_indexed_work_item_buffer,
-                gpu_occlusion_culling: true,
-            }) = work_item_buffers.get(&view)
-            else {
+            let Some(phase_work_item_buffers) = work_item_buffers.get(&view) else {
+                warn!("The preprocessing index buffer wasn't present");
                 continue;
             };
 
@@ -534,23 +536,45 @@ impl Node for LateGpuPreprocessNode {
 
             compute_pass.set_pipeline(preprocess_pipeline);
 
-            let mut dynamic_offsets: SmallVec<[u32; 1]> = smallvec![];
-            dynamic_offsets.push(view_uniform_offset.offset);
+            for (phase_type_id, work_item_buffers) in phase_work_item_buffers {
+                let (
+                    &PreprocessWorkItemBuffers::Indirect {
+                        indexed: ref indexed_work_item_buffer,
+                        non_indexed: ref non_indexed_work_item_buffer,
+                        ..
+                    },
+                    Some(&PhasePreprocessBindGroups::IndirectOcclusionCulling {
+                        late_indexed: ref late_indexed_bind_group,
+                        late_non_indexed: ref late_non_indexed_bind_group,
+                        ..
+                    }),
+                ) = (work_item_buffers, bind_groups.get(phase_type_id))
+                else {
+                    continue;
+                };
 
-            compute_pass.set_bind_group(0, late_indexed_bind_group.as_deref(), &dynamic_offsets);
-            let workgroup_count = indexed_work_item_buffer.len().div_ceil(WORKGROUP_SIZE);
-            if workgroup_count > 0 {
-                compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-            }
+                let mut dynamic_offsets: SmallVec<[u32; 1]> = smallvec![];
+                dynamic_offsets.push(view_uniform_offset.offset);
 
-            compute_pass.set_bind_group(
-                0,
-                late_non_indexed_bind_group.as_deref(),
-                &dynamic_offsets,
-            );
-            let workgroup_count = non_indexed_work_item_buffer.len().div_ceil(WORKGROUP_SIZE);
-            if workgroup_count > 0 {
-                compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+                compute_pass.set_bind_group(
+                    0,
+                    late_indexed_bind_group.as_deref(),
+                    &dynamic_offsets,
+                );
+                let workgroup_count = indexed_work_item_buffer.len().div_ceil(WORKGROUP_SIZE);
+                if workgroup_count > 0 {
+                    compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+                }
+
+                compute_pass.set_bind_group(
+                    0,
+                    late_non_indexed_bind_group.as_deref(),
+                    &dynamic_offsets,
+                );
+                let workgroup_count = non_indexed_work_item_buffer.len().div_ceil(WORKGROUP_SIZE);
+                if workgroup_count > 0 {
+                    compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+                }
             }
         }
 
@@ -1041,14 +1065,14 @@ pub fn prepare_preprocess_pipelines(
         );
 
     let mut build_indirect_parameters_pipeline_key = BuildIndirectParametersPipelineKey::empty();
-    if render_device
+    /*if render_device
         .wgpu_device()
         .features()
         .contains(WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT)
     {
         build_indirect_parameters_pipeline_key
             .insert(BuildIndirectParametersPipelineKey::MULTI_DRAW_INDIRECT_COUNT_SUPPORTED);
-    }
+    }*/
 
     preprocess_pipelines
         .gpu_frustum_culling_build_indexed_indirect_params
@@ -1229,10 +1253,10 @@ impl BuildIndirectParametersPipeline {
 /// This is shared among all views.
 #[derive(Resource, Default)]
 pub struct OcclusionCullingVisibilityBuffers {
-    buffers: EntityHashMap<ViewOcclusionCullingVisibilityBuffers>,
+    buffers: EntityHashMap<TypeIdMap<PhaseOcclusionCullingVisibilityBuffers>>,
 }
 
-struct ViewOcclusionCullingVisibilityBuffers {
+struct PhaseOcclusionCullingVisibilityBuffers {
     current_frame: RawBufferVec<OcclusionCullingMeshVisibility>,
     previous_frame: RawBufferVec<OcclusionCullingMeshVisibility>,
 }
@@ -1254,33 +1278,42 @@ pub fn prepare_occlusion_culling_visibility_buffers(
     render_queue: Res<RenderQueue>,
 ) {
     for view_entity in &mut views {
-        let mut new_visibility_buffer = RawBufferVec::new(BufferUsages::STORAGE);
-        // TODO: Make this more efficient?
-        for _ in 0..batched_instance_buffers.current_input_buffer.len() {
-            new_visibility_buffer.push(OcclusionCullingMeshVisibility::default());
-        }
-        new_visibility_buffer.write_buffer(&render_device, &render_queue);
+        let Some(work_item_buffers) = batched_instance_buffers.work_item_buffers.get(&view_entity)
+        else {
+            continue;
+        };
 
-        match occlusion_culling_visibility_buffers
+        let view_occlusion_culling_visibility_buffers = occlusion_culling_visibility_buffers
             .buffers
             .entry(view_entity)
-        {
-            Entry::Occupied(mut occupied_entry) => {
-                let existing_visibility_buffers = occupied_entry.get_mut();
-                existing_visibility_buffers.previous_frame = mem::replace(
-                    &mut existing_visibility_buffers.current_frame,
-                    new_visibility_buffer,
-                );
+            .or_insert_with(TypeIdMap::default);
+
+        for &phase_id in work_item_buffers.keys() {
+            let mut new_visibility_buffer = RawBufferVec::new(BufferUsages::STORAGE);
+            // TODO: Make this more efficient?
+            for _ in 0..batched_instance_buffers.current_input_buffer.len() {
+                new_visibility_buffer.push(OcclusionCullingMeshVisibility::default());
             }
+            new_visibility_buffer.write_buffer(&render_device, &render_queue);
 
-            Entry::Vacant(vacant_entry) => {
-                let mut previous_frame = RawBufferVec::new(BufferUsages::STORAGE);
-                previous_frame.push(OcclusionCullingMeshVisibility::default());
+            match view_occlusion_culling_visibility_buffers.entry(phase_id) {
+                Entry::Occupied(mut occupied_entry) => {
+                    let existing_visibility_buffers = occupied_entry.get_mut();
+                    existing_visibility_buffers.previous_frame = mem::replace(
+                        &mut existing_visibility_buffers.current_frame,
+                        new_visibility_buffer,
+                    );
+                }
 
-                vacant_entry.insert(ViewOcclusionCullingVisibilityBuffers {
-                    current_frame: new_visibility_buffer,
-                    previous_frame,
-                });
+                Entry::Vacant(vacant_entry) => {
+                    let mut previous_frame = RawBufferVec::new(BufferUsages::STORAGE);
+                    previous_frame.push(OcclusionCullingMeshVisibility::default());
+
+                    vacant_entry.insert(PhaseOcclusionCullingVisibilityBuffers {
+                        current_frame: new_visibility_buffer,
+                        previous_frame,
+                    });
+                }
             }
         }
     }
@@ -1322,95 +1355,288 @@ pub fn prepare_preprocess_bind_groups(
 
     let mut any_indirect = false;
 
-    for (view, work_item_buffers) in work_item_buffers {
-        let bind_group = match *work_item_buffers {
-            PreprocessWorkItemBuffers::Direct(ref work_item_buffer) => {
-                // Don't use `as_entire_binding()` here; the shader reads the array
-                // length and the underlying buffer may be longer than the actual size
-                // of the vector.
-                let work_item_buffer_size = NonZero::<u64>::try_from(
-                    work_item_buffer.len() as u64 * u64::from(PreprocessWorkItem::min_size()),
-                )
-                .ok();
+    for (view, phase_work_item_buffers) in work_item_buffers {
+        let mut bind_groups = TypeIdMap::default();
 
-                let Some(work_item_buffer) = work_item_buffer.buffer() else {
-                    continue;
-                };
+        for (&phase_id, work_item_buffers) in phase_work_item_buffers {
+            let bind_group = match *work_item_buffers {
+                PreprocessWorkItemBuffers::Direct(ref work_item_buffer) => {
+                    // Don't use `as_entire_binding()` here; the shader reads the array
+                    // length and the underlying buffer may be longer than the actual size
+                    // of the vector.
+                    let work_item_buffer_size = NonZero::<u64>::try_from(
+                        work_item_buffer.len() as u64 * u64::from(PreprocessWorkItem::min_size()),
+                    )
+                    .ok();
 
-                PreprocessBindGroups::Direct(render_device.create_bind_group(
-                    "preprocess_direct_bind_group",
-                    &pipelines.direct_preprocess.bind_group_layout,
-                    &BindGroupEntries::sequential((
-                        current_input_buffer.as_entire_binding(),
-                        previous_input_buffer.as_entire_binding(),
-                        BindingResource::Buffer(BufferBinding {
-                            buffer: work_item_buffer,
-                            offset: 0,
-                            size: work_item_buffer_size,
-                        }),
-                        data_buffer.as_entire_binding(),
-                    )),
-                ))
-            }
+                    let Some(work_item_buffer) = work_item_buffer.buffer() else {
+                        continue;
+                    };
 
-            PreprocessWorkItemBuffers::Indirect {
-                indexed: ref indexed_work_item_buffer,
-                non_indexed: ref non_indexed_work_item_buffer,
-                gpu_occlusion_culling: true,
-            } => {
-                let (
-                    Some(mesh_culling_data_buffer),
-                    Some(view_uniforms_binding),
-                    Some(view_occlusion_culling_visibility_buffers),
-                    Ok(view_depth_pyramid),
-                ) = (
-                    mesh_culling_data_buffer.buffer(),
-                    view_uniforms.uniforms.binding(),
-                    occlusion_culling_visibility_buffers.buffers.get(view),
-                    view_depth_pyramids.get(*view),
-                )
-                else {
-                    continue;
-                };
+                    PhasePreprocessBindGroups::Direct(render_device.create_bind_group(
+                        "preprocess_direct_bind_group",
+                        &pipelines.direct_preprocess.bind_group_layout,
+                        &BindGroupEntries::sequential((
+                            current_input_buffer.as_entire_binding(),
+                            previous_input_buffer.as_entire_binding(),
+                            BindingResource::Buffer(BufferBinding {
+                                buffer: work_item_buffer,
+                                offset: 0,
+                                size: work_item_buffer_size,
+                            }),
+                            data_buffer.as_entire_binding(),
+                        )),
+                    ))
+                }
 
-                let (
-                    Some(occlusion_culling_visibility_buffer),
-                    Some(previous_frame_occlusion_culling_visibility_buffer),
-                ) = (
-                    view_occlusion_culling_visibility_buffers
-                        .current_frame
-                        .buffer(),
-                    view_occlusion_culling_visibility_buffers
-                        .previous_frame
-                        .buffer(),
-                )
-                else {
-                    continue;
-                };
+                PreprocessWorkItemBuffers::Indirect {
+                    indexed: ref indexed_work_item_buffer,
+                    non_indexed: ref non_indexed_work_item_buffer,
+                    gpu_occlusion_culling: true,
+                } => {
+                    let (
+                        Some(mesh_culling_data_buffer),
+                        Some(view_uniforms_binding),
+                        Some(view_occlusion_culling_visibility_buffers),
+                        Ok(view_depth_pyramid),
+                    ) = (
+                        mesh_culling_data_buffer.buffer(),
+                        view_uniforms.uniforms.binding(),
+                        occlusion_culling_visibility_buffers.buffers.get(view),
+                        view_depth_pyramids.get(*view),
+                    )
+                    else {
+                        continue;
+                    };
 
-                any_indirect = true;
+                    let Some(phase_occlusion_culling_visibility_buffers) =
+                        view_occlusion_culling_visibility_buffers.get(&phase_id)
+                    else {
+                        continue;
+                    };
 
-                PreprocessBindGroups::IndirectOcclusionCulling {
-                    early_indexed: match (
-                        indirect_parameters_buffers.indexed_metadata_buffer(),
-                        indexed_work_item_buffer.buffer(),
-                    ) {
-                        (Some(indexed_metadata_buffer), Some(indexed_work_item_gpu_buffer)) => {
-                            // Don't use `as_entire_binding()` here; the shader reads the array
-                            // length and the underlying buffer may be longer than the actual size
-                            // of the vector.
-                            let indexed_work_item_buffer_size = NonZero::<u64>::try_from(
-                                indexed_work_item_buffer.len() as u64
-                                    * u64::from(PreprocessWorkItem::min_size()),
-                            )
-                            .ok();
+                    let (
+                        Some(occlusion_culling_visibility_buffer),
+                        Some(previous_frame_occlusion_culling_visibility_buffer),
+                    ) = (
+                        phase_occlusion_culling_visibility_buffers
+                            .current_frame
+                            .buffer(),
+                        phase_occlusion_culling_visibility_buffers
+                            .previous_frame
+                            .buffer(),
+                    )
+                    else {
+                        continue;
+                    };
 
-                            Some(
-                                render_device.create_bind_group(
-                                    "preprocess_early_indexed_gpu_occlusion_culling_bind_group",
-                                    &pipelines
-                                        .early_gpu_occlusion_culling_preprocess
-                                        .bind_group_layout,
+                    any_indirect = true;
+
+                    PhasePreprocessBindGroups::IndirectOcclusionCulling {
+                        early_indexed: match (
+                            indirect_parameters_buffers.indexed_metadata_buffer(),
+                            indexed_work_item_buffer.buffer(),
+                        ) {
+                            (Some(indexed_metadata_buffer), Some(indexed_work_item_gpu_buffer)) => {
+                                // Don't use `as_entire_binding()` here; the shader reads the array
+                                // length and the underlying buffer may be longer than the actual size
+                                // of the vector.
+                                let indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                    indexed_work_item_buffer.len() as u64
+                                        * u64::from(PreprocessWorkItem::min_size()),
+                                )
+                                .ok();
+
+                                Some(
+                                    render_device.create_bind_group(
+                                        "preprocess_early_indexed_gpu_occlusion_culling_bind_group",
+                                        &pipelines
+                                            .early_gpu_occlusion_culling_preprocess
+                                            .bind_group_layout,
+                                        &BindGroupEntries::sequential((
+                                            current_input_buffer.as_entire_binding(),
+                                            previous_input_buffer.as_entire_binding(),
+                                            BindingResource::Buffer(BufferBinding {
+                                                buffer: indexed_work_item_gpu_buffer,
+                                                offset: 0,
+                                                size: indexed_work_item_buffer_size,
+                                            }),
+                                            data_buffer.as_entire_binding(),
+                                            indexed_metadata_buffer.as_entire_binding(),
+                                            mesh_culling_data_buffer.as_entire_binding(),
+                                            view_uniforms_binding.clone(),
+                                            occlusion_culling_visibility_buffer.as_entire_binding(),
+                                            previous_frame_occlusion_culling_visibility_buffer
+                                                .as_entire_binding(),
+                                        )),
+                                    ),
+                                )
+                            }
+                            _ => None,
+                        },
+
+                        early_non_indexed: match (
+                            indirect_parameters_buffers.non_indexed_metadata_buffer(),
+                            non_indexed_work_item_buffer.buffer(),
+                        ) {
+                            (
+                                Some(non_indexed_metadata_buffer),
+                                Some(non_indexed_work_item_gpu_buffer),
+                            ) => {
+                                // Don't use `as_entire_binding()` here; the shader reads the array
+                                // length and the underlying buffer may be longer than the actual size
+                                // of the vector.
+                                let non_indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                    non_indexed_work_item_buffer.len() as u64
+                                        * u64::from(PreprocessWorkItem::min_size()),
+                                )
+                                .ok();
+
+                                Some(
+                                    render_device.create_bind_group(
+                                        "preprocess_early_non_indexed_gpu_occlusion_culling_bind_group",
+                                        &pipelines
+                                            .early_gpu_occlusion_culling_preprocess
+                                            .bind_group_layout,
+                                        &BindGroupEntries::sequential((
+                                            current_input_buffer.as_entire_binding(),
+                                            previous_input_buffer.as_entire_binding(),
+                                            BindingResource::Buffer(BufferBinding {
+                                                buffer: non_indexed_work_item_gpu_buffer,
+                                                offset: 0,
+                                                size: non_indexed_work_item_buffer_size,
+                                            }),
+                                            data_buffer.as_entire_binding(),
+                                            non_indexed_metadata_buffer.as_entire_binding(),
+                                            mesh_culling_data_buffer.as_entire_binding(),
+                                            view_uniforms_binding.clone(),
+                                            occlusion_culling_visibility_buffer.as_entire_binding(),
+                                            previous_frame_occlusion_culling_visibility_buffer
+                                                .as_entire_binding(),
+                                        )),
+                                    ),
+                                )
+                            }
+                            _ => None,
+                        },
+
+                        late_indexed: match (
+                            indirect_parameters_buffers.indexed_metadata_buffer(),
+                            indexed_work_item_buffer.buffer(),
+                        ) {
+                            (Some(indexed_metadata_buffer), Some(indexed_work_item_gpu_buffer)) => {
+                                // Don't use `as_entire_binding()` here; the shader reads the array
+                                // length and the underlying buffer may be longer than the actual size
+                                // of the vector.
+                                let indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                    indexed_work_item_buffer.len() as u64
+                                        * u64::from(PreprocessWorkItem::min_size()),
+                                )
+                                .ok();
+
+                                Some(
+                                    render_device.create_bind_group(
+                                        "preprocess_late_indexed_gpu_occlusion_culling_bind_group",
+                                        &pipelines
+                                            .late_gpu_occlusion_culling_preprocess
+                                            .bind_group_layout,
+                                        &BindGroupEntries::sequential((
+                                            current_input_buffer.as_entire_binding(),
+                                            previous_input_buffer.as_entire_binding(),
+                                            BindingResource::Buffer(BufferBinding {
+                                                buffer: indexed_work_item_gpu_buffer,
+                                                offset: 0,
+                                                size: indexed_work_item_buffer_size,
+                                            }),
+                                            data_buffer.as_entire_binding(),
+                                            indexed_metadata_buffer.as_entire_binding(),
+                                            mesh_culling_data_buffer.as_entire_binding(),
+                                            view_uniforms_binding.clone(),
+                                            occlusion_culling_visibility_buffer.as_entire_binding(),
+                                            &view_depth_pyramid.all_mips,
+                                        )),
+                                    ),
+                                )
+                            }
+                            _ => None,
+                        },
+
+                        late_non_indexed: match (
+                            indirect_parameters_buffers.non_indexed_metadata_buffer(),
+                            non_indexed_work_item_buffer.buffer(),
+                        ) {
+                            (
+                                Some(non_indexed_metadata_buffer),
+                                Some(non_indexed_work_item_gpu_buffer),
+                            ) => {
+                                // Don't use `as_entire_binding()` here; the shader reads the array
+                                // length and the underlying buffer may be longer than the actual size
+                                // of the vector.
+                                let non_indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                    non_indexed_work_item_buffer.len() as u64
+                                        * u64::from(PreprocessWorkItem::min_size()),
+                                )
+                                .ok();
+
+                                Some(
+                                    render_device.create_bind_group(
+                                        "preprocess_late_non_indexed_gpu_occlusion_culling_bind_group",
+                                        &pipelines
+                                            .late_gpu_occlusion_culling_preprocess
+                                            .bind_group_layout,
+                                        &BindGroupEntries::sequential((
+                                            current_input_buffer.as_entire_binding(),
+                                            previous_input_buffer.as_entire_binding(),
+                                            BindingResource::Buffer(BufferBinding {
+                                                buffer: non_indexed_work_item_gpu_buffer,
+                                                offset: 0,
+                                                size: non_indexed_work_item_buffer_size,
+                                            }),
+                                            data_buffer.as_entire_binding(),
+                                            non_indexed_metadata_buffer.as_entire_binding(),
+                                            mesh_culling_data_buffer.as_entire_binding(),
+                                            view_uniforms_binding.clone(),
+                                            occlusion_culling_visibility_buffer.as_entire_binding(),
+                                            &view_depth_pyramid.all_mips,
+                                        )),
+                                    ),
+                                )
+                            }
+                            _ => None,
+                        },
+                    }
+                }
+
+                PreprocessWorkItemBuffers::Indirect {
+                    indexed: ref indexed_work_item_buffer,
+                    non_indexed: ref non_indexed_work_item_buffer,
+                    gpu_occlusion_culling: false,
+                } => {
+                    let (Some(mesh_culling_data_buffer), Some(view_uniforms_binding)) = (
+                        mesh_culling_data_buffer.buffer(),
+                        view_uniforms.uniforms.binding(),
+                    ) else {
+                        continue;
+                    };
+
+                    PhasePreprocessBindGroups::IndirectFrustumCulling {
+                        indexed: match (
+                            indirect_parameters_buffers.indexed_metadata_buffer(),
+                            indexed_work_item_buffer.buffer(),
+                        ) {
+                            (Some(indexed_metadata_buffer), Some(indexed_work_item_gpu_buffer)) => {
+                                // Don't use `as_entire_binding()` here; the shader reads the array
+                                // length and the underlying buffer may be longer than the actual size
+                                // of the vector.
+                                let indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                    indexed_work_item_buffer.len() as u64
+                                        * u64::from(PreprocessWorkItem::min_size()),
+                                )
+                                .ok();
+
+                                Some(render_device.create_bind_group(
+                                    "preprocess_gpu_indexed_frustum_culling_bind_group",
+                                    &pipelines.gpu_frustum_culling_preprocess.bind_group_layout,
                                     &BindGroupEntries::sequential((
                                         current_input_buffer.as_entire_binding(),
                                         previous_input_buffer.as_entire_binding(),
@@ -1423,39 +1649,32 @@ pub fn prepare_preprocess_bind_groups(
                                         indexed_metadata_buffer.as_entire_binding(),
                                         mesh_culling_data_buffer.as_entire_binding(),
                                         view_uniforms_binding.clone(),
-                                        occlusion_culling_visibility_buffer.as_entire_binding(),
-                                        previous_frame_occlusion_culling_visibility_buffer
-                                            .as_entire_binding(),
                                     )),
-                                ),
-                            )
-                        }
-                        _ => None,
-                    },
+                                ))
+                            }
+                            _ => None,
+                        },
 
-                    early_non_indexed: match (
-                        indirect_parameters_buffers.non_indexed_metadata_buffer(),
-                        non_indexed_work_item_buffer.buffer(),
-                    ) {
-                        (
-                            Some(non_indexed_metadata_buffer),
-                            Some(non_indexed_work_item_gpu_buffer),
-                        ) => {
-                            // Don't use `as_entire_binding()` here; the shader reads the array
-                            // length and the underlying buffer may be longer than the actual size
-                            // of the vector.
-                            let non_indexed_work_item_buffer_size = NonZero::<u64>::try_from(
-                                non_indexed_work_item_buffer.len() as u64
-                                    * u64::from(PreprocessWorkItem::min_size()),
-                            )
-                            .ok();
+                        non_indexed: match (
+                            indirect_parameters_buffers.non_indexed_metadata_buffer(),
+                            non_indexed_work_item_buffer.buffer(),
+                        ) {
+                            (
+                                Some(non_indexed_metadata_buffer),
+                                Some(non_indexed_work_item_gpu_buffer),
+                            ) => {
+                                // Don't use `as_entire_binding()` here; the shader reads the array
+                                // length and the underlying buffer may be longer than the actual size
+                                // of the vector.
+                                let non_indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                    non_indexed_work_item_buffer.len() as u64
+                                        * u64::from(PreprocessWorkItem::min_size()),
+                                )
+                                .ok();
 
-                            Some(
-                                render_device.create_bind_group(
-                                    "preprocess_early_non_indexed_gpu_occlusion_culling_bind_group",
-                                    &pipelines
-                                        .early_gpu_occlusion_culling_preprocess
-                                        .bind_group_layout,
+                                Some(render_device.create_bind_group(
+                                    "preprocess_gpu_non_indexed_frustum_culling_bind_group",
+                                    &pipelines.gpu_frustum_culling_preprocess.bind_group_layout,
                                     &BindGroupEntries::sequential((
                                         current_input_buffer.as_entire_binding(),
                                         previous_input_buffer.as_entire_binding(),
@@ -1468,193 +1687,21 @@ pub fn prepare_preprocess_bind_groups(
                                         non_indexed_metadata_buffer.as_entire_binding(),
                                         mesh_culling_data_buffer.as_entire_binding(),
                                         view_uniforms_binding.clone(),
-                                        occlusion_culling_visibility_buffer.as_entire_binding(),
-                                        previous_frame_occlusion_culling_visibility_buffer
-                                            .as_entire_binding(),
                                     )),
-                                ),
-                            )
-                        }
-                        _ => None,
-                    },
-
-                    late_indexed: match (
-                        indirect_parameters_buffers.indexed_metadata_buffer(),
-                        indexed_work_item_buffer.buffer(),
-                    ) {
-                        (Some(indexed_metadata_buffer), Some(indexed_work_item_gpu_buffer)) => {
-                            // Don't use `as_entire_binding()` here; the shader reads the array
-                            // length and the underlying buffer may be longer than the actual size
-                            // of the vector.
-                            let indexed_work_item_buffer_size = NonZero::<u64>::try_from(
-                                indexed_work_item_buffer.len() as u64
-                                    * u64::from(PreprocessWorkItem::min_size()),
-                            )
-                            .ok();
-
-                            Some(
-                                render_device.create_bind_group(
-                                    "preprocess_late_indexed_gpu_occlusion_culling_bind_group",
-                                    &pipelines
-                                        .late_gpu_occlusion_culling_preprocess
-                                        .bind_group_layout,
-                                    &BindGroupEntries::sequential((
-                                        current_input_buffer.as_entire_binding(),
-                                        previous_input_buffer.as_entire_binding(),
-                                        BindingResource::Buffer(BufferBinding {
-                                            buffer: indexed_work_item_gpu_buffer,
-                                            offset: 0,
-                                            size: indexed_work_item_buffer_size,
-                                        }),
-                                        data_buffer.as_entire_binding(),
-                                        indexed_metadata_buffer.as_entire_binding(),
-                                        mesh_culling_data_buffer.as_entire_binding(),
-                                        view_uniforms_binding.clone(),
-                                        occlusion_culling_visibility_buffer.as_entire_binding(),
-                                        &view_depth_pyramid.all_mips,
-                                    )),
-                                ),
-                            )
-                        }
-                        _ => None,
-                    },
-
-                    late_non_indexed: match (
-                        indirect_parameters_buffers.non_indexed_metadata_buffer(),
-                        non_indexed_work_item_buffer.buffer(),
-                    ) {
-                        (
-                            Some(non_indexed_metadata_buffer),
-                            Some(non_indexed_work_item_gpu_buffer),
-                        ) => {
-                            // Don't use `as_entire_binding()` here; the shader reads the array
-                            // length and the underlying buffer may be longer than the actual size
-                            // of the vector.
-                            let non_indexed_work_item_buffer_size = NonZero::<u64>::try_from(
-                                non_indexed_work_item_buffer.len() as u64
-                                    * u64::from(PreprocessWorkItem::min_size()),
-                            )
-                            .ok();
-
-                            Some(
-                                render_device.create_bind_group(
-                                    "preprocess_late_non_indexed_gpu_occlusion_culling_bind_group",
-                                    &pipelines
-                                        .late_gpu_occlusion_culling_preprocess
-                                        .bind_group_layout,
-                                    &BindGroupEntries::sequential((
-                                        current_input_buffer.as_entire_binding(),
-                                        previous_input_buffer.as_entire_binding(),
-                                        BindingResource::Buffer(BufferBinding {
-                                            buffer: non_indexed_work_item_gpu_buffer,
-                                            offset: 0,
-                                            size: non_indexed_work_item_buffer_size,
-                                        }),
-                                        data_buffer.as_entire_binding(),
-                                        non_indexed_metadata_buffer.as_entire_binding(),
-                                        mesh_culling_data_buffer.as_entire_binding(),
-                                        view_uniforms_binding.clone(),
-                                        occlusion_culling_visibility_buffer.as_entire_binding(),
-                                        &view_depth_pyramid.all_mips,
-                                    )),
-                                ),
-                            )
-                        }
-                        _ => None,
-                    },
+                                ))
+                            }
+                            _ => None,
+                        },
+                    }
                 }
-            }
+            };
 
-            PreprocessWorkItemBuffers::Indirect {
-                indexed: ref indexed_work_item_buffer,
-                non_indexed: ref non_indexed_work_item_buffer,
-                gpu_occlusion_culling: false,
-            } => {
-                let (Some(mesh_culling_data_buffer), Some(view_uniforms_binding)) = (
-                    mesh_culling_data_buffer.buffer(),
-                    view_uniforms.uniforms.binding(),
-                ) else {
-                    continue;
-                };
+            bind_groups.insert(phase_id, bind_group);
+        }
 
-                PreprocessBindGroups::IndirectFrustumCulling {
-                    indexed: match (
-                        indirect_parameters_buffers.indexed_metadata_buffer(),
-                        indexed_work_item_buffer.buffer(),
-                    ) {
-                        (Some(indexed_metadata_buffer), Some(indexed_work_item_gpu_buffer)) => {
-                            // Don't use `as_entire_binding()` here; the shader reads the array
-                            // length and the underlying buffer may be longer than the actual size
-                            // of the vector.
-                            let indexed_work_item_buffer_size = NonZero::<u64>::try_from(
-                                indexed_work_item_buffer.len() as u64
-                                    * u64::from(PreprocessWorkItem::min_size()),
-                            )
-                            .ok();
-
-                            Some(render_device.create_bind_group(
-                                "preprocess_gpu_indexed_frustum_culling_bind_group",
-                                &pipelines.gpu_frustum_culling_preprocess.bind_group_layout,
-                                &BindGroupEntries::sequential((
-                                    current_input_buffer.as_entire_binding(),
-                                    previous_input_buffer.as_entire_binding(),
-                                    BindingResource::Buffer(BufferBinding {
-                                        buffer: indexed_work_item_gpu_buffer,
-                                        offset: 0,
-                                        size: indexed_work_item_buffer_size,
-                                    }),
-                                    data_buffer.as_entire_binding(),
-                                    indexed_metadata_buffer.as_entire_binding(),
-                                    mesh_culling_data_buffer.as_entire_binding(),
-                                    view_uniforms_binding.clone(),
-                                )),
-                            ))
-                        }
-                        _ => None,
-                    },
-
-                    non_indexed: match (
-                        indirect_parameters_buffers.non_indexed_metadata_buffer(),
-                        non_indexed_work_item_buffer.buffer(),
-                    ) {
-                        (
-                            Some(non_indexed_metadata_buffer),
-                            Some(non_indexed_work_item_gpu_buffer),
-                        ) => {
-                            // Don't use `as_entire_binding()` here; the shader reads the array
-                            // length and the underlying buffer may be longer than the actual size
-                            // of the vector.
-                            let non_indexed_work_item_buffer_size = NonZero::<u64>::try_from(
-                                non_indexed_work_item_buffer.len() as u64
-                                    * u64::from(PreprocessWorkItem::min_size()),
-                            )
-                            .ok();
-
-                            Some(render_device.create_bind_group(
-                                "preprocess_gpu_non_indexed_frustum_culling_bind_group",
-                                &pipelines.gpu_frustum_culling_preprocess.bind_group_layout,
-                                &BindGroupEntries::sequential((
-                                    current_input_buffer.as_entire_binding(),
-                                    previous_input_buffer.as_entire_binding(),
-                                    BindingResource::Buffer(BufferBinding {
-                                        buffer: non_indexed_work_item_gpu_buffer,
-                                        offset: 0,
-                                        size: non_indexed_work_item_buffer_size,
-                                    }),
-                                    data_buffer.as_entire_binding(),
-                                    non_indexed_metadata_buffer.as_entire_binding(),
-                                    mesh_culling_data_buffer.as_entire_binding(),
-                                    view_uniforms_binding.clone(),
-                                )),
-                            ))
-                        }
-                        _ => None,
-                    },
-                }
-            }
-        };
-
-        commands.entity(*view).insert(bind_group);
+        commands
+            .entity(*view)
+            .insert(PreprocessBindGroups(bind_groups));
     }
 
     if any_indirect {
