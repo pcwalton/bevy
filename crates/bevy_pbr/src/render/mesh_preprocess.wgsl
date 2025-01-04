@@ -8,7 +8,9 @@
 // so that TAA works.
 
 #import bevy_pbr::mesh_types::{Mesh, MESH_FLAGS_NO_FRUSTUM_CULLING_BIT}
-#import bevy_pbr::mesh_preprocess_types::{MeshInput, IndirectParametersMetadata}
+#import bevy_pbr::mesh_preprocess_types::IndirectParametersMetadata
+#import bevy_pbr::occlusion_culling
+#import bevy_pbr::view_transformations::ndc_to_uv
 #import bevy_render::maths
 #import bevy_render::view::View
 
@@ -61,7 +63,21 @@ struct PreprocessWorkItem {
 
 // The view data, including the view matrix.
 @group(0) @binding(6) var<uniform> view: View;
+#endif  // FRUSTUM_CULLING
 
+#ifdef OCCLUSION_CULLING
+// TODO: Make this a bitfield? Would have to use atomics then.
+// Meshlets makes this a bitfield.
+@group(0) @binding(7) var<storage, read_write> view_visibility: array<u32>;
+
+#ifdef EARLY
+@group(0) @binding(8) var<storage, read> previous_frame_view_visibility: array<u32>;
+#else   // EARLY
+@group(0) @binding(8) var depth_pyramid: texture_2d<f32>;
+#endif  // EARLY
+#endif  // OCCLUSION_CULLING
+
+#ifdef FRUSTUM_CULLING
 // Returns true if the view frustum intersects an oriented bounding box (OBB).
 //
 // `aabb_center.w` should be 1.0.
@@ -111,11 +127,34 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let output_index = work_items[instance_index].output_index;
     let indirect_parameters_index = work_items[instance_index].indirect_parameters_index;
 
+    // FIXME: This is inefficient. Not sure what the best way to avoid doing it is though.
+    // Maybe a flag to say whether we're the first mesh in a batch?
+#ifdef INDIRECT
+#ifndef LATE
+    if (indirect_parameters[indirect_parameters_index].first_instance == 0xffffffffu) {
+        indirect_parameters[indirect_parameters_index].base_vertex_or_first_instance =
+            output_index;
+    } else {
+        indirect_parameters[indirect_parameters_index].first_instance = output_index;
+    }
+#endif  // LATE
+#endif  // INDIRECT
+
+#ifdef OCCLUSION_CULLING
+#ifdef EARLY
+    // If this is phase 1 of the occlusion culling pass, only draw the object if
+    // it was visible the previous frame.
+    if (previous_frame_view_visibility[input_index] != 2u) {
+        return;
+    }
+#endif  // EARLY
+#endif  // OCCLUSION_CULLING
+
     // Unpack the input matrix.
     let world_from_local_affine_transpose = current_input[input_index].world_from_local;
     let world_from_local = maths::affine3_to_square(world_from_local_affine_transpose);
 
-    // Cull if necessary.
+    // Frustum cull if necessary.
 #ifdef FRUSTUM_CULLING
     if ((current_input[input_index].flags & MESH_FLAGS_NO_FRUSTUM_CULLING_BIT) == 0u) {
         let aabb_center = mesh_culling_data[input_index].aabb_center.xyz;
@@ -128,6 +167,58 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         }
     }
 #endif
+
+    // Occlusion cull if necessary.
+#ifdef OCCLUSION_CULLING
+#ifdef EARLY
+    view_visibility[input_index] = 1u;
+#else   // EARLY
+    let aabb_center = mesh_culling_data[input_index].aabb_center.xyz;
+    let aabb_half_extents = mesh_culling_data[input_index].aabb_half_extents.xyz;
+
+    var aabb = vec4(0.0);
+    var max_depth_view = 0.0;
+
+    for (var i = 0u; i < 8u; i += 1u) {
+        let local_pos = aabb_center + select(
+            vec3(-1.0),
+            vec3(1.0),
+            vec3((i & 1) != 0, (i & 2) != 0, (i & 4) != 0)
+        ) * aabb_half_extents;
+
+        let world_pos = (world_from_local * vec4(local_pos, 1.0)).xyz;
+        let view_pos = position_world_to_view(world_pos);
+        let ndc_pos = position_world_to_ndc(world_pos);
+        let uv_pos = ndc_to_uv(ndc_pos.xy);
+
+        if (i == 0u) {
+            aabb = vec4(uv_pos, uv_pos);
+            max_depth_view = view_pos.z;
+        } else {
+            aabb = vec4(min(aabb.xy, uv_pos), max(aabb.zw, uv_pos));
+            max_depth_view = max(max_depth_view, view_pos.z);
+        }
+    }
+
+    let aabb_pixel_size = occlusion_culling::get_aabb_size_in_pixels(aabb, depth_pyramid);
+    let occluder_depth_ndc =
+        occlusion_culling::get_occluder_depth(aabb, aabb_pixel_size, depth_pyramid);
+
+    let max_depth_ndc = view_z_to_depth_ndc(max_depth_view);
+    if (max_depth_ndc < occluder_depth_ndc) {
+        return;
+    }
+
+    let early_view_visibility = view_visibility[input_index];
+    view_visibility[input_index] = 2u;
+
+    // Now if this is phase 2 of the occlusion culling pass, and we've already
+    // drawn the object, don't draw it again.
+    if (early_view_visibility != 0u) {
+        return;
+    }
+#endif  // EARLY
+#endif  // OCCLUSION_CULLING
 
     // Calculate inverse transpose.
     let local_from_world_transpose = transpose(maths::inverse_affine3(transpose(
@@ -152,11 +243,19 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     // instance index in the indirect parameters structure. Otherwise, this
     // index was directly supplied to us.
 #ifdef INDIRECT
+#ifdef LATE
     let batch_output_index =
-        atomicAdd(&indirect_parameters_metadata[indirect_parameters_index].instance_count, 1u);
+        atomicLoad(&indirect_parameters_metadata[indirect_parameters_index].early_instance_count) +
+        atomicAdd(&indirect_parameters_metadata[indirect_parameters_index].late_instance_count, 1u);
+#else   // LATE
+    let batch_output_index =
+        atomicAdd(&indirect_parameters_metadata[indirect_parameters_index].early_instance_count, 1u);
+#endif  // LATE
+
     let mesh_output_index =
         indirect_parameters_metadata[indirect_parameters_index].base_output_index +
         batch_output_index;
+
 #else   // INDIRECT
     let mesh_output_index = output_index;
 #endif  // INDIRECT
@@ -174,3 +273,60 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     output[mesh_output_index].material_and_lightmap_bind_group_slot =
         current_input[input_index].material_and_lightmap_bind_group_slot;
 }
+
+#ifdef OCCLUSION_CULLING
+// https://zeux.io/2023/01/12/approximate-projected-bounds
+fn project_view_space_sphere_to_screen_space_aabb(cp: vec3<f32>, r: f32) -> vec4<f32> {
+    let inv_width = view.clip_from_view[0][0] * 0.5;
+    let inv_height = view.clip_from_view[1][1] * 0.5;
+    if view.clip_from_view[3][3] == 1.0 {
+        // Orthographic
+        let min_x = cp.x - r;
+        let max_x = cp.x + r;
+
+        let min_y = cp.y - r;
+        let max_y = cp.y + r;
+
+        return vec4(min_x * inv_width, 1.0 - max_y * inv_height, max_x * inv_width, 1.0 - min_y * inv_height);
+    } else {
+        // Perspective
+        let c = vec3(cp.xy, -cp.z);
+        let cr = c * r;
+        let czr2 = c.z * c.z - r * r;
+
+        let vx = sqrt(c.x * c.x + czr2);
+        let min_x = (vx * c.x - cr.z) / (vx * c.z + cr.x);
+        let max_x = (vx * c.x + cr.z) / (vx * c.z - cr.x);
+
+        let vy = sqrt(c.y * c.y + czr2);
+        let min_y = (vy * c.y - cr.z) / (vy * c.z + cr.y);
+        let max_y = (vy * c.y + cr.z) / (vy * c.z - cr.y);
+
+        return vec4(min_x * inv_width, -max_y * inv_height, max_x * inv_width, -min_y * inv_height) + vec4(0.5);
+    }
+}
+
+/// Convert a world space position to view space
+fn position_world_to_view(world_pos: vec3<f32>) -> vec3<f32> {
+    let view_pos = view.view_from_world * vec4(world_pos, 1.0);
+    return view_pos.xyz;
+}
+
+/// Convert a world space position to ndc space
+fn position_world_to_ndc(world_pos: vec3<f32>) -> vec3<f32> {
+    let ndc_pos = view.clip_from_world * vec4(world_pos, 1.0);
+    return ndc_pos.xyz / ndc_pos.w;
+}
+
+/// Convert ndc depth to linear view z. 
+/// Note: Depth values in front of the camera will be negative as -z is forward
+fn view_z_to_depth_ndc(view_z: f32) -> f32 {
+    if (view.clip_from_view[3][3] != 1.0) {
+        // Perspective
+        return -view.clip_from_view[3][2] / view_z;
+    }
+
+    // Orthographic
+    return view.clip_from_view[3][2] + view_z * view.clip_from_view[2][2];
+}
+#endif  // OCCLUSION_CULLING

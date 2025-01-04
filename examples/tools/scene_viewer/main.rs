@@ -8,8 +8,7 @@
 //! If you want to hot reload asset changes, enable the `file_watcher` cargo feature.
 
 use bevy::{
-    prelude::*,
-    render::primitives::{Aabb, Sphere},
+    core_pipeline::prepass::DepthPrepass, prelude::*, render::primitives::{Aabb, Sphere}
 };
 
 #[path = "../../helpers/camera_controller.rs"]
@@ -20,6 +19,7 @@ mod animation_plugin;
 mod morph_viewer_plugin;
 mod scene_viewer_plugin;
 
+use bevy_render::occlusion_culling::OcclusionCulling;
 use camera_controller::{CameraController, CameraControllerPlugin};
 use morph_viewer_plugin::MorphViewerPlugin;
 use scene_viewer_plugin::{SceneHandle, SceneViewerPlugin};
@@ -143,6 +143,9 @@ fn setup_scene_after_load(
                 ..default()
             },
             camera_controller,
+            DepthPrepass,
+            OcclusionCulling,
+            Msaa::Off,
         ));
 
         // Spawn a default light if the scene does not have one

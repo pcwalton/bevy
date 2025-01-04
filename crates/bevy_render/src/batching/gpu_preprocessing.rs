@@ -15,6 +15,7 @@ use nonmax::NonMaxU32;
 use wgpu::{BindingResource, BufferUsages, DownlevelFlags, Features};
 
 use crate::{
+    occlusion_culling::OcclusionCulling,
     render_phase::{
         BinnedPhaseItem, BinnedRenderPhaseBatch, BinnedRenderPhaseBatchSet,
         BinnedRenderPhaseBatchSets, CachedRenderPipelinePhaseItem, PhaseItemBatchSetKey as _,
@@ -140,7 +141,7 @@ where
     /// corresponds to each instance.
     ///
     /// This is keyed off each view. Each view has a separate buffer.
-    pub work_item_buffers: EntityHashMap<PreprocessWorkItemBuffer>,
+    pub work_item_buffers: EntityHashMap<PreprocessWorkItemBuffers>,
 
     /// The uniform data inputs for the current frame.
     ///
@@ -248,34 +249,37 @@ where
 }
 
 /// The buffer of GPU preprocessing work items for a single view.
-pub enum PreprocessWorkItemBuffer {
+pub enum PreprocessWorkItemBuffers {
     Direct(BufferVec<PreprocessWorkItem>),
     Indirect {
         indexed: BufferVec<PreprocessWorkItem>,
         non_indexed: BufferVec<PreprocessWorkItem>,
+        gpu_occlusion_culling: bool,
     },
 }
 
-impl PreprocessWorkItemBuffer {
-    fn new(no_indirect_drawing: bool) -> Self {
+impl PreprocessWorkItemBuffers {
+    fn new(no_indirect_drawing: bool, gpu_occlusion_culling: bool) -> Self {
         if no_indirect_drawing {
-            PreprocessWorkItemBuffer::Direct(BufferVec::new(BufferUsages::STORAGE))
+            PreprocessWorkItemBuffers::Direct(BufferVec::new(BufferUsages::STORAGE))
         } else {
-            PreprocessWorkItemBuffer::Indirect {
+            PreprocessWorkItemBuffers::Indirect {
                 indexed: BufferVec::new(BufferUsages::STORAGE),
                 non_indexed: BufferVec::new(BufferUsages::STORAGE),
+                gpu_occlusion_culling,
             }
         }
     }
 
     fn push(&mut self, indexed: bool, preprocess_work_item: PreprocessWorkItem) {
         match *self {
-            PreprocessWorkItemBuffer::Direct(ref mut buffer) => {
+            PreprocessWorkItemBuffers::Direct(ref mut buffer) => {
                 buffer.push(preprocess_work_item);
             }
-            PreprocessWorkItemBuffer::Indirect {
+            PreprocessWorkItemBuffers::Indirect {
                 indexed: ref mut indexed_buffer,
                 non_indexed: ref mut non_indexed_buffer,
+                ..
             } => {
                 if indexed {
                     indexed_buffer.push(preprocess_work_item);
@@ -395,7 +399,8 @@ pub struct IndirectParametersMetadata {
     pub mesh_index: u32,
     pub base_output_index: u32,
     pub batch_set_index: u32,
-    pub instance_count: u32,
+    pub early_instance_count: u32,
+    pub late_instance_count: u32,
 }
 
 #[derive(Clone, Copy, Default, Pod, Zeroable, ShaderType)]
@@ -584,7 +589,7 @@ impl FromWorld for GpuPreprocessingSupport {
 impl<BD, BDI> BatchedInstanceBuffers<BD, BDI>
 where
     BD: GpuArrayBufferable + Sync + Send + 'static,
-    BDI: Pod + Default,
+    BDI: Pod + Sync + Send + Default + 'static,
 {
     /// Creates new buffers.
     pub fn new() -> Self {
@@ -610,10 +615,11 @@ where
         self.data_buffer.clear();
         for work_item_buffers in self.work_item_buffers.values_mut() {
             match *work_item_buffers {
-                PreprocessWorkItemBuffer::Direct(ref mut buffer_vec) => buffer_vec.clear(),
-                PreprocessWorkItemBuffer::Indirect {
+                PreprocessWorkItemBuffers::Direct(ref mut buffer_vec) => buffer_vec.clear(),
+                PreprocessWorkItemBuffers::Indirect {
                     ref mut indexed,
                     ref mut non_indexed,
+                    ..
                 } => {
                     indexed.clear();
                     non_indexed.clear();
@@ -626,7 +632,7 @@ where
 impl<BD, BDI> Default for BatchedInstanceBuffers<BD, BDI>
 where
     BD: GpuArrayBufferable + Sync + Send + 'static,
-    BDI: Pod + Default,
+    BDI: Pod + Default + Sync + Send + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -730,7 +736,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
     gpu_array_buffer: ResMut<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
     mut indirect_parameters_buffers: ResMut<IndirectParametersBuffers>,
     mut sorted_render_phases: ResMut<ViewSortedRenderPhases<I>>,
-    mut views: Query<(Entity, Has<NoIndirectDrawing>), With<ExtractedView>>,
+    mut views: Query<(Entity, Has<NoIndirectDrawing>, Has<OcclusionCulling>), With<ExtractedView>>,
     system_param_item: StaticSystemParam<GFBD::Param>,
 ) where
     I: CachedRenderPipelinePhaseItem + SortedPhaseItem,
@@ -743,15 +749,15 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
         ..
     } = gpu_array_buffer.into_inner();
 
-    for (view, no_indirect_drawing) in &mut views {
+    for (view, no_indirect_drawing, gpu_occlusion_culling) in &mut views {
         let Some(phase) = sorted_render_phases.get_mut(&view) else {
             continue;
         };
 
         // Create the work item buffer if necessary.
-        let work_item_buffer = work_item_buffers
-            .entry(view)
-            .or_insert_with(|| PreprocessWorkItemBuffer::new(no_indirect_drawing));
+        let work_item_buffer = work_item_buffers.entry(view).or_insert_with(|| {
+            PreprocessWorkItemBuffers::new(no_indirect_drawing, gpu_occlusion_culling)
+        });
 
         // Walk through the list of phase items, building up batches as we go.
         let mut batch: Option<SortedRenderBatch<GFBD>> = None;
@@ -864,7 +870,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
     gpu_array_buffer: ResMut<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
     mut indirect_parameters_buffers: ResMut<IndirectParametersBuffers>,
     mut binned_render_phases: ResMut<ViewBinnedRenderPhases<BPI>>,
-    mut views: Query<(Entity, Has<NoIndirectDrawing>), With<ExtractedView>>,
+    mut views: Query<(Entity, Has<NoIndirectDrawing>, Has<OcclusionCulling>), With<ExtractedView>>,
     param: StaticSystemParam<GFBD::Param>,
 ) where
     BPI: BinnedPhaseItem,
@@ -878,16 +884,16 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
         ..
     } = gpu_array_buffer.into_inner();
 
-    for (view, no_indirect_drawing) in &mut views {
+    for (view, no_indirect_drawing, gpu_occlusion_culling) in &mut views {
         let Some(phase) = binned_render_phases.get_mut(&view) else {
             continue;
         };
 
         // Create the work item buffer if necessary; otherwise, just mark it as
         // used this frame.
-        let work_item_buffer = work_item_buffers
-            .entry(view)
-            .or_insert_with(|| PreprocessWorkItemBuffer::new(no_indirect_drawing));
+        let work_item_buffer = work_item_buffers.entry(view).or_insert_with(|| {
+            PreprocessWorkItemBuffers::new(no_indirect_drawing, gpu_occlusion_culling)
+        });
 
         // Prepare multidrawables.
 
@@ -1210,12 +1216,13 @@ pub fn write_batched_instance_buffers<GFBD>(
 
     for index_buffer in index_buffers.values_mut() {
         match *index_buffer {
-            PreprocessWorkItemBuffer::Direct(ref mut buffer_vec) => {
+            PreprocessWorkItemBuffers::Direct(ref mut buffer_vec) => {
                 buffer_vec.write_buffer(&render_device, &render_queue);
             }
-            PreprocessWorkItemBuffer::Indirect {
+            PreprocessWorkItemBuffers::Indirect {
                 ref mut indexed,
                 ref mut non_indexed,
+                ..
             } => {
                 indexed.write_buffer(&render_device, &render_queue);
                 non_indexed.write_buffer(&render_device, &render_queue);

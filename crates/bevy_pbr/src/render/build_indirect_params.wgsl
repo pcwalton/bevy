@@ -33,7 +33,12 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let mesh_index = indirect_parameters_metadata[instance_index].mesh_index;
     let base_output_index = indirect_parameters_metadata[instance_index].base_output_index;
     let batch_set_index = indirect_parameters_metadata[instance_index].batch_set_index;
-    let instance_count = atomicLoad(&indirect_parameters_metadata[instance_index].instance_count);
+
+#ifdef EARLY
+    let instance_count = atomicLoad(&indirect_parameters_metadata[instance_index].early_instance_count);
+#else   // EARLY
+    let instance_count = atomicLoad(&indirect_parameters_metadata[instance_index].late_instance_count);
+#endif  // EARLY
 
     var indirect_parameters_index = instance_index;
 #ifdef MULTI_DRAW_INDIRECT_COUNT_SUPPORTED
@@ -51,8 +56,19 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     }
 #endif  // MULTI_DRAW_INDIRECT_COUNT_SUPPORTED
 
+#ifdef OCCLUSION_CULLING
+#ifdef EARLY
     indirect_parameters[indirect_parameters_index].instance_count = instance_count;
+    indirect_parameters[indirect_parameters_index].first_instance =
+        base_output_index + instance_count;
+#else   // EARLY
+    indirect_parameters[indirect_parameters_index].instance_count += instance_count;
     indirect_parameters[indirect_parameters_index].first_instance = base_output_index;
+#endif  // EARLY
+#else   // OCCLUSION_CULLING
+    indirect_parameters[indirect_parameters_index].first_instance = base_output_index;
+#endif  // OCCLUSION_CULLING
+
     indirect_parameters[indirect_parameters_index].base_vertex =
         current_input[mesh_index].first_vertex_index;
 

@@ -6,39 +6,43 @@
 //! [`MeshInputUniform`]s instead and use the GPU to calculate the remaining
 //! derived fields in [`MeshUniform`].
 
-use core::num::NonZero;
+use core::{mem, num::NonZero};
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Handle};
-use bevy_core_pipeline::core_3d::graph::Core3d;
+use bevy_core_pipeline::{
+    core_3d::graph::{Core3d, Node3d},
+    mip_generation::ViewDepthPyramid,
+};
 use bevy_ecs::{
     component::Component,
-    entity::Entity,
-    query::{Has, QueryState, Without},
+    entity::{Entity, EntityHashMap},
+    query::{Has, QueryState, With, Without},
     schedule::{common_conditions::resource_exists, IntoSystemConfigs as _},
-    system::{lifetimeless::Read, Commands, Res, ResMut, Resource},
+    system::{lifetimeless::Read, Commands, Query, Res, ResMut, Resource},
     world::{FromWorld, World},
 };
 use bevy_render::{
     batching::gpu_preprocessing::{
         BatchedInstanceBuffers, GpuPreprocessingSupport, IndirectBatchSet,
         IndirectParametersBuffers, IndirectParametersIndexed, IndirectParametersMetadata,
-        IndirectParametersNonIndexed, PreprocessWorkItem, PreprocessWorkItemBuffer,
+        IndirectParametersNonIndexed, PreprocessWorkItem, PreprocessWorkItemBuffers,
     },
+    occlusion_culling::OcclusionCulling,
     render_graph::{Node, NodeRunError, RenderGraphApp, RenderGraphContext},
     render_resource::{
-        binding_types::{storage_buffer, storage_buffer_read_only, uniform_buffer},
+        binding_types::{storage_buffer, storage_buffer_read_only, texture_2d, uniform_buffer},
         BindGroup, BindGroupEntries, BindGroupLayout, BindingResource, Buffer, BufferBinding,
-        CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
-        DynamicBindGroupLayoutEntries, PipelineCache, Shader, ShaderStages, ShaderType,
-        SpecializedComputePipeline, SpecializedComputePipelines,
+        BufferUsages, CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
+        DynamicBindGroupLayoutEntries, PipelineCache, RawBufferVec, Shader, ShaderStages,
+        ShaderType, SpecializedComputePipeline, SpecializedComputePipelines, TextureSampleType,
     },
     renderer::{RenderContext, RenderDevice, RenderQueue},
     settings::WgpuFeatures,
     view::{NoIndirectDrawing, ViewUniform, ViewUniformOffset, ViewUniforms},
     Render, RenderApp, RenderSet,
 };
-use bevy_utils::tracing::warn;
+use bevy_utils::{tracing::warn, Entry};
 use bitflags::bitflags;
 use smallvec::{smallvec, SmallVec};
 
@@ -49,9 +53,6 @@ use crate::{
 /// The handle to the `mesh_preprocess.wgsl` compute shader.
 pub const MESH_PREPROCESS_SHADER_HANDLE: Handle<Shader> =
     Handle::weak_from_u128(16991728318640779533);
-/// The handle to the `mesh_preprocess_types.wgsl` compute shader.
-pub const MESH_PREPROCESS_TYPES_SHADER_HANDLE: Handle<Shader> =
-    Handle::weak_from_u128(2720440370122465935);
 pub const BUILD_INDIRECT_PARAMS_SHADER_HANDLE: Handle<Shader> =
     Handle::weak_from_u128(3711077208359699672);
 
@@ -71,19 +72,38 @@ pub struct GpuMeshPreprocessPlugin {
 }
 
 /// The render node for the mesh uniform building pass.
-pub struct GpuPreprocessNode {
+pub struct EarlyGpuPreprocessNode {
     view_query: QueryState<
         (
             Entity,
             Read<PreprocessBindGroups>,
             Read<ViewUniformOffset>,
             Has<NoIndirectDrawing>,
+            Has<OcclusionCulling>,
         ),
         Without<SkipGpuPreprocess>,
     >,
 }
 
-pub struct BuildIndirectParametersNode {
+pub struct LateGpuPreprocessNode {
+    view_query: QueryState<
+        (Entity, Read<PreprocessBindGroups>, Read<ViewUniformOffset>),
+        (
+            Without<SkipGpuPreprocess>,
+            Without<NoIndirectDrawing>,
+            With<OcclusionCulling>,
+        ),
+    >,
+}
+
+pub struct EarlyBuildIndirectParametersNode {
+    view_query: QueryState<
+        Read<PreprocessBindGroups>,
+        (Without<SkipGpuPreprocess>, Without<NoIndirectDrawing>),
+    >,
+}
+
+pub struct LateBuildIndirectParametersNode {
     view_query: QueryState<
         Read<PreprocessBindGroups>,
         (Without<SkipGpuPreprocess>, Without<NoIndirectDrawing>),
@@ -96,11 +116,19 @@ pub struct PreprocessPipelines {
     /// The pipeline used for CPU culling. This pipeline doesn't populate
     /// indirect parameters.
     pub direct_preprocess: PreprocessPipeline,
+    pub gpu_frustum_culling_preprocess: PreprocessPipeline,
     /// The pipeline used for GPU culling. This pipeline populates indirect
     /// parameters.
-    pub gpu_culling_preprocess: PreprocessPipeline,
-    pub build_indexed_indirect_params: BuildIndirectParametersPipeline,
-    pub build_non_indexed_indirect_params: BuildIndirectParametersPipeline,
+    pub early_gpu_occlusion_culling_preprocess: PreprocessPipeline,
+    pub late_gpu_occlusion_culling_preprocess: PreprocessPipeline,
+    pub gpu_frustum_culling_build_indexed_indirect_params: BuildIndirectParametersPipeline,
+    pub gpu_frustum_culling_build_non_indexed_indirect_params: BuildIndirectParametersPipeline,
+    pub early_gpu_occlusion_culling_build_indexed_indirect_params: BuildIndirectParametersPipeline,
+    pub early_gpu_occlusion_culling_build_non_indexed_indirect_params:
+        BuildIndirectParametersPipeline,
+    pub late_gpu_occlusion_culling_build_indexed_indirect_params: BuildIndirectParametersPipeline,
+    pub late_gpu_occlusion_culling_build_non_indexed_indirect_params:
+        BuildIndirectParametersPipeline,
 }
 
 /// The pipeline for the GPU mesh preprocessing shader.
@@ -126,16 +154,20 @@ bitflags! {
     /// Specifies variants of the mesh preprocessing shader.
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     pub struct PreprocessPipelineKey: u8 {
-        /// Whether GPU culling is in use.
+        /// Whether GPU frustum culling is in use.
         ///
-        /// This `#define`'s `GPU_CULLING` in the shader.
-        const GPU_CULLING = 1;
+        /// This `#define`'s `FRUSTUM_CULLING` in the shader.
+        const FRUSTUM_CULLING = 1;
+        const OCCLUSION_CULLING = 2;
+        const EARLY = 4;
     }
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     pub struct BuildIndirectParametersPipelineKey: u8 {
         const INDEXED = 1;
         const MULTI_DRAW_INDIRECT_COUNT_SUPPORTED = 2;
+        const OCCLUSION_CULLING = 4;
+        const EARLY = 8;
     }
 }
 
@@ -145,9 +177,15 @@ bitflags! {
 #[derive(Component, Clone)]
 pub enum PreprocessBindGroups {
     Direct(BindGroup),
-    Indirect {
+    IndirectFrustumCulling {
         indexed: Option<BindGroup>,
         non_indexed: Option<BindGroup>,
+    },
+    IndirectOcclusionCulling {
+        early_indexed: Option<BindGroup>,
+        early_non_indexed: Option<BindGroup>,
+        late_indexed: Option<BindGroup>,
+        late_non_indexed: Option<BindGroup>,
     },
 }
 
@@ -168,12 +206,6 @@ impl Plugin for GpuMeshPreprocessPlugin {
             app,
             MESH_PREPROCESS_SHADER_HANDLE,
             "mesh_preprocess.wgsl",
-            Shader::from_wgsl
-        );
-        load_internal_asset!(
-            app,
-            MESH_PREPROCESS_TYPES_SHADER_HANDLE,
-            "mesh_preprocess_types.wgsl",
             Shader::from_wgsl
         );
         load_internal_asset!(
@@ -200,11 +232,13 @@ impl Plugin for GpuMeshPreprocessPlugin {
             .init_resource::<PreprocessPipelines>()
             .init_resource::<SpecializedComputePipelines<PreprocessPipeline>>()
             .init_resource::<SpecializedComputePipelines<BuildIndirectParametersPipeline>>()
+            .init_resource::<OcclusionCullingVisibilityBuffers>()
             .add_systems(
                 Render,
                 (
                     prepare_preprocess_pipelines.in_set(RenderSet::Prepare),
-                    prepare_preprocess_bind_groups
+                    (prepare_preprocess_bind_groups, prepare_occlusion_culling_visibility_buffers)
+                        .chain()
                         .run_if(
                             resource_exists::<BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>,
                         )
@@ -212,16 +246,25 @@ impl Plugin for GpuMeshPreprocessPlugin {
                     write_mesh_culling_data_buffer.in_set(RenderSet::PrepareResourcesFlush),
                 )
             )
-            .add_render_graph_node::<GpuPreprocessNode>(Core3d, NodePbr::GpuPreprocess)
-            .add_render_graph_node::<BuildIndirectParametersNode>(Core3d, NodePbr::BuildIndirectParametersNode)
+            .add_render_graph_node::<EarlyGpuPreprocessNode>(Core3d, NodePbr::EarlyGpuPreprocess)
+            .add_render_graph_node::<LateGpuPreprocessNode>(Core3d, NodePbr::LateGpuPreprocess)
+            .add_render_graph_node::<EarlyBuildIndirectParametersNode>(Core3d, NodePbr::EarlyBuildIndirectParameters)
+            .add_render_graph_node::<LateBuildIndirectParametersNode>(Core3d, NodePbr::LateBuildIndirectParameters)
             .add_render_graph_edges(
                 Core3d,
-                (NodePbr::GpuPreprocess, NodePbr::BuildIndirectParametersNode, NodePbr::ShadowPass)
+                (
+                    NodePbr::EarlyGpuPreprocess,
+                    NodePbr::EarlyBuildIndirectParameters,
+                    Node3d::DownsampleDepth,
+                    NodePbr::LateGpuPreprocess,
+                    NodePbr::LateBuildIndirectParameters,
+                    NodePbr::ShadowPass
+                )
             );
     }
 }
 
-impl FromWorld for GpuPreprocessNode {
+impl FromWorld for EarlyGpuPreprocessNode {
     fn from_world(world: &mut World) -> Self {
         Self {
             view_query: QueryState::new(world),
@@ -229,7 +272,7 @@ impl FromWorld for GpuPreprocessNode {
     }
 }
 
-impl Node for GpuPreprocessNode {
+impl Node for EarlyGpuPreprocessNode {
     fn update(&mut self, world: &mut World) {
         self.view_query.update_archetypes(world);
     }
@@ -253,12 +296,12 @@ impl Node for GpuPreprocessNode {
             render_context
                 .command_encoder()
                 .begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("mesh preprocessing"),
+                    label: Some("early mesh preprocessing"),
                     timestamp_writes: None,
                 });
 
         // Run the compute passes.
-        for (view, bind_groups, view_uniform_offset, no_indirect_drawing) in
+        for (view, bind_groups, view_uniform_offset, no_indirect_drawing, occlusion_culling) in
             self.view_query.iter_manual(world)
         {
             // Grab the index buffer for this view.
@@ -269,10 +312,16 @@ impl Node for GpuPreprocessNode {
 
             // Select the right pipeline, depending on whether GPU culling is in
             // use.
-            let maybe_pipeline_id = if !no_indirect_drawing {
-                preprocess_pipelines.gpu_culling_preprocess.pipeline_id
-            } else {
+            let maybe_pipeline_id = if no_indirect_drawing {
                 preprocess_pipelines.direct_preprocess.pipeline_id
+            } else if occlusion_culling {
+                preprocess_pipelines
+                    .early_gpu_occlusion_culling_preprocess
+                    .pipeline_id
+            } else {
+                preprocess_pipelines
+                    .gpu_frustum_culling_preprocess
+                    .pipeline_id
             };
 
             // Fetch the pipeline.
@@ -295,11 +344,11 @@ impl Node for GpuPreprocessNode {
                 dynamic_offsets.push(view_uniform_offset.offset);
             }
 
-            match (bind_groups, index_buffer) {
-                (
-                    PreprocessBindGroups::Direct(bind_group),
-                    PreprocessWorkItemBuffer::Direct(work_item_buffer),
-                ) => {
+            match bind_groups {
+                PreprocessBindGroups::Direct(bind_group) => {
+                    let PreprocessWorkItemBuffers::Direct(work_item_buffer) = index_buffer else {
+                        continue;
+                    };
                     compute_pass.set_bind_group(0, bind_group, &dynamic_offsets);
                     let workgroup_count = work_item_buffer.len().div_ceil(WORKGROUP_SIZE);
                     if workgroup_count > 0 {
@@ -307,16 +356,24 @@ impl Node for GpuPreprocessNode {
                     }
                 }
 
-                (
-                    PreprocessBindGroups::Indirect {
-                        indexed: maybe_indexed_bind_group,
-                        non_indexed: maybe_non_indexed_bind_group,
-                    },
-                    PreprocessWorkItemBuffer::Indirect {
+                PreprocessBindGroups::IndirectFrustumCulling {
+                    indexed: maybe_indexed_bind_group,
+                    non_indexed: maybe_non_indexed_bind_group,
+                }
+                | PreprocessBindGroups::IndirectOcclusionCulling {
+                    early_indexed: maybe_indexed_bind_group,
+                    early_non_indexed: maybe_non_indexed_bind_group,
+                    ..
+                } => {
+                    let PreprocessWorkItemBuffers::Indirect {
                         indexed: indexed_buffer,
                         non_indexed: non_indexed_buffer,
-                    },
-                ) => {
+                        ..
+                    } = index_buffer
+                    else {
+                        continue;
+                    };
+
                     if let Some(indexed_bind_group) = maybe_indexed_bind_group {
                         compute_pass.set_bind_group(0, indexed_bind_group, &dynamic_offsets);
                         let workgroup_count = indexed_buffer.len().div_ceil(WORKGROUP_SIZE);
@@ -333,8 +390,6 @@ impl Node for GpuPreprocessNode {
                         }
                     }
                 }
-
-                (_, _) => {}
             }
         }
 
@@ -342,7 +397,7 @@ impl Node for GpuPreprocessNode {
     }
 }
 
-impl FromWorld for BuildIndirectParametersNode {
+impl FromWorld for EarlyBuildIndirectParametersNode {
     fn from_world(world: &mut World) -> Self {
         Self {
             view_query: QueryState::new(world),
@@ -350,7 +405,23 @@ impl FromWorld for BuildIndirectParametersNode {
     }
 }
 
-impl Node for BuildIndirectParametersNode {
+impl FromWorld for LateBuildIndirectParametersNode {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            view_query: QueryState::new(world),
+        }
+    }
+}
+
+impl FromWorld for LateGpuPreprocessNode {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            view_query: QueryState::new(world),
+        }
+    }
+}
+
+impl Node for LateGpuPreprocessNode {
     fn update(&mut self, world: &mut World) {
         self.view_query.update_archetypes(world);
     }
@@ -361,96 +432,271 @@ impl Node for BuildIndirectParametersNode {
         render_context: &mut RenderContext<'w>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
-        let Some(build_indirect_params_bind_groups) =
-            world.get_resource::<BuildIndirectParametersBindGroups>()
-        else {
-            return Ok(());
-        };
+        // Grab the [`BatchedInstanceBuffers`].
+        let BatchedInstanceBuffers {
+            ref work_item_buffers,
+            ..
+        } = world.resource::<BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>();
 
         let pipeline_cache = world.resource::<PipelineCache>();
         let preprocess_pipelines = world.resource::<PreprocessPipelines>();
-        let indirect_parameters_buffers = world.resource::<IndirectParametersBuffers>();
 
         let mut compute_pass =
             render_context
                 .command_encoder()
                 .begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("build indirect parameters"),
+                    label: Some("late mesh preprocessing"),
                     timestamp_writes: None,
                 });
 
         // Run the compute passes.
-        let (maybe_indexed_pipeline_id, maybe_non_indexed_pipeline_id) = (
-            preprocess_pipelines
-                .build_indexed_indirect_params
-                .pipeline_id,
-            preprocess_pipelines
-                .build_non_indexed_indirect_params
-                .pipeline_id,
-        );
+        for (view, bind_groups, view_uniform_offset) in self.view_query.iter_manual(world) {
+            let PreprocessBindGroups::IndirectOcclusionCulling {
+                late_indexed: ref late_indexed_bind_group,
+                late_non_indexed: ref late_non_indexed_bind_group,
+                ..
+            } = bind_groups
+            else {
+                continue;
+            };
 
-        // Fetch the pipeline.
-        let (
-            Some(build_indexed_indirect_params_pipeline_id),
-            Some(build_non_indexed_indirect_params_pipeline_id),
-        ) = (maybe_indexed_pipeline_id, maybe_non_indexed_pipeline_id)
-        else {
-            warn!("The build indirect parameters pipelines weren't ready");
-            return Ok(());
-        };
+            // Grab the work item buffers for this view.
+            let Some(&PreprocessWorkItemBuffers::Indirect {
+                indexed: ref indexed_work_item_buffer,
+                non_indexed: ref non_indexed_work_item_buffer,
+                gpu_occlusion_culling: true,
+            }) = work_item_buffers.get(&view)
+            else {
+                continue;
+            };
 
-        let (
-            Some(build_indexed_indirect_params_pipeline),
-            Some(build_non_indexed_indirect_params_pipeline),
-        ) = (
-            pipeline_cache.get_compute_pipeline(build_indexed_indirect_params_pipeline_id),
-            pipeline_cache.get_compute_pipeline(build_non_indexed_indirect_params_pipeline_id),
-        )
-        else {
-            // This will happen while the pipeline is being compiled and is fine.
-            return Ok(());
-        };
+            let maybe_pipeline_id = preprocess_pipelines
+                .late_gpu_occlusion_culling_preprocess
+                .pipeline_id;
 
-        // Build indexed indirect parameters.
-        if let Some(ref build_indirect_indexed_params_bind_group) =
-            build_indirect_params_bind_groups.indexed
-        {
-            compute_pass.set_pipeline(build_indexed_indirect_params_pipeline);
-            compute_pass.set_bind_group(0, build_indirect_indexed_params_bind_group, &[]);
-            let workgroup_count = indirect_parameters_buffers
-                .indexed_len()
-                .div_ceil(WORKGROUP_SIZE);
-            if workgroup_count > 0 {
-                compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-            }
-        }
+            // Fetch the pipeline.
+            let Some(preprocess_pipeline_id) = maybe_pipeline_id else {
+                warn!("The build mesh uniforms pipeline wasn't ready");
+                return Ok(());
+            };
 
-        // Build non-indexed indirect parameters.
-        if let Some(ref build_indirect_non_indexed_params_bind_group) =
-            build_indirect_params_bind_groups.non_indexed
-        {
-            compute_pass.set_pipeline(build_non_indexed_indirect_params_pipeline);
-            compute_pass.set_bind_group(0, build_indirect_non_indexed_params_bind_group, &[]);
-            let workgroup_count = indirect_parameters_buffers
-                .non_indexed_len()
-                .div_ceil(WORKGROUP_SIZE);
-            if workgroup_count > 0 {
-                compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-            }
+            let Some(preprocess_pipeline) =
+                pipeline_cache.get_compute_pipeline(preprocess_pipeline_id)
+            else {
+                // This will happen while the pipeline is being compiled and is fine.
+                return Ok(());
+            };
+
+            compute_pass.set_pipeline(preprocess_pipeline);
+
+            let mut dynamic_offsets: SmallVec<[u32; 1]> = smallvec![];
+            dynamic_offsets.push(view_uniform_offset.offset);
+
+            compute_pass.set_bind_group(0, late_indexed_bind_group.as_deref(), &dynamic_offsets);
+            let workgroup_count = indexed_work_item_buffer.len().div_ceil(WORKGROUP_SIZE);
+            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+
+            compute_pass.set_bind_group(
+                0,
+                late_non_indexed_bind_group.as_deref(),
+                &dynamic_offsets,
+            );
+            let workgroup_count = non_indexed_work_item_buffer.len().div_ceil(WORKGROUP_SIZE);
+            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         }
 
         Ok(())
     }
 }
 
+impl Node for EarlyBuildIndirectParametersNode {
+    fn update(&mut self, world: &mut World) {
+        self.view_query.update_archetypes(world);
+    }
+
+    fn run<'w>(
+        &self,
+        _: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        let preprocess_pipelines = world.resource::<PreprocessPipelines>();
+
+        let (
+            maybe_gpu_occlusion_culling_build_indexed_pipeline_id,
+            maybe_gpu_occlusion_culling_build_non_indexed_pipeline_id,
+        ) = (
+            preprocess_pipelines
+                .early_gpu_occlusion_culling_build_indexed_indirect_params
+                .pipeline_id,
+            preprocess_pipelines
+                .early_gpu_occlusion_culling_build_non_indexed_indirect_params
+                .pipeline_id,
+        );
+
+        run_build_indirect_parameters_node(
+            render_context,
+            world,
+            maybe_gpu_occlusion_culling_build_indexed_pipeline_id,
+            maybe_gpu_occlusion_culling_build_non_indexed_pipeline_id,
+            "early build indirect parameters",
+        )
+    }
+}
+
+impl Node for LateBuildIndirectParametersNode {
+    fn update(&mut self, world: &mut World) {
+        self.view_query.update_archetypes(world);
+    }
+
+    fn run<'w>(
+        &self,
+        _: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        let preprocess_pipelines = world.resource::<PreprocessPipelines>();
+
+        let (
+            maybe_gpu_occlusion_culling_build_indexed_pipeline_id,
+            maybe_gpu_occlusion_culling_build_non_indexed_pipeline_id,
+        ) = (
+            preprocess_pipelines
+                .late_gpu_occlusion_culling_build_indexed_indirect_params
+                .pipeline_id,
+            preprocess_pipelines
+                .late_gpu_occlusion_culling_build_non_indexed_indirect_params
+                .pipeline_id,
+        );
+
+        run_build_indirect_parameters_node(
+            render_context,
+            world,
+            maybe_gpu_occlusion_culling_build_indexed_pipeline_id,
+            maybe_gpu_occlusion_culling_build_non_indexed_pipeline_id,
+            "late build indirect parameters",
+        )
+    }
+}
+
+fn run_build_indirect_parameters_node(
+    render_context: &mut RenderContext,
+    world: &World,
+    maybe_indexed_pipeline_id: Option<CachedComputePipelineId>,
+    maybe_non_indexed_pipeline_id: Option<CachedComputePipelineId>,
+    label: &'static str,
+) -> Result<(), NodeRunError> {
+    let Some(build_indirect_params_bind_groups) =
+        world.get_resource::<BuildIndirectParametersBindGroups>()
+    else {
+        return Ok(());
+    };
+
+    let pipeline_cache = world.resource::<PipelineCache>();
+    let indirect_parameters_buffers = world.resource::<IndirectParametersBuffers>();
+
+    let mut compute_pass =
+        render_context
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some(label),
+                timestamp_writes: None,
+            });
+
+    // Fetch the pipeline.
+    let (
+        Some(build_indexed_indirect_params_pipeline_id),
+        Some(build_non_indexed_indirect_params_pipeline_id),
+    ) = (maybe_indexed_pipeline_id, maybe_non_indexed_pipeline_id)
+    else {
+        warn!("The build indirect parameters pipelines weren't ready");
+        return Ok(());
+    };
+
+    let (
+        Some(build_indexed_indirect_params_pipeline),
+        Some(build_non_indexed_indirect_params_pipeline),
+    ) = (
+        pipeline_cache.get_compute_pipeline(build_indexed_indirect_params_pipeline_id),
+        pipeline_cache.get_compute_pipeline(build_non_indexed_indirect_params_pipeline_id),
+    )
+    else {
+        // This will happen while the pipeline is being compiled and is fine.
+        return Ok(());
+    };
+
+    // Build indexed indirect parameters.
+    if let Some(ref build_indirect_indexed_params_bind_group) =
+        build_indirect_params_bind_groups.indexed
+    {
+        compute_pass.set_pipeline(build_indexed_indirect_params_pipeline);
+        compute_pass.set_bind_group(0, build_indirect_indexed_params_bind_group, &[]);
+        let workgroup_count = indirect_parameters_buffers
+            .indexed_len()
+            .div_ceil(WORKGROUP_SIZE);
+        if workgroup_count > 0 {
+            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+        }
+    }
+
+    // Build non-indexed indirect parameters.
+    if let Some(ref build_indirect_non_indexed_params_bind_group) =
+        build_indirect_params_bind_groups.non_indexed
+    {
+        compute_pass.set_pipeline(build_non_indexed_indirect_params_pipeline);
+        compute_pass.set_bind_group(0, build_indirect_non_indexed_params_bind_group, &[]);
+        let workgroup_count = indirect_parameters_buffers
+            .non_indexed_len()
+            .div_ceil(WORKGROUP_SIZE);
+        if workgroup_count > 0 {
+            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+        }
+    }
+
+    Ok(())
+}
+
 impl PreprocessPipelines {
     pub(crate) fn pipelines_are_loaded(&self, pipeline_cache: &PipelineCache) -> bool {
         self.direct_preprocess.is_loaded(pipeline_cache)
-            && self.gpu_culling_preprocess.is_loaded(pipeline_cache)
+            && self
+                .gpu_frustum_culling_preprocess
+                .is_loaded(pipeline_cache)
+            && self
+                .early_gpu_occlusion_culling_preprocess
+                .is_loaded(pipeline_cache)
+            && self
+                .late_gpu_occlusion_culling_preprocess
+                .is_loaded(pipeline_cache)
+            && self
+                .gpu_frustum_culling_build_indexed_indirect_params
+                .is_loaded(pipeline_cache)
+            && self
+                .gpu_frustum_culling_build_non_indexed_indirect_params
+                .is_loaded(pipeline_cache)
+            && self
+                .early_gpu_occlusion_culling_build_indexed_indirect_params
+                .is_loaded(pipeline_cache)
+            && self
+                .early_gpu_occlusion_culling_build_non_indexed_indirect_params
+                .is_loaded(pipeline_cache)
+            && self
+                .late_gpu_occlusion_culling_build_indexed_indirect_params
+                .is_loaded(pipeline_cache)
+            && self
+                .late_gpu_occlusion_culling_build_non_indexed_indirect_params
+                .is_loaded(pipeline_cache)
     }
 }
 
 impl PreprocessPipeline {
+    fn is_loaded(&self, pipeline_cache: &PipelineCache) -> bool {
+        self.pipeline_id
+            .is_some_and(|pipeline_id| pipeline_cache.get_compute_pipeline(pipeline_id).is_some())
+    }
+}
+
+impl BuildIndirectParametersPipeline {
     fn is_loaded(&self, pipeline_cache: &PipelineCache) -> bool {
         self.pipeline_id
             .is_some_and(|pipeline_id| pipeline_cache.get_compute_pipeline(pipeline_id).is_some())
@@ -462,17 +708,31 @@ impl SpecializedComputePipeline for PreprocessPipeline {
 
     fn specialize(&self, key: Self::Key) -> ComputePipelineDescriptor {
         let mut shader_defs = vec![];
-        if key.contains(PreprocessPipelineKey::GPU_CULLING) {
+        if key.contains(PreprocessPipelineKey::FRUSTUM_CULLING) {
             shader_defs.push("INDIRECT".into());
             shader_defs.push("FRUSTUM_CULLING".into());
+        }
+        if key.contains(PreprocessPipelineKey::OCCLUSION_CULLING) {
+            shader_defs.push("OCCLUSION_CULLING".into());
+            if key.contains(PreprocessPipelineKey::EARLY) {
+                shader_defs.push("EARLY".into());
+            } else {
+                shader_defs.push("LATE".into());
+            }
         }
 
         ComputePipelineDescriptor {
             label: Some(
                 format!(
                     "mesh preprocessing ({})",
-                    if key.contains(PreprocessPipelineKey::GPU_CULLING) {
-                        "GPU culling"
+                    if key.contains(
+                        PreprocessPipelineKey::OCCLUSION_CULLING | PreprocessPipelineKey::EARLY
+                    ) {
+                        "early GPU occlusion culling"
+                    } else if key.contains(PreprocessPipelineKey::OCCLUSION_CULLING) {
+                        "late GPU occlusion culling"
+                    } else if key.contains(PreprocessPipelineKey::FRUSTUM_CULLING) {
+                        "GPU frustum culling"
                     } else {
                         "direct"
                     }
@@ -496,15 +756,13 @@ impl FromWorld for PreprocessPipelines {
         // GPU culling bind group parameters are a superset of those in the CPU
         // culling (direct) shader.
         let direct_bind_group_layout_entries = preprocess_direct_bind_group_layout_entries();
-        let gpu_culling_bind_group_layout_entries = preprocess_direct_bind_group_layout_entries()
-            .extend_sequential((
-                // `indirect_parameters_metadata`
-                storage_buffer::<IndirectParametersMetadata>(/* has_dynamic_offset= */ false),
-                // `mesh_culling_data`
-                storage_buffer_read_only::<MeshCullingData>(/* has_dynamic_offset= */ false),
-                // `view`
-                uniform_buffer::<ViewUniform>(/* has_dynamic_offset= */ true),
-            ));
+        let gpu_frustum_culling_bind_group_layout_entries = gpu_culling_bind_group_layout_entries();
+        let gpu_early_occlusion_culling_bind_group_layout_entries =
+            gpu_occlusion_culling_bind_group_layout_entries()
+                .extend_sequential((storage_buffer_read_only::<u32>(false),));
+        let gpu_late_occlusion_culling_bind_group_layout_entries =
+            gpu_occlusion_culling_bind_group_layout_entries()
+                .extend_sequential((texture_2d(TextureSampleType::Float { filterable: true }),));
 
         let build_indexed_indirect_params_bind_group_layout_entries =
             build_indirect_params_bind_group_layout_entries()
@@ -517,9 +775,17 @@ impl FromWorld for PreprocessPipelines {
             "build mesh uniforms direct bind group layout",
             &direct_bind_group_layout_entries,
         );
-        let gpu_culling_bind_group_layout = render_device.create_bind_group_layout(
-            "build mesh uniforms GPU culling bind group layout",
-            &gpu_culling_bind_group_layout_entries,
+        let gpu_frustum_culling_bind_group_layout = render_device.create_bind_group_layout(
+            "build mesh uniforms GPU frustum culling bind group layout",
+            &gpu_frustum_culling_bind_group_layout_entries,
+        );
+        let gpu_early_occlusion_culling_bind_group_layout = render_device.create_bind_group_layout(
+            "build mesh uniforms GPU early occlusion culling bind group layout",
+            &gpu_early_occlusion_culling_bind_group_layout_entries,
+        );
+        let gpu_late_occlusion_culling_bind_group_layout = render_device.create_bind_group_layout(
+            "build mesh uniforms GPU late occlusion culling bind group layout",
+            &gpu_late_occlusion_culling_bind_group_layout_entries,
         );
         let build_indexed_indirect_params_bind_group_layout = render_device
             .create_bind_group_layout(
@@ -537,18 +803,47 @@ impl FromWorld for PreprocessPipelines {
                 bind_group_layout: direct_bind_group_layout,
                 pipeline_id: None,
             },
-            gpu_culling_preprocess: PreprocessPipeline {
-                bind_group_layout: gpu_culling_bind_group_layout,
+            gpu_frustum_culling_preprocess: PreprocessPipeline {
+                bind_group_layout: gpu_frustum_culling_bind_group_layout,
                 pipeline_id: None,
             },
-            build_indexed_indirect_params: BuildIndirectParametersPipeline {
-                bind_group_layout: build_indexed_indirect_params_bind_group_layout,
+            early_gpu_occlusion_culling_preprocess: PreprocessPipeline {
+                bind_group_layout: gpu_early_occlusion_culling_bind_group_layout,
                 pipeline_id: None,
             },
-            build_non_indexed_indirect_params: BuildIndirectParametersPipeline {
-                bind_group_layout: build_non_indexed_indirect_params_bind_group_layout,
+            late_gpu_occlusion_culling_preprocess: PreprocessPipeline {
+                bind_group_layout: gpu_late_occlusion_culling_bind_group_layout,
                 pipeline_id: None,
             },
+            gpu_frustum_culling_build_indexed_indirect_params: BuildIndirectParametersPipeline {
+                bind_group_layout: build_indexed_indirect_params_bind_group_layout.clone(),
+                pipeline_id: None,
+            },
+            gpu_frustum_culling_build_non_indexed_indirect_params:
+                BuildIndirectParametersPipeline {
+                    bind_group_layout: build_non_indexed_indirect_params_bind_group_layout.clone(),
+                    pipeline_id: None,
+                },
+            early_gpu_occlusion_culling_build_indexed_indirect_params:
+                BuildIndirectParametersPipeline {
+                    bind_group_layout: build_indexed_indirect_params_bind_group_layout.clone(),
+                    pipeline_id: None,
+                },
+            early_gpu_occlusion_culling_build_non_indexed_indirect_params:
+                BuildIndirectParametersPipeline {
+                    bind_group_layout: build_non_indexed_indirect_params_bind_group_layout.clone(),
+                    pipeline_id: None,
+                },
+            late_gpu_occlusion_culling_build_indexed_indirect_params:
+                BuildIndirectParametersPipeline {
+                    bind_group_layout: build_indexed_indirect_params_bind_group_layout,
+                    pipeline_id: None,
+                },
+            late_gpu_occlusion_culling_build_non_indexed_indirect_params:
+                BuildIndirectParametersPipeline {
+                    bind_group_layout: build_non_indexed_indirect_params_bind_group_layout,
+                    pipeline_id: None,
+                },
         }
     }
 }
@@ -580,6 +875,26 @@ fn build_indirect_params_bind_group_layout_entries() -> DynamicBindGroupLayoutEn
     )
 }
 
+fn gpu_culling_bind_group_layout_entries() -> DynamicBindGroupLayoutEntries {
+    // GPU culling bind group parameters are a superset of those in the CPU
+    // culling (direct) shader.
+    preprocess_direct_bind_group_layout_entries().extend_sequential((
+        // `indirect_parameters`
+        storage_buffer::<IndirectParametersMetadata>(/* has_dynamic_offset= */ false),
+        // `mesh_culling_data`
+        storage_buffer_read_only::<MeshCullingData>(/* has_dynamic_offset= */ false),
+        // `view`
+        uniform_buffer::<ViewUniform>(/* has_dynamic_offset= */ true),
+    ))
+}
+
+fn gpu_occlusion_culling_bind_group_layout_entries() -> DynamicBindGroupLayoutEntries {
+    gpu_culling_bind_group_layout_entries().extend_sequential((
+        // `view_visibility`
+        storage_buffer::<u32>(/* has_dynamic_offset= */ false),
+    ))
+}
+
 /// A system that specializes the `mesh_preprocess.wgsl` pipelines if necessary.
 pub fn prepare_preprocess_pipelines(
     pipeline_cache: Res<PipelineCache>,
@@ -595,11 +910,27 @@ pub fn prepare_preprocess_pipelines(
         &mut specialized_preprocess_pipelines,
         PreprocessPipelineKey::empty(),
     );
-    preprocess_pipelines.gpu_culling_preprocess.prepare(
+    preprocess_pipelines.gpu_frustum_culling_preprocess.prepare(
         &pipeline_cache,
         &mut specialized_preprocess_pipelines,
-        PreprocessPipelineKey::GPU_CULLING,
+        PreprocessPipelineKey::FRUSTUM_CULLING,
     );
+    preprocess_pipelines
+        .early_gpu_occlusion_culling_preprocess
+        .prepare(
+            &pipeline_cache,
+            &mut specialized_preprocess_pipelines,
+            PreprocessPipelineKey::FRUSTUM_CULLING
+                | PreprocessPipelineKey::OCCLUSION_CULLING
+                | PreprocessPipelineKey::EARLY,
+        );
+    preprocess_pipelines
+        .late_gpu_occlusion_culling_preprocess
+        .prepare(
+            &pipeline_cache,
+            &mut specialized_preprocess_pipelines,
+            PreprocessPipelineKey::FRUSTUM_CULLING | PreprocessPipelineKey::OCCLUSION_CULLING,
+        );
 
     let mut build_indirect_parameters_pipeline_key = BuildIndirectParametersPipelineKey::empty();
     if render_device
@@ -611,13 +942,31 @@ pub fn prepare_preprocess_pipelines(
             .insert(BuildIndirectParametersPipelineKey::MULTI_DRAW_INDIRECT_COUNT_SUPPORTED);
     }
 
-    preprocess_pipelines.build_indexed_indirect_params.prepare(
-        &pipeline_cache,
-        &mut specialized_build_indirect_parameters_pipelines,
-        build_indirect_parameters_pipeline_key | BuildIndirectParametersPipelineKey::INDEXED,
-    );
     preprocess_pipelines
-        .build_non_indexed_indirect_params
+        .early_gpu_occlusion_culling_build_indexed_indirect_params
+        .prepare(
+            &pipeline_cache,
+            &mut specialized_build_indirect_parameters_pipelines,
+            build_indirect_parameters_pipeline_key
+                | BuildIndirectParametersPipelineKey::INDEXED
+                | BuildIndirectParametersPipelineKey::EARLY,
+        );
+    preprocess_pipelines
+        .early_gpu_occlusion_culling_build_non_indexed_indirect_params
+        .prepare(
+            &pipeline_cache,
+            &mut specialized_build_indirect_parameters_pipelines,
+            build_indirect_parameters_pipeline_key | BuildIndirectParametersPipelineKey::EARLY,
+        );
+    preprocess_pipelines
+        .late_gpu_occlusion_culling_build_indexed_indirect_params
+        .prepare(
+            &pipeline_cache,
+            &mut specialized_build_indirect_parameters_pipelines,
+            build_indirect_parameters_pipeline_key | BuildIndirectParametersPipelineKey::INDEXED,
+        );
+    preprocess_pipelines
+        .late_gpu_occlusion_culling_build_non_indexed_indirect_params
         .prepare(
             &pipeline_cache,
             &mut specialized_build_indirect_parameters_pipelines,
@@ -652,13 +1001,31 @@ impl SpecializedComputePipeline for BuildIndirectParametersPipeline {
         if key.contains(BuildIndirectParametersPipelineKey::MULTI_DRAW_INDIRECT_COUNT_SUPPORTED) {
             shader_defs.push("MULTI_DRAW_INDIRECT_COUNT_SUPPORTED".into());
         }
+        if key.contains(BuildIndirectParametersPipelineKey::OCCLUSION_CULLING) {
+            shader_defs.push("OCCLUSION_CULLING".into());
+        }
+        if key.contains(BuildIndirectParametersPipelineKey::EARLY) {
+            shader_defs.push("EARLY".into());
+        }
+
+        let label = format!(
+            "{} build {}indexed indirect parameters",
+            if !key.contains(BuildIndirectParametersPipelineKey::OCCLUSION_CULLING) {
+                "frustum culling"
+            } else if key.contains(BuildIndirectParametersPipelineKey::EARLY) {
+                "occlusion culling early"
+            } else {
+                "occlusion culling late"
+            },
+            if key.contains(BuildIndirectParametersPipelineKey::INDEXED) {
+                ""
+            } else {
+                "non-"
+            }
+        );
 
         ComputePipelineDescriptor {
-            label: if key.contains(BuildIndirectParametersPipelineKey::INDEXED) {
-                Some("build indexed indirect parameters".into())
-            } else {
-                Some("build non-indexed indirect parameters".into())
-            },
+            label: Some(label.into()),
             layout: vec![self.bind_group_layout.clone()],
             push_constant_ranges: vec![],
             shader: BUILD_INDIRECT_PARAMS_SHADER_HANDLE,
@@ -685,14 +1052,72 @@ impl BuildIndirectParametersPipeline {
     }
 }
 
+/// Extra buffers used for occlusion culling.
+#[derive(Resource, Default)]
+pub struct OcclusionCullingVisibilityBuffers {
+    buffers: EntityHashMap<ViewOcclusionCullingVisibilityBuffers>,
+}
+
+struct ViewOcclusionCullingVisibilityBuffers {
+    current_frame: RawBufferVec<u32>,
+    previous_frame: RawBufferVec<u32>,
+}
+
+pub fn prepare_occlusion_culling_visibility_buffers(
+    mut views: Query<Entity, With<OcclusionCulling>>,
+    batched_instance_buffers: Res<BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>,
+    mut occlusion_culling_visibility_buffers: ResMut<OcclusionCullingVisibilityBuffers>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+) {
+    for view_entity in &mut views {
+        let mut new_visibility_buffer = RawBufferVec::new(BufferUsages::STORAGE);
+        // TODO: Make this more efficient?
+        for _ in 0..batched_instance_buffers.data_buffer.len() {
+            new_visibility_buffer.push(0);
+        }
+        new_visibility_buffer.write_buffer(&render_device, &render_queue);
+
+        match occlusion_culling_visibility_buffers
+            .buffers
+            .entry(view_entity)
+        {
+            Entry::Occupied(mut occupied_entry) => {
+                let existing_visibility_buffers = occupied_entry.get_mut();
+                existing_visibility_buffers.previous_frame = mem::replace(
+                    &mut existing_visibility_buffers.current_frame,
+                    new_visibility_buffer,
+                );
+            }
+
+            Entry::Vacant(vacant_entry) => {
+                let mut previous_frame = RawBufferVec::new(BufferUsages::STORAGE);
+                previous_frame.push(0);
+
+                vacant_entry.insert(ViewOcclusionCullingVisibilityBuffers {
+                    current_frame: new_visibility_buffer,
+                    previous_frame,
+                });
+            }
+        }
+    }
+
+    occlusion_culling_visibility_buffers
+        .buffers
+        .retain(|&view_entity, _| views.contains(view_entity));
+}
+
 /// A system that attaches the mesh uniform buffers to the bind groups for the
 /// variants of the mesh preprocessing compute shader.
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_preprocess_bind_groups(
     mut commands: Commands,
+    view_depth_pyramids: Query<&ViewDepthPyramid>,
     render_device: Res<RenderDevice>,
     batched_instance_buffers: Res<BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>,
     indirect_parameters_buffers: Res<IndirectParametersBuffers>,
     mesh_culling_data_buffer: Res<MeshCullingDataBuffer>,
+    occlusion_culling_visibility_buffers: Res<OcclusionCullingVisibilityBuffers>,
     view_uniforms: Res<ViewUniforms>,
     pipelines: Res<PreprocessPipelines>,
 ) {
@@ -714,20 +1139,34 @@ pub fn prepare_preprocess_bind_groups(
 
     let mut any_indirect = false;
 
-    for (view, work_item_buffer_vec) in work_item_buffers {
-        let bind_groups = match *work_item_buffer_vec {
-            PreprocessWorkItemBuffer::Direct(ref work_item_buffer_vec) => {
-                let Some(work_item_buffer) = work_item_buffer_vec.buffer() else {
-                    continue;
-                };
+    for (view, work_item_buffers) in work_item_buffers {
+        /*
+        let Some(index_buffer) = index_buffer_vec.main_buffer.buffer() else {
+            continue;
+        };
 
+        // Don't use `as_entire_binding()` here; the shader reads the array
+        // length and the underlying buffer may be longer than the actual size
+        // of the vector.
+        let index_buffer_size = NonZero::<u64>::try_from(
+            index_buffer_vec.main_buffer.len() as u64 * u64::from(PreprocessWorkItem::min_size()),
+        )
+        .ok();
+        */
+
+        let bind_group = match *work_item_buffers {
+            PreprocessWorkItemBuffers::Direct(ref work_item_buffer) => {
                 // Don't use `as_entire_binding()` here; the shader reads the array
                 // length and the underlying buffer may be longer than the actual size
                 // of the vector.
                 let work_item_buffer_size = NonZero::<u64>::try_from(
-                    work_item_buffer_vec.len() as u64 * u64::from(PreprocessWorkItem::min_size()),
+                    work_item_buffer.len() as u64 * u64::from(PreprocessWorkItem::min_size()),
                 )
                 .ok();
+
+                let Some(work_item_buffer) = work_item_buffer.buffer() else {
+                    continue;
+                };
 
                 PreprocessBindGroups::Direct(render_device.create_bind_group(
                     "preprocess_direct_bind_group",
@@ -745,9 +1184,222 @@ pub fn prepare_preprocess_bind_groups(
                 ))
             }
 
-            PreprocessWorkItemBuffer::Indirect {
-                indexed: ref indexed_buffer,
-                non_indexed: ref non_indexed_buffer,
+            PreprocessWorkItemBuffers::Indirect {
+                indexed: ref indexed_work_item_buffer,
+                non_indexed: ref non_indexed_work_item_buffer,
+                gpu_occlusion_culling: true,
+            } => {
+                let (
+                    Some(mesh_culling_data_buffer),
+                    Some(view_uniforms_binding),
+                    Some(view_occlusion_culling_visibility_buffers),
+                    Ok(view_depth_pyramid),
+                ) = (
+                    mesh_culling_data_buffer.buffer(),
+                    view_uniforms.uniforms.binding(),
+                    occlusion_culling_visibility_buffers.buffers.get(view),
+                    view_depth_pyramids.get(*view),
+                )
+                else {
+                    continue;
+                };
+
+                let (
+                    Some(occlusion_culling_visibility_buffer),
+                    Some(previous_frame_occlusion_culling_visibility_buffer),
+                ) = (
+                    view_occlusion_culling_visibility_buffers
+                        .current_frame
+                        .buffer(),
+                    view_occlusion_culling_visibility_buffers
+                        .previous_frame
+                        .buffer(),
+                )
+                else {
+                    continue;
+                };
+
+                any_indirect = true;
+
+                PreprocessBindGroups::IndirectOcclusionCulling {
+                    early_indexed: match (
+                        indirect_parameters_buffers.indexed_metadata_buffer(),
+                        indexed_work_item_buffer.buffer(),
+                    ) {
+                        (Some(indexed_metadata_buffer), Some(indexed_work_item_gpu_buffer)) => {
+                            // Don't use `as_entire_binding()` here; the shader reads the array
+                            // length and the underlying buffer may be longer than the actual size
+                            // of the vector.
+                            let indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                indexed_work_item_buffer.len() as u64
+                                    * u64::from(PreprocessWorkItem::min_size()),
+                            )
+                            .ok();
+
+                            Some(
+                                render_device.create_bind_group(
+                                    "preprocess_early_indexed_gpu_occlusion_culling_bind_group",
+                                    &pipelines
+                                        .early_gpu_occlusion_culling_preprocess
+                                        .bind_group_layout,
+                                    &BindGroupEntries::sequential((
+                                        current_input_buffer.as_entire_binding(),
+                                        previous_input_buffer.as_entire_binding(),
+                                        BindingResource::Buffer(BufferBinding {
+                                            buffer: indexed_work_item_gpu_buffer,
+                                            offset: 0,
+                                            size: indexed_work_item_buffer_size,
+                                        }),
+                                        data_buffer.as_entire_binding(),
+                                        indexed_metadata_buffer.as_entire_binding(),
+                                        mesh_culling_data_buffer.as_entire_binding(),
+                                        view_uniforms_binding.clone(),
+                                        occlusion_culling_visibility_buffer.as_entire_binding(),
+                                        previous_frame_occlusion_culling_visibility_buffer
+                                            .as_entire_binding(),
+                                    )),
+                                ),
+                            )
+                        }
+                        _ => None,
+                    },
+
+                    early_non_indexed: match (
+                        indirect_parameters_buffers.non_indexed_metadata_buffer(),
+                        non_indexed_work_item_buffer.buffer(),
+                    ) {
+                        (
+                            Some(non_indexed_metadata_buffer),
+                            Some(non_indexed_work_item_gpu_buffer),
+                        ) => {
+                            // Don't use `as_entire_binding()` here; the shader reads the array
+                            // length and the underlying buffer may be longer than the actual size
+                            // of the vector.
+                            let non_indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                non_indexed_work_item_buffer.len() as u64
+                                    * u64::from(PreprocessWorkItem::min_size()),
+                            )
+                            .ok();
+
+                            Some(
+                                render_device.create_bind_group(
+                                    "preprocess_early_non_indexed_gpu_occlusion_culling_bind_group",
+                                    &pipelines
+                                        .early_gpu_occlusion_culling_preprocess
+                                        .bind_group_layout,
+                                    &BindGroupEntries::sequential((
+                                        current_input_buffer.as_entire_binding(),
+                                        previous_input_buffer.as_entire_binding(),
+                                        BindingResource::Buffer(BufferBinding {
+                                            buffer: non_indexed_work_item_gpu_buffer,
+                                            offset: 0,
+                                            size: non_indexed_work_item_buffer_size,
+                                        }),
+                                        data_buffer.as_entire_binding(),
+                                        non_indexed_metadata_buffer.as_entire_binding(),
+                                        mesh_culling_data_buffer.as_entire_binding(),
+                                        view_uniforms_binding.clone(),
+                                        occlusion_culling_visibility_buffer.as_entire_binding(),
+                                        previous_frame_occlusion_culling_visibility_buffer
+                                            .as_entire_binding(),
+                                    )),
+                                ),
+                            )
+                        }
+                        _ => None,
+                    },
+
+                    late_indexed: match (
+                        indirect_parameters_buffers.indexed_metadata_buffer(),
+                        indexed_work_item_buffer.buffer(),
+                    ) {
+                        (Some(indexed_metadata_buffer), Some(indexed_work_item_gpu_buffer)) => {
+                            // Don't use `as_entire_binding()` here; the shader reads the array
+                            // length and the underlying buffer may be longer than the actual size
+                            // of the vector.
+                            let indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                indexed_work_item_buffer.len() as u64
+                                    * u64::from(PreprocessWorkItem::min_size()),
+                            )
+                            .ok();
+
+                            Some(
+                                render_device.create_bind_group(
+                                    "preprocess_late_indexed_gpu_occlusion_culling_bind_group",
+                                    &pipelines
+                                        .late_gpu_occlusion_culling_preprocess
+                                        .bind_group_layout,
+                                    &BindGroupEntries::sequential((
+                                        current_input_buffer.as_entire_binding(),
+                                        previous_input_buffer.as_entire_binding(),
+                                        BindingResource::Buffer(BufferBinding {
+                                            buffer: indexed_work_item_gpu_buffer,
+                                            offset: 0,
+                                            size: indexed_work_item_buffer_size,
+                                        }),
+                                        data_buffer.as_entire_binding(),
+                                        indexed_metadata_buffer.as_entire_binding(),
+                                        mesh_culling_data_buffer.as_entire_binding(),
+                                        view_uniforms_binding.clone(),
+                                        occlusion_culling_visibility_buffer.as_entire_binding(),
+                                        &view_depth_pyramid.all_mips,
+                                    )),
+                                ),
+                            )
+                        }
+                        _ => None,
+                    },
+
+                    late_non_indexed: match (
+                        indirect_parameters_buffers.non_indexed_metadata_buffer(),
+                        non_indexed_work_item_buffer.buffer(),
+                    ) {
+                        (
+                            Some(non_indexed_metadata_buffer),
+                            Some(non_indexed_work_item_gpu_buffer),
+                        ) => {
+                            // Don't use `as_entire_binding()` here; the shader reads the array
+                            // length and the underlying buffer may be longer than the actual size
+                            // of the vector.
+                            let non_indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                non_indexed_work_item_buffer.len() as u64
+                                    * u64::from(PreprocessWorkItem::min_size()),
+                            )
+                            .ok();
+
+                            Some(
+                                render_device.create_bind_group(
+                                    "preprocess_late_non_indexed_gpu_occlusion_culling_bind_group",
+                                    &pipelines
+                                        .late_gpu_occlusion_culling_preprocess
+                                        .bind_group_layout,
+                                    &BindGroupEntries::sequential((
+                                        current_input_buffer.as_entire_binding(),
+                                        previous_input_buffer.as_entire_binding(),
+                                        BindingResource::Buffer(BufferBinding {
+                                            buffer: non_indexed_work_item_gpu_buffer,
+                                            offset: 0,
+                                            size: non_indexed_work_item_buffer_size,
+                                        }),
+                                        data_buffer.as_entire_binding(),
+                                        non_indexed_metadata_buffer.as_entire_binding(),
+                                        mesh_culling_data_buffer.as_entire_binding(),
+                                        view_uniforms_binding.clone(),
+                                        occlusion_culling_visibility_buffer.as_entire_binding(),
+                                        &view_depth_pyramid.all_mips,
+                                    )),
+                                ),
+                            )
+                        }
+                        _ => None,
+                    },
+                }
+            }
+
+            PreprocessWorkItemBuffers::Indirect {
+                indexed: ref indexed_work_item_buffer,
+                non_indexed: ref non_indexed_work_item_buffer,
+                gpu_occlusion_culling: false,
             } => {
                 let (Some(mesh_culling_data_buffer), Some(view_uniforms_binding)) = (
                     mesh_culling_data_buffer.buffer(),
@@ -756,89 +1408,92 @@ pub fn prepare_preprocess_bind_groups(
                     continue;
                 };
 
-                let indexed_bind_group = match (
-                    indexed_buffer.buffer(),
-                    indirect_parameters_buffers.indexed_metadata_buffer(),
-                ) {
-                    (
-                        Some(indexed_work_item_buffer),
-                        Some(indexed_indirect_parameters_metadata_buffer),
-                    ) => {
-                        // Don't use `as_entire_binding()` here; the shader reads the array
-                        // length and the underlying buffer may be longer than the actual size
-                        // of the vector.
-                        let indexed_work_item_buffer_size = NonZero::<u64>::try_from(
-                            indexed_buffer.len() as u64 * u64::from(PreprocessWorkItem::min_size()),
-                        )
-                        .ok();
-                        Some(render_device.create_bind_group(
-                            "preprocess_indexed_indirect_gpu_culling_bind_group",
-                            &pipelines.gpu_culling_preprocess.bind_group_layout,
-                            &BindGroupEntries::sequential((
-                                current_input_buffer.as_entire_binding(),
-                                previous_input_buffer.as_entire_binding(),
-                                BindingResource::Buffer(BufferBinding {
-                                    buffer: indexed_work_item_buffer,
-                                    offset: 0,
-                                    size: indexed_work_item_buffer_size,
-                                }),
-                                data_buffer.as_entire_binding(),
-                                indexed_indirect_parameters_metadata_buffer.as_entire_binding(),
-                                mesh_culling_data_buffer.as_entire_binding(),
-                                view_uniforms_binding.clone(),
-                            )),
-                        ))
-                    }
-                    _ => None,
-                };
+                PreprocessBindGroups::IndirectFrustumCulling {
+                    indexed: match (
+                        indirect_parameters_buffers.indexed_metadata_buffer(),
+                        indexed_work_item_buffer.buffer(),
+                    ) {
+                        (Some(indexed_metadata_buffer), Some(indexed_work_item_gpu_buffer)) => {
+                            // Don't use `as_entire_binding()` here; the shader reads the array
+                            // length and the underlying buffer may be longer than the actual size
+                            // of the vector.
+                            let indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                indexed_work_item_buffer.len() as u64
+                                    * u64::from(PreprocessWorkItem::min_size()),
+                            )
+                            .ok();
 
-                let non_indexed_bind_group = match (
-                    non_indexed_buffer.buffer(),
-                    indirect_parameters_buffers.non_indexed_metadata_buffer(),
-                ) {
-                    (
-                        Some(non_indexed_work_item_buffer),
-                        Some(non_indexed_indirect_parameters_metadata_buffer),
-                    ) => {
-                        // Don't use `as_entire_binding()` here; the shader reads the array
-                        // length and the underlying buffer may be longer than the actual size
-                        // of the vector.
-                        let non_indexed_work_item_buffer_size = NonZero::<u64>::try_from(
-                            non_indexed_buffer.len() as u64
-                                * u64::from(PreprocessWorkItem::min_size()),
-                        )
-                        .ok();
-                        Some(render_device.create_bind_group(
-                            "preprocess_non_indexed_indirect_gpu_culling_bind_group",
-                            &pipelines.gpu_culling_preprocess.bind_group_layout,
-                            &BindGroupEntries::sequential((
-                                current_input_buffer.as_entire_binding(),
-                                previous_input_buffer.as_entire_binding(),
-                                BindingResource::Buffer(BufferBinding {
-                                    buffer: non_indexed_work_item_buffer,
-                                    offset: 0,
-                                    size: non_indexed_work_item_buffer_size,
-                                }),
-                                data_buffer.as_entire_binding(),
-                                non_indexed_indirect_parameters_metadata_buffer.as_entire_binding(),
-                                mesh_culling_data_buffer.as_entire_binding(),
-                                view_uniforms_binding,
-                            )),
-                        ))
-                    }
-                    _ => None,
-                };
+                            Some(
+                                render_device.create_bind_group(
+                                    "preprocess_gpu_indexed_frustum_culling_bind_group",
+                                    &pipelines
+                                        .gpu_frustum_culling_build_indexed_indirect_params
+                                        .bind_group_layout,
+                                    &BindGroupEntries::sequential((
+                                        current_input_buffer.as_entire_binding(),
+                                        previous_input_buffer.as_entire_binding(),
+                                        BindingResource::Buffer(BufferBinding {
+                                            buffer: indexed_work_item_gpu_buffer,
+                                            offset: 0,
+                                            size: indexed_work_item_buffer_size,
+                                        }),
+                                        data_buffer.as_entire_binding(),
+                                        indexed_metadata_buffer.as_entire_binding(),
+                                        mesh_culling_data_buffer.as_entire_binding(),
+                                        view_uniforms_binding.clone(),
+                                    )),
+                                ),
+                            )
+                        }
+                        _ => None,
+                    },
 
-                any_indirect = true;
+                    non_indexed: match (
+                        indirect_parameters_buffers.non_indexed_metadata_buffer(),
+                        non_indexed_work_item_buffer.buffer(),
+                    ) {
+                        (
+                            Some(non_indexed_metadata_buffer),
+                            Some(non_indexed_work_item_gpu_buffer),
+                        ) => {
+                            // Don't use `as_entire_binding()` here; the shader reads the array
+                            // length and the underlying buffer may be longer than the actual size
+                            // of the vector.
+                            let non_indexed_work_item_buffer_size = NonZero::<u64>::try_from(
+                                non_indexed_work_item_buffer.len() as u64
+                                    * u64::from(PreprocessWorkItem::min_size()),
+                            )
+                            .ok();
 
-                PreprocessBindGroups::Indirect {
-                    indexed: indexed_bind_group,
-                    non_indexed: non_indexed_bind_group,
+                            Some(
+                                render_device.create_bind_group(
+                                    "preprocess_gpu_non_indexed_frustum_culling_bind_group",
+                                    &pipelines
+                                        .gpu_frustum_culling_build_non_indexed_indirect_params
+                                        .bind_group_layout,
+                                    &BindGroupEntries::sequential((
+                                        current_input_buffer.as_entire_binding(),
+                                        previous_input_buffer.as_entire_binding(),
+                                        BindingResource::Buffer(BufferBinding {
+                                            buffer: non_indexed_work_item_gpu_buffer,
+                                            offset: 0,
+                                            size: non_indexed_work_item_buffer_size,
+                                        }),
+                                        data_buffer.as_entire_binding(),
+                                        non_indexed_metadata_buffer.as_entire_binding(),
+                                        mesh_culling_data_buffer.as_entire_binding(),
+                                        view_uniforms_binding.clone(),
+                                    )),
+                                ),
+                            )
+                        }
+                        _ => None,
+                    },
                 }
             }
         };
 
-        commands.entity(*view).insert(bind_groups);
+        commands.entity(*view).insert(bind_group);
     }
 
     if any_indirect {
@@ -869,16 +1524,22 @@ fn create_build_indirect_parameters_bind_groups(
                 Some(indexed_indirect_parameters_metadata_buffer),
                 Some(indexed_indirect_parameters_data_buffer),
                 Some(indexed_batch_sets_buffer),
-            ) => Some(render_device.create_bind_group(
-                "build_indexed_indirect_parameters_bind_group",
-                &pipelines.build_indexed_indirect_params.bind_group_layout,
-                &BindGroupEntries::sequential((
-                    current_input_buffer.as_entire_binding(),
-                    indexed_indirect_parameters_metadata_buffer.as_entire_binding(),
-                    indexed_batch_sets_buffer.as_entire_binding(),
-                    indexed_indirect_parameters_data_buffer.as_entire_binding(),
-                )),
-            )),
+            ) => Some(
+                render_device.create_bind_group(
+                    "build_indexed_indirect_parameters_bind_group",
+                    // The frustum culling bind group is good for occlusion culling
+                    // too. They bind the same buffers.
+                    &pipelines
+                        .gpu_frustum_culling_build_indexed_indirect_params
+                        .bind_group_layout,
+                    &BindGroupEntries::sequential((
+                        current_input_buffer.as_entire_binding(),
+                        indexed_indirect_parameters_metadata_buffer.as_entire_binding(),
+                        indexed_batch_sets_buffer.as_entire_binding(),
+                        indexed_indirect_parameters_data_buffer.as_entire_binding(),
+                    )),
+                ),
+            ),
             _ => None,
         },
         non_indexed: match (
@@ -893,8 +1554,10 @@ fn create_build_indirect_parameters_bind_groups(
             ) => Some(
                 render_device.create_bind_group(
                     "build_non_indexed_indirect_parameters_bind_group",
+                    // The frustum culling bind group is good for occlusion culling
+                    // too. They bind the same buffers.
                     &pipelines
-                        .build_non_indexed_indirect_params
+                        .gpu_frustum_culling_build_non_indexed_indirect_params
                         .bind_group_layout,
                     &BindGroupEntries::sequential((
                         current_input_buffer.as_entire_binding(),

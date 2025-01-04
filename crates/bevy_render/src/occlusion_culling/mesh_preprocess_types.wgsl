@@ -50,7 +50,8 @@ struct IndirectParametersMetadata {
     mesh_index: u32,
     base_output_index: u32,
     batch_set_index: u32,
-    instance_count: atomic<u32>,
+    early_instance_count: atomic<u32>,
+    late_instance_count: atomic<u32>,
 }
 
 struct IndirectBatchSet {

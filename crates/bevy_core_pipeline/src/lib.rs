@@ -16,8 +16,10 @@ pub mod deferred;
 pub mod dof;
 pub mod fullscreen_vertex_shader;
 pub mod fxaa;
+pub mod mip_generation;
 pub mod motion_blur;
 pub mod msaa_writeback;
+pub mod occlusion_culling;
 pub mod oit;
 pub mod post_process;
 pub mod prepass;
@@ -27,6 +29,7 @@ mod taa;
 pub mod tonemapping;
 pub mod upscaling;
 
+use occlusion_culling::OcclusionCullingCorePipelinePlugin;
 pub use skybox::Skybox;
 
 /// Experimental features that are not yet finished. Please report any issues you encounter!
@@ -64,6 +67,7 @@ use crate::{
     dof::DepthOfFieldPlugin,
     fullscreen_vertex_shader::FULLSCREEN_SHADER_HANDLE,
     fxaa::FxaaPlugin,
+    mip_generation::MipGenerationPlugin,
     motion_blur::MotionBlurPlugin,
     msaa_writeback::MsaaWritebackPlugin,
     post_process::PostProcessingPlugin,
@@ -93,10 +97,8 @@ impl Plugin for CorePipelinePlugin {
             .register_type::<NormalPrepass>()
             .register_type::<MotionVectorPrepass>()
             .register_type::<DeferredPrepass>()
+            .add_plugins((Core2dPlugin, Core3dPlugin, CopyDeferredLightingIdPlugin))
             .add_plugins((
-                Core2dPlugin,
-                Core3dPlugin,
-                CopyDeferredLightingIdPlugin,
                 BlitPlugin,
                 MsaaWritebackPlugin,
                 TonemappingPlugin,
@@ -109,6 +111,8 @@ impl Plugin for CorePipelinePlugin {
                 SmaaPlugin,
                 PostProcessingPlugin,
                 OrderIndependentTransparencyPlugin,
+                MipGenerationPlugin,
+                OcclusionCullingCorePipelinePlugin,
             ));
     }
 }

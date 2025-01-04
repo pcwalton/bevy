@@ -31,6 +31,7 @@ pub mod globals;
 pub mod gpu_component_array_buffer;
 pub mod gpu_readback;
 pub mod mesh;
+pub mod occlusion_culling;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pipelined_rendering;
 pub mod primitives;
@@ -79,6 +80,7 @@ use bevy_hierarchy::ValidParentCheckPlugin;
 use bevy_window::{PrimaryWindow, RawHandleWrapperHolder};
 use extract_resource::ExtractResourcePlugin;
 use globals::GlobalsPlugin;
+use occlusion_culling::OcclusionCullingPlugin;
 use render_asset::RenderAssetBytesPerFrame;
 use renderer::{RenderAdapter, RenderDevice, RenderQueue};
 use settings::RenderResources;
@@ -363,6 +365,7 @@ impl Plugin for RenderPlugin {
             SyncWorldPlugin,
             StoragePlugin,
             GpuReadbackPlugin::default(),
+            OcclusionCullingPlugin,
         ));
 
         app.init_resource::<RenderAssetBytesPerFrame>()
