@@ -2746,6 +2746,10 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
                             indirect_parameters_range.end - indirect_parameters_range.start;
                         match batch_set_index {
                             Some(batch_set_index) => {
+                                println!(
+                                    "batch set index={} max count={}",
+                                    batch_set_index, indirect_parameters_count
+                                );
                                 let count_offset = u32::from(batch_set_index)
                                     * (size_of::<IndirectBatchSet>() as u32);
                                 pass.multi_draw_indexed_indirect_count(

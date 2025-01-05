@@ -245,8 +245,10 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         atomicLoad(&indirect_parameters_metadata[indirect_parameters_index].early_instance_count) +
         atomicAdd(&indirect_parameters_metadata[indirect_parameters_index].late_instance_count, 1u);
 #else   // LATE
-    let batch_output_index =
-        atomicAdd(&indirect_parameters_metadata[indirect_parameters_index].early_instance_count, 1u);
+    let batch_output_index = atomicAdd(
+        &indirect_parameters_metadata[indirect_parameters_index].early_instance_count,
+        1u
+    );
 #endif  // LATE
 
     let mesh_output_index =

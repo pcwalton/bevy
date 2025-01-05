@@ -7,6 +7,7 @@
 //! derived fields in [`MeshUniform`].
 
 use core::{mem, num::NonZero};
+use std::num::NonZeroU64;
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Handle};
@@ -742,7 +743,10 @@ fn run_build_indirect_parameters_node(
             .div_ceil(WORKGROUP_SIZE);
         if workgroup_count > 0 {
             if debug {
-                println!("reset ind {:?}", indirect_parameters_buffers.batch_set_count(true));
+                println!(
+                    "reset ind {:?}",
+                    indirect_parameters_buffers.batch_set_count(true)
+                );
             }
             compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         }
@@ -775,7 +779,10 @@ fn run_build_indirect_parameters_node(
             .div_ceil(WORKGROUP_SIZE);
         if workgroup_count > 0 {
             if debug {
-                println!("reset non-ind {:?}", indirect_parameters_buffers.batch_set_count(false));
+                println!(
+                    "reset non-ind {:?}",
+                    indirect_parameters_buffers.batch_set_count(false)
+                );
             }
             compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         }
@@ -787,7 +794,10 @@ fn run_build_indirect_parameters_node(
             .div_ceil(WORKGROUP_SIZE);
         if workgroup_count > 0 {
             if debug {
-                println!("build non-ind {:?}", indirect_parameters_buffers.non_indexed_len());
+                println!(
+                    "build non-ind {:?}",
+                    indirect_parameters_buffers.non_indexed_len()
+                );
             }
             compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         }
@@ -1102,14 +1112,14 @@ pub fn prepare_preprocess_pipelines(
         );
 
     let mut build_indirect_parameters_pipeline_key = BuildIndirectParametersPipelineKey::empty();
-    /*if render_device
+    if render_device
         .wgpu_device()
         .features()
         .contains(WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT)
     {
         build_indirect_parameters_pipeline_key
             .insert(BuildIndirectParametersPipelineKey::MULTI_DRAW_INDIRECT_COUNT_SUPPORTED);
-    }*/
+    }
 
     preprocess_pipelines
         .gpu_frustum_culling_build_indexed_indirect_params
@@ -1817,7 +1827,16 @@ fn create_build_indirect_parameters_bind_groups(
                         .bind_group_layout,
                     &BindGroupEntries::sequential((
                         current_input_buffer.as_entire_binding(),
-                        indexed_indirect_parameters_metadata_buffer.as_entire_binding(),
+                        // Don't use `as_entire_binding` here; the shader reads
+                        // the length and `RawBufferVec` overallocates.
+                        BufferBinding {
+                            buffer: indexed_indirect_parameters_metadata_buffer,
+                            offset: 0,
+                            size: NonZeroU64::new(
+                                indirect_parameters_buffer.indexed_len() as u64
+                                    * mem::size_of::<IndirectParametersMetadata>() as u64,
+                            ),
+                        },
                         indexed_batch_sets_buffer.as_entire_binding(),
                         indexed_indirect_parameters_data_buffer.as_entire_binding(),
                     )),
@@ -1845,7 +1864,16 @@ fn create_build_indirect_parameters_bind_groups(
                         .bind_group_layout,
                     &BindGroupEntries::sequential((
                         current_input_buffer.as_entire_binding(),
-                        non_indexed_indirect_parameters_metadata_buffer.as_entire_binding(),
+                        // Don't use `as_entire_binding` here; the shader reads
+                        // the length and `RawBufferVec` overallocates.
+                        BufferBinding {
+                            buffer: non_indexed_indirect_parameters_metadata_buffer,
+                            offset: 0,
+                            size: NonZeroU64::new(
+                                indirect_parameters_buffer.non_indexed_len() as u64
+                                    * mem::size_of::<IndirectParametersMetadata>() as u64,
+                            ),
+                        },
                         non_indexed_batch_sets_buffer.as_entire_binding(),
                         non_indexed_indirect_parameters_data_buffer.as_entire_binding(),
                     )),

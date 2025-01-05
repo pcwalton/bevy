@@ -50,6 +50,7 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
 #endif  // EARLY_PHASE
 
     var indirect_parameters_index = instance_index;
+
 #ifdef MULTI_DRAW_INDIRECT_COUNT_SUPPORTED
     if (instance_count == 0u) {
         return;
