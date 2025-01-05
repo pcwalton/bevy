@@ -6,8 +6,7 @@
 //! [`MeshInputUniform`]s instead and use the GPU to calculate the remaining
 //! derived fields in [`MeshUniform`].
 
-use core::{mem, num::NonZero};
-use std::num::NonZeroU64;
+use core::{mem, num::{NonZero, NonZeroU64}};
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, Handle};
@@ -511,7 +510,6 @@ impl Node for LateGpuPreprocessNode {
                 });
 
         // Run the compute passes.
-        println!("--- begin late mesh preprocessing ---");
         for (view, bind_groups, view_uniform_offset) in self.view_query.iter_manual(world) {
             // Grab the work item buffers for this view.
             let Some(phase_work_item_buffers) = work_item_buffers.get(&view) else {
@@ -540,31 +538,20 @@ impl Node for LateGpuPreprocessNode {
 
             for (phase_type_id, work_item_buffers) in phase_work_item_buffers {
                 let (
-                    &PreprocessWorkItemBuffers::Indirect {
-                        indexed: ref indexed_work_item_buffer,
-                        non_indexed: ref non_indexed_work_item_buffer,
+                    PreprocessWorkItemBuffers::Indirect {
+                        indexed: indexed_work_item_buffer,
+                        non_indexed: non_indexed_work_item_buffer,
                         ..
                     },
-                    Some(&PhasePreprocessBindGroups::IndirectOcclusionCulling {
-                        late_indexed: ref late_indexed_bind_group,
-                        late_non_indexed: ref late_non_indexed_bind_group,
+                    Some(PhasePreprocessBindGroups::IndirectOcclusionCulling {
+                        late_indexed: late_indexed_bind_group,
+                        late_non_indexed: late_non_indexed_bind_group,
                         ..
                     }),
                 ) = (work_item_buffers, bind_groups.get(phase_type_id))
                 else {
                     continue;
                 };
-
-                if !indexed_work_item_buffer.is_empty() || !non_indexed_work_item_buffer.is_empty()
-                {
-                    println!(
-                        "drawing view {:?} phase {:?} ind={:?} nonind={:?}",
-                        view,
-                        phase_type_id,
-                        indexed_work_item_buffer.len(),
-                        non_indexed_work_item_buffer.len(),
-                    );
-                }
 
                 let mut dynamic_offsets: SmallVec<[u32; 1]> = smallvec![];
                 dynamic_offsets.push(view_uniform_offset.offset);
@@ -590,7 +577,6 @@ impl Node for LateGpuPreprocessNode {
                 }
             }
         }
-        println!("--- end late mesh preprocessing ---");
 
         Ok(())
     }
@@ -614,7 +600,6 @@ impl Node for EarlyPrepassBuildIndirectParametersNode {
             world,
             &preprocess_pipelines.early_phase,
             "early indirect parameters building",
-            false,
         )
     }
 }
@@ -637,7 +622,6 @@ impl Node for LatePrepassBuildIndirectParametersNode {
             world,
             &preprocess_pipelines.late_phase,
             "late prepass indirect parameters building",
-            true,
         )
     }
 }
@@ -660,7 +644,6 @@ impl Node for MainBuildIndirectParametersNode {
             world,
             &preprocess_pipelines.main_phase,
             "main indirect parameters building",
-            false,
         )
     }
 }
@@ -670,12 +653,7 @@ fn run_build_indirect_parameters_node(
     world: &World,
     preprocess_phase_pipelines: &PreprocessPhasePipelines,
     label: &'static str,
-    debug: bool,
 ) -> Result<(), NodeRunError> {
-    if debug {
-        println!("--- start late build indirect parameters node ---");
-    }
-
     let Some(build_indirect_params_bind_groups) =
         world.get_resource::<BuildIndirectParametersBindGroups>()
     else {
@@ -742,12 +720,6 @@ fn run_build_indirect_parameters_node(
             .batch_set_count(true)
             .div_ceil(WORKGROUP_SIZE);
         if workgroup_count > 0 {
-            if debug {
-                println!(
-                    "reset ind {:?}",
-                    indirect_parameters_buffers.batch_set_count(true)
-                );
-            }
             compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         }
 
@@ -757,9 +729,6 @@ fn run_build_indirect_parameters_node(
             .indexed_len()
             .div_ceil(WORKGROUP_SIZE);
         if workgroup_count > 0 {
-            if debug {
-                println!("build ind {:?}", indirect_parameters_buffers.indexed_len());
-            }
             compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         }
     }
@@ -778,12 +747,6 @@ fn run_build_indirect_parameters_node(
             .batch_set_count(false)
             .div_ceil(WORKGROUP_SIZE);
         if workgroup_count > 0 {
-            if debug {
-                println!(
-                    "reset non-ind {:?}",
-                    indirect_parameters_buffers.batch_set_count(false)
-                );
-            }
             compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         }
 
@@ -793,18 +756,8 @@ fn run_build_indirect_parameters_node(
             .non_indexed_len()
             .div_ceil(WORKGROUP_SIZE);
         if workgroup_count > 0 {
-            if debug {
-                println!(
-                    "build non-ind {:?}",
-                    indirect_parameters_buffers.non_indexed_len()
-                );
-            }
             compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         }
-    }
-
-    if debug {
-        println!("--- end late build indirect parameters node ---");
     }
 
     Ok(())
@@ -1834,7 +1787,7 @@ fn create_build_indirect_parameters_bind_groups(
                             offset: 0,
                             size: NonZeroU64::new(
                                 indirect_parameters_buffer.indexed_len() as u64
-                                    * mem::size_of::<IndirectParametersMetadata>() as u64,
+                                    * size_of::<IndirectParametersMetadata>() as u64,
                             ),
                         },
                         indexed_batch_sets_buffer.as_entire_binding(),
@@ -1871,7 +1824,7 @@ fn create_build_indirect_parameters_bind_groups(
                             offset: 0,
                             size: NonZeroU64::new(
                                 indirect_parameters_buffer.non_indexed_len() as u64
-                                    * mem::size_of::<IndirectParametersMetadata>() as u64,
+                                    * size_of::<IndirectParametersMetadata>() as u64,
                             ),
                         },
                         non_indexed_batch_sets_buffer.as_entire_binding(),

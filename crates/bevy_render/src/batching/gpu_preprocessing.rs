@@ -11,7 +11,7 @@ use bevy_ecs::{
     world::{FromWorld, World},
 };
 use bevy_encase_derive::ShaderType;
-use bevy_utils::{default, tracing::error, Entry, HashMap, RandomState, TypeIdMap};
+use bevy_utils::{default, tracing::error, TypeIdMap};
 use bytemuck::{Pod, Zeroable};
 use nonmax::NonMaxU32;
 use wgpu::{BindingResource, BufferUsages, DownlevelFlags, Features};
@@ -26,7 +26,6 @@ use crate::{
     },
     render_resource::{Buffer, BufferVec, GpuArrayBufferable, RawBufferVec, UninitBufferVec},
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
-    sync_world::MainEntity,
     view::{ExtractedView, NoIndirectDrawing},
     Render, RenderApp, RenderSet,
 };
@@ -422,7 +421,6 @@ pub struct IndirectBatchSet {
 /// The buffer containing the list of [`IndirectParameters`], for draw commands.
 #[derive(Resource)]
 pub struct IndirectParametersBuffers {
-    max_batch_set_index: u32,
     non_indexed_data: UninitBufferVec<IndirectParametersNonIndexed>,
     non_indexed_metadata: RawBufferVec<IndirectParametersMetadata>,
     non_indexed_batch_sets: RawBufferVec<IndirectBatchSet>,
@@ -435,7 +433,6 @@ impl IndirectParametersBuffers {
     /// Creates the indirect parameters buffer.
     pub fn new() -> IndirectParametersBuffers {
         IndirectParametersBuffers {
-            max_batch_set_index: 0,
             non_indexed_data: UninitBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT),
             non_indexed_metadata: RawBufferVec::new(BufferUsages::STORAGE),
             non_indexed_batch_sets: RawBufferVec::new(
@@ -511,11 +508,6 @@ impl IndirectParametersBuffers {
     }
 
     pub fn set_indexed(&mut self, index: u32, value: IndirectParametersMetadata) {
-        if value.batch_set_index != !0 {
-            assert!(value.batch_set_index >= self.max_batch_set_index);
-            self.max_batch_set_index = value.batch_set_index.max(self.max_batch_set_index);
-        }
-
         self.indexed_metadata.set(index, value);
     }
 
@@ -779,7 +771,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
         // Create the work item buffer if necessary.
         let work_item_buffer = work_item_buffers
             .entry(view)
-            .or_insert_with(|| TypeIdMap::default())
+            .or_insert_with(TypeIdMap::default)
             .entry(TypeId::of::<I>())
             .or_insert_with(|| {
                 PreprocessWorkItemBuffers::new(no_indirect_drawing, gpu_occlusion_culling)
@@ -867,7 +859,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
             // Add a new preprocessing work item so that the preprocessing
             // shader will copy the per-instance data over.
             if let Some(batch) = batch.as_ref() {
-                /*work_item_buffer.push(
+                work_item_buffer.push(
                     item_is_indexed,
                     PreprocessWorkItem {
                         input_index: current_input_index.into(),
@@ -881,7 +873,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
                             None => 0,
                         },
                     },
-                );*/
+                );
             }
         }
 
@@ -912,8 +904,6 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
     } = gpu_array_buffer.into_inner();
 
     for (view, no_indirect_drawing, gpu_occlusion_culling) in &mut views {
-        let mut seen_input_indices = HashMap::new();
-
         let Some(phase) = binned_render_phases.get_mut(&view) else {
             continue;
         };
@@ -922,15 +912,13 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
         // used this frame.
         let work_item_buffer = work_item_buffers
             .entry(view)
-            .or_insert_with(|| TypeIdMap::default())
+            .or_insert_with(TypeIdMap::default)
             .entry(TypeId::of::<BPI>())
             .or_insert_with(|| {
                 PreprocessWorkItemBuffers::new(no_indirect_drawing, gpu_occlusion_culling)
             });
 
         // Prepare multidrawables.
-
-        let mut max_batch_set_index = 0;
 
         for batch_set_key in &phase.multidrawable_mesh_keys {
             let mut batch_set = None;
@@ -946,13 +934,6 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                         continue;
                     };
                     let output_index = data_buffer.add() as u32;
-
-                    check_seen_input_indices(
-                        &mut seen_input_indices,
-                        input_index,
-                        entity,
-                        main_entity,
-                    );
 
                     match batch {
                         Some(ref mut batch) => {
@@ -982,16 +963,6 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                             let batch_set_index = indirect_parameters_buffers
                                 .get_next_batch_set_index(batch_set_key.indexed());
 
-                            assert!(u32::from(batch_set_index.unwrap()) >= max_batch_set_index);
-                            max_batch_set_index =
-                                max_batch_set_index.max(u32::from(batch_set_index.unwrap()));
-
-                            println!(
-                                "adding batch indirect params view={:?} phase={:?} batch_set_index={:?}",
-                                view,
-                                TypeId::of::<BPI>(),
-                                batch_set_index
-                            );
                             GFBD::write_batch_indirect_parameters(
                                 input_index.into(),
                                 batch_set_key.indexed(),
@@ -1041,11 +1012,6 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                 phase.batch_sets
             {
                 if let Some(batch_set) = batch_set {
-                    println!(
-                        "batch_and_prepare: batch set index {} count={}",
-                        indirect_parameters_buffers.batch_set_count(batch_set_key.indexed()),
-                        batch_set.batches.len()
-                    );
                     batch_sets.push(batch_set);
                     indirect_parameters_buffers
                         .add_batch_set(batch_set_key.indexed(), indirect_parameters_base);
@@ -1065,8 +1031,6 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                     continue;
                 };
                 let output_index = data_buffer.add() as u32;
-
-                check_seen_input_indices(&mut seen_input_indices, input_index, entity, main_entity);
 
                 match batch {
                     Some(ref mut batch) => {
@@ -1106,10 +1070,6 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                             indirect_parameters_buffers.allocate(key.0.indexed(), 1);
                         let batch_set_index =
                             indirect_parameters_buffers.get_next_batch_set_index(key.0.indexed());
-
-                        assert!(u32::from(batch_set_index.unwrap()) >= max_batch_set_index);
-                        max_batch_set_index =
-                            max_batch_set_index.max(u32::from(batch_set_index.unwrap()));
 
                         GFBD::write_batch_indirect_parameters(
                             input_index.into(),
@@ -1165,7 +1125,6 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                         vec.push(batch);
                     }
                     BinnedRenderPhaseBatchSets::MultidrawIndirect(ref mut vec) => {
-                        println!("batch??");
                         // The Bevy renderer will never mark a mesh as batchable
                         // but not multidrawable if multidraw is in use.
                         // However, custom render pipelines might do so, such as
@@ -1200,14 +1159,12 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                 )
             };
 
-            for &(entity, main_entity) in &unbatchables.entities {
+            for &(_, main_entity) in &unbatchables.entities {
                 let Some(input_index) = GFBD::get_binned_index(&system_param_item, main_entity)
                 else {
                     continue;
                 };
                 let output_index = data_buffer.add() as u32;
-
-                check_seen_input_indices(&mut seen_input_indices, input_index, entity, main_entity);
 
                 if let Some(ref mut indirect_parameters_index) = indirect_parameters_offset {
                     // We're in indirect mode, so add an indirect parameters
@@ -1302,7 +1259,6 @@ pub fn write_batched_instance_buffers<GFBD>(
 pub fn clear_indirect_parameters_buffers(
     mut indirect_parameters_buffers: ResMut<IndirectParametersBuffers>,
 ) {
-    indirect_parameters_buffers.max_batch_set_index = 0;
     indirect_parameters_buffers.indexed_data.clear();
     indirect_parameters_buffers.indexed_metadata.clear();
     indirect_parameters_buffers.indexed_batch_sets.clear();
@@ -1336,25 +1292,4 @@ pub fn write_indirect_parameters_buffers(
     indirect_parameters_buffers
         .non_indexed_batch_sets
         .write_buffer(&render_device, &render_queue);
-}
-
-fn check_seen_input_indices(
-    seen_input_indices: &mut HashMap<NonMaxU32, (Entity, MainEntity), RandomState>,
-    input_index: NonMaxU32,
-    new_entity: Entity,
-    new_main_entity: MainEntity,
-) {
-    match seen_input_indices.entry(input_index) {
-        Entry::Occupied(occupied_entry) => {
-            println!(
-                "mesh is duplicated, expect trouble: {:?},{:?} / {:?}",
-                new_entity,
-                new_main_entity,
-                occupied_entry.get()
-            );
-        }
-        Entry::Vacant(vacant_entry) => {
-            vacant_entry.insert((new_entity, new_main_entity));
-        }
-    }
 }

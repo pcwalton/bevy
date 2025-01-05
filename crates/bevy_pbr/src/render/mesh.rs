@@ -1,4 +1,4 @@
-use core::mem::{self, size_of};
+use core::mem::size_of;
 
 use crate::material_bind_groups::{MaterialBindGroupIndex, MaterialBindGroupSlot};
 use allocator::MeshAllocator;
@@ -28,7 +28,6 @@ use bevy_render::{
     },
     camera::Camera,
     mesh::*,
-    occlusion_culling::OcclusionCulling,
     primitives::Aabb,
     render_asset::RenderAssets,
     render_phase::{
@@ -1202,7 +1201,6 @@ pub fn extract_meshes_for_cpu_building(
 /// [`MeshUniform`] building.
 #[allow(clippy::too_many_arguments)]
 pub fn extract_meshes_for_gpu_building(
-    mut render_mesh_instances: ResMut<RenderMeshInstances>,
     render_visibility_ranges: Res<RenderVisibilityRanges>,
     mut render_mesh_instance_queues: ResMut<RenderMeshInstanceGpuQueues>,
     changed_meshes_query: Extract<
@@ -1242,7 +1240,6 @@ pub fn extract_meshes_for_gpu_building(
     mut removed_global_transforms_query: Extract<RemovedComponents<GlobalTransform>>,
     mut removed_meshes_query: Extract<RemovedComponents<Mesh3d>>,
     gpu_culling_query: Extract<Query<(), (With<Camera>, Without<NoIndirectDrawing>)>>,
-    occlusion_culling_query: Extract<Query<(), (With<Camera>, With<OcclusionCulling>)>>,
 ) {
     let any_gpu_culling = !gpu_culling_query.is_empty();
 
@@ -2746,10 +2743,6 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMesh {
                             indirect_parameters_range.end - indirect_parameters_range.start;
                         match batch_set_index {
                             Some(batch_set_index) => {
-                                println!(
-                                    "batch set index={} max count={}",
-                                    batch_set_index, indirect_parameters_count
-                                );
                                 let count_offset = u32::from(batch_set_index)
                                     * (size_of::<IndirectBatchSet>() as u32);
                                 pass.multi_draw_indexed_indirect_count(
