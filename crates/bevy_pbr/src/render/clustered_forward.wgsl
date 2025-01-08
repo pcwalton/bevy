@@ -27,6 +27,7 @@ struct ClusterableObjectIndexRanges {
     // The offset of the index of the first irradiance volumes, which also
     // terminates the list of reflection probes.
     first_irradiance_volume_index_offset: u32,
+    first_decal_offset: u32,
     // One past the offset of the index of the final clusterable object for this
     // cluster.
     last_clusterable_object_index_offset: u32,
@@ -81,12 +82,14 @@ fn unpack_clusterable_object_index_ranges(cluster_index: u32) -> ClusterableObje
     let spot_light_offset = point_light_offset + offset_and_counts_a.y;
     let reflection_probe_offset = spot_light_offset + offset_and_counts_a.z;
     let irradiance_volume_offset = reflection_probe_offset + offset_and_counts_a.w;
-    let last_clusterable_offset = irradiance_volume_offset + offset_and_counts_b.x;
+    let decal_offset = irradiance_volume_offset + offset_and_counts_b.x;
+    let last_clusterable_offset = decal_offset + offset_and_counts_b.y;
     return ClusterableObjectIndexRanges(
         point_light_offset,
         spot_light_offset,
         reflection_probe_offset,
         irradiance_volume_offset,
+        decal_offset,
         last_clusterable_offset
     );
 

@@ -2284,6 +2284,10 @@ impl SpecializedMeshPipeline for MeshPipeline {
             shader_defs.push("IRRADIANCE_VOLUMES_ARE_USABLE".into());
         }
 
+        if DECALS_ARE_USABLE {
+            shader_defs.push("DECALS_ARE_USABLE".into());
+        }
+
         let format = if key.contains(MeshPipelineKey::HDR) {
             ViewTarget::TEXTURE_FORMAT_HDR
         } else {

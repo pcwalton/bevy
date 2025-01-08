@@ -4015,3 +4015,14 @@ name = "Tab Navigation"
 description = "Demonstration of Tab Navigation"
 category = "UI (User Interface)"
 wasm = true
+
+[[example]]
+name = "decals"
+path = "examples/3d/decals.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.decals]
+name = "Decals"
+description = "Demonstrates decal projectors"
+category = "3D Rendering"
+wasm = false
