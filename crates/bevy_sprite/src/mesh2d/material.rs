@@ -145,7 +145,7 @@ pub trait Material2d: AsBindGroup + Asset + Clone + Sized {
     fn specialize(
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        key: Material2dKey<Self>,
+        key: Material2dKey,
     ) -> Result<(), SpecializedMeshPipelineError> {
         Ok(())
     }
@@ -237,10 +237,7 @@ impl<M: Material2d> Default for Material2dPlugin<M> {
     }
 }
 
-impl<M: Material2d> Plugin for Material2dPlugin<M>
-where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
+impl<M: Material2d> Plugin for Material2dPlugin<M> {
     fn build(&self, app: &mut App) {
         app.init_asset::<M>()
             .register_type::<MeshMaterial2d<M>>()
@@ -343,38 +340,37 @@ pub struct Material2dPipeline<M: Material2d> {
     marker: PhantomData<M>,
 }
 
-pub struct Material2dKey<M: Material2d> {
+pub struct Material2dKey {
     pub mesh_key: Mesh2dPipelineKey,
-    pub bind_group_data: M::Data,
+    pub bind_group_data: Box<dyn Reflect>,
 }
 
-impl<M: Material2d> Eq for Material2dKey<M> where M::Data: PartialEq {}
+impl Eq for Material2dKey {}
 
-impl<M: Material2d> PartialEq for Material2dKey<M>
-where
-    M::Data: PartialEq,
-{
+impl PartialEq for Material2dKey {
     fn eq(&self, other: &Self) -> bool {
-        self.mesh_key == other.mesh_key && self.bind_group_data == other.bind_group_data
+        self.mesh_key == other.mesh_key
+            && self
+                .bind_group_data
+                .reflect_partial_eq(other.bind_group_data.as_partial_reflect())
+                == Some(true)
     }
 }
 
-impl<M: Material2d> Clone for Material2dKey<M>
-where
-    M::Data: Clone,
-{
+impl Clone for Material2dKey {
     fn clone(&self) -> Self {
         Self {
             mesh_key: self.mesh_key,
-            bind_group_data: self.bind_group_data.clone(),
+            bind_group_data: self
+                .bind_group_data
+                .clone_value()
+                .try_into_reflect()
+                .unwrap(),
         }
     }
 }
 
-impl<M: Material2d> Hash for Material2dKey<M>
-where
-    M::Data: Hash,
-{
+impl Hash for Material2dKey {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.mesh_key.hash(state);
         self.bind_group_data.hash(state);
@@ -393,11 +389,8 @@ impl<M: Material2d> Clone for Material2dPipeline<M> {
     }
 }
 
-impl<M: Material2d> SpecializedMeshPipeline for Material2dPipeline<M>
-where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
-    type Key = Material2dKey<M>;
+impl<M: Material2d> SpecializedMeshPipeline for Material2dPipeline<M> {
+    type Key = Material2dKey;
 
     fn specialize(
         &self,
@@ -533,9 +526,7 @@ pub fn queue_material2d_meshes<M: Material2d>(
         Option<&Tonemapping>,
         Option<&DebandDither>,
     )>,
-) where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
+) {
     if render_material_instances.is_empty() {
         return;
     }
@@ -591,7 +582,7 @@ pub fn queue_material2d_meshes<M: Material2d>(
                 &material2d_pipeline,
                 Material2dKey {
                     mesh_key,
-                    bind_group_data: material_2d.key.clone(),
+                    bind_group_data: material_2d.key.clone_value().try_into_reflect().unwrap(),
                 },
                 &mesh.layout,
             );
@@ -694,8 +685,9 @@ pub struct Material2dProperties {
 pub struct PreparedMaterial2d<T: Material2d> {
     pub bindings: BindingResources,
     pub bind_group: BindGroup,
-    pub key: T::Data,
+    pub key: Box<dyn Reflect>,
     pub properties: Material2dProperties,
+    pub phantom: PhantomData<T>,
 }
 
 impl<T: Material2d> PreparedMaterial2d<T> {
@@ -727,6 +719,7 @@ impl<M: Material2d> RenderAsset for PreparedMaterial2d<M> {
                         alpha_mode: material.alpha_mode(),
                         mesh_pipeline_key_bits,
                     },
+                    phantom: PhantomData,
                 })
             }
             Err(AsBindGroupError::RetryNextUpdate) => {

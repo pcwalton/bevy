@@ -235,7 +235,7 @@ impl Material2d for Wireframe2dMaterial {
     fn specialize(
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: Material2dKey<Self>,
+        _key: Material2dKey,
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.primitive.polygon_mode = PolygonMode::Line;
         Ok(())

@@ -148,8 +148,10 @@ impl<S: SpecializedMeshPipeline> SpecializedMeshPipelines<S> {
                 .specialize(key.clone(), layout)
                 .map_err(|mut err| {
                     {
-                        let SpecializedMeshPipelineError::MissingVertexAttribute(err) = &mut err;
-                        err.pipeline_type = Some(core::any::type_name::<S>());
+                        if let SpecializedMeshPipelineError::MissingVertexAttribute(err) = &mut err
+                        {
+                            err.pipeline_type = Some(core::any::type_name::<S>());
+                        }
                     }
                     err
                 })?;
@@ -194,4 +196,5 @@ impl<S: SpecializedMeshPipeline> SpecializedMeshPipelines<S> {
 pub enum SpecializedMeshPipelineError {
     #[error(transparent)]
     MissingVertexAttribute(#[from] MissingVertexAttributeError),
+    InvalidBindGroupData,
 }

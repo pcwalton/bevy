@@ -101,7 +101,7 @@ impl MaterialExtension for ForwardDecalMaterialExt {
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialExtensionKey<Self>,
+        _key: MaterialExtensionKey,
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.depth_stencil.as_mut().unwrap().depth_compare = CompareFunction::Always;
 

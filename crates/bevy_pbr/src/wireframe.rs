@@ -234,7 +234,7 @@ impl Material for WireframeMaterial {
         _pipeline: &MaterialPipeline<Self>,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
+        _key: MaterialPipelineKey,
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.primitive.polygon_mode = PolygonMode::Line;
         if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {

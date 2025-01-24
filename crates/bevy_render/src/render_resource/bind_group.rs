@@ -9,6 +9,7 @@ use crate::{
 use alloc::sync::Arc;
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::system::{SystemParam, SystemParamItem};
+use bevy_reflect::Reflect;
 pub use bevy_render_macros::AsBindGroup;
 use core::ops::Deref;
 use encase::ShaderType;
@@ -326,9 +327,6 @@ impl Deref for BindGroup {
 /// }
 /// ```
 pub trait AsBindGroup {
-    /// Data that will be stored alongside the "prepared" bind group.
-    type Data: Send + Sync;
-
     type Param: SystemParam + 'static;
 
     /// The number of slots per bind group, if bindless mode is enabled.
@@ -362,7 +360,7 @@ pub trait AsBindGroup {
         layout: &BindGroupLayout,
         render_device: &RenderDevice,
         param: &mut SystemParamItem<'_, '_, Self::Param>,
-    ) -> Result<PreparedBindGroup<Self::Data>, AsBindGroupError> {
+    ) -> Result<PreparedBindGroup, AsBindGroupError> {
         let UnpreparedBindGroup { bindings, data } =
             Self::unprepared_bind_group(self, layout, render_device, param, false)?;
 
@@ -400,7 +398,7 @@ pub trait AsBindGroup {
         render_device: &RenderDevice,
         param: &mut SystemParamItem<'_, '_, Self::Param>,
         force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup<Self::Data>, AsBindGroupError>;
+    ) -> Result<UnpreparedBindGroup, AsBindGroupError>;
 
     /// Creates the bind group layout matching all bind groups returned by
     /// [`AsBindGroup::as_bind_group`]
@@ -440,16 +438,16 @@ pub enum AsBindGroupError {
 }
 
 /// A prepared bind group returned as a result of [`AsBindGroup::as_bind_group`].
-pub struct PreparedBindGroup<T> {
+pub struct PreparedBindGroup {
     pub bindings: BindingResources,
     pub bind_group: BindGroup,
-    pub data: T,
+    pub data: Box<dyn Reflect>,
 }
 
 /// a map containing `OwnedBindingResource`s, keyed by the target binding index
-pub struct UnpreparedBindGroup<T> {
+pub struct UnpreparedBindGroup {
     pub bindings: BindingResources,
-    pub data: T,
+    pub data: Box<dyn Reflect>,
 }
 
 /// A pair of binding index and binding resource, used as part of

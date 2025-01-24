@@ -1310,8 +1310,12 @@ impl Material for StandardMaterial {
         _pipeline: &MaterialPipeline<Self>,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        key: MaterialPipelineKey<Self>,
+        key: MaterialPipelineKey,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        let Ok(bind_group_data) = key.bind_group_data.downcast::<StandardMaterialKey>() else {
+            return Err(SpecializedMeshPipelineError::InvalidBindGroupData);
+        };
+
         if let Some(fragment) = descriptor.fragment.as_mut() {
             let shader_defs = &mut fragment.shader_defs;
 
@@ -1395,29 +1399,27 @@ impl Material for StandardMaterial {
                     "STANDARD_MATERIAL_ANISOTROPY_UV",
                 ),
             ] {
-                if key.bind_group_data.intersects(flags) {
+                if bind_group_data.intersects(flags) {
                     shader_defs.push(shader_def.into());
                 }
             }
         }
 
-        descriptor.primitive.cull_mode = if key
-            .bind_group_data
-            .contains(StandardMaterialKey::CULL_FRONT)
-        {
-            Some(Face::Front)
-        } else if key.bind_group_data.contains(StandardMaterialKey::CULL_BACK) {
-            Some(Face::Back)
-        } else {
-            None
-        };
+        descriptor.primitive.cull_mode =
+            if bind_group_data.contains(StandardMaterialKey::CULL_FRONT) {
+                Some(Face::Front)
+            } else if bind_group_data.contains(StandardMaterialKey::CULL_BACK) {
+                Some(Face::Back)
+            } else {
+                None
+            };
 
         if let Some(label) = &mut descriptor.label {
             *label = format!("pbr_{}", *label).into();
         }
         if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
             depth_stencil.bias.constant =
-                (key.bind_group_data.bits() >> STANDARD_MATERIAL_KEY_DEPTH_BIAS_SHIFT) as i32;
+                (bind_group_data.bits() >> STANDARD_MATERIAL_KEY_DEPTH_BIAS_SHIFT) as i32;
         }
         Ok(())
     }

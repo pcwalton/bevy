@@ -95,8 +95,6 @@ struct BindlessMaterial {
 }
 
 impl AsBindGroup for BindlessMaterial {
-    type Data = ();
-
     type Param = (SRes<RenderAssets<GpuImage>>, SRes<FallbackImage>);
 
     fn as_bind_group(

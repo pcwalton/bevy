@@ -1,6 +1,6 @@
 use bevy_asset::{Asset, Handle};
 use bevy_ecs::system::SystemParamItem;
-use bevy_reflect::{impl_type_path, Reflect};
+use bevy_reflect::{impl_type_path, Reflect, ReflectRef};
 use bevy_render::{
     alpha::AlphaMode,
     mesh::MeshVertexBufferLayoutRef,
@@ -21,9 +21,9 @@ pub struct MaterialExtensionPipeline {
     pub bindless: bool,
 }
 
-pub struct MaterialExtensionKey<E: MaterialExtension> {
+pub struct MaterialExtensionKey {
     pub mesh_key: MeshPipelineKey,
-    pub bind_group_data: E::Data,
+    pub bind_group_data: Box<dyn Reflect>,
 }
 
 /// A subset of the `Material` trait for defining extensions to a base `Material`, such as the builtin `StandardMaterial`.
@@ -104,7 +104,7 @@ pub trait MaterialExtension: Asset + AsBindGroup + Clone + Sized {
         pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        key: MaterialExtensionKey<Self>,
+        key: MaterialExtensionKey,
     ) -> Result<(), SpecializedMeshPipelineError> {
         Ok(())
     }
@@ -150,7 +150,6 @@ where
 impl_type_path!((in bevy_pbr::extended_material) ExtendedMaterial<B: Material, E: MaterialExtension>);
 
 impl<B: Material, E: MaterialExtension> AsBindGroup for ExtendedMaterial<B, E> {
-    type Data = (<B as AsBindGroup>::Data, <E as AsBindGroup>::Data);
     type Param = (<B as AsBindGroup>::Param, <E as AsBindGroup>::Param);
 
     fn bindless_slot_count() -> Option<u32> {
@@ -168,7 +167,7 @@ impl<B: Material, E: MaterialExtension> AsBindGroup for ExtendedMaterial<B, E> {
         render_device: &RenderDevice,
         (base_param, extended_param): &mut SystemParamItem<'_, '_, Self::Param>,
         mut force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup<Self::Data>, AsBindGroupError> {
+    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         // Only allow bindless mode if both the base material and the extension
         // support it.
         force_no_bindless = force_no_bindless || Self::bindless_slot_count().is_none();
@@ -196,7 +195,7 @@ impl<B: Material, E: MaterialExtension> AsBindGroup for ExtendedMaterial<B, E> {
 
         Ok(UnpreparedBindGroup {
             bindings,
-            data: (base_data, extended_bindgroup.data),
+            data: Box::new([base_data, extended_bindgroup.data]) as Box<dyn Reflect>,
         })
     }
 
@@ -311,8 +310,12 @@ impl<B: Material, E: MaterialExtension> Material for ExtendedMaterial<B, E> {
         pipeline: &MaterialPipeline<Self>,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        key: MaterialPipelineKey<Self>,
+        key: MaterialPipelineKey,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        let ReflectRef::Array(ref bind_group_data) = key.bind_group_data.reflect_ref() else {
+            return Err(SpecializedMeshPipelineError::InvalidBindGroupData);
+        };
+
         // Call the base material's specialize function
         let MaterialPipeline::<Self> {
             mesh_pipeline,
@@ -330,9 +333,12 @@ impl<B: Material, E: MaterialExtension> Material for ExtendedMaterial<B, E> {
             bindless,
             marker: Default::default(),
         };
-        let base_key = MaterialPipelineKey::<B> {
+        let base_key = MaterialPipelineKey {
             mesh_key: key.mesh_key,
-            bind_group_data: key.bind_group_data.0,
+            bind_group_data: match bind_group_data.get(0) {
+                None => return Err(SpecializedMeshPipelineError::InvalidBindGroupData),
+                Some(base_bind_group_data) => base_bind_group_data.to_owned(),
+            },
         };
         B::specialize(&base_pipeline, descriptor, layout, base_key)?;
 
@@ -358,7 +364,10 @@ impl<B: Material, E: MaterialExtension> Material for ExtendedMaterial<B, E> {
             layout,
             MaterialExtensionKey {
                 mesh_key: key.mesh_key,
-                bind_group_data: key.bind_group_data.1,
+                bind_group_data: match bind_group_data.get(1) {
+                    None => return Err(SpecializedMeshPipelineError::InvalidBindGroupData),
+                    Some(extended_bind_group_data) => extended_bind_group_data.to_owned(),
+                },
             },
         )
     }

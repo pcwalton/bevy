@@ -234,7 +234,7 @@ pub trait Material: Asset + AsBindGroup + Clone + Sized {
         pipeline: &MaterialPipeline<Self>,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        key: MaterialPipelineKey<Self>,
+        key: MaterialPipelineKey,
     ) -> Result<(), SpecializedMeshPipelineError> {
         Ok(())
     }
@@ -264,10 +264,7 @@ impl<M: Material> Default for MaterialPlugin<M> {
     }
 }
 
-impl<M: Material> Plugin for MaterialPlugin<M>
-where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
+impl<M: Material> Plugin for MaterialPlugin<M> {
     fn build(&self, app: &mut App) {
         app.init_asset::<M>()
             .register_type::<MeshMaterial3d<M>>()
@@ -354,26 +351,20 @@ where
 }
 
 /// A key uniquely identifying a specialized [`MaterialPipeline`].
-pub struct MaterialPipelineKey<M: Material> {
+pub struct MaterialPipelineKey {
     pub mesh_key: MeshPipelineKey,
-    pub bind_group_data: M::Data,
+    pub bind_group_data: Box<dyn Reflect>,
 }
 
-impl<M: Material> Eq for MaterialPipelineKey<M> where M::Data: PartialEq {}
+impl Eq for MaterialPipelineKey {}
 
-impl<M: Material> PartialEq for MaterialPipelineKey<M>
-where
-    M::Data: PartialEq,
-{
+impl PartialEq for MaterialPipelineKey {
     fn eq(&self, other: &Self) -> bool {
         self.mesh_key == other.mesh_key && self.bind_group_data == other.bind_group_data
     }
 }
 
-impl<M: Material> Clone for MaterialPipelineKey<M>
-where
-    M::Data: Clone,
-{
+impl Clone for MaterialPipelineKey {
     fn clone(&self) -> Self {
         Self {
             mesh_key: self.mesh_key,
@@ -382,10 +373,7 @@ where
     }
 }
 
-impl<M: Material> Hash for MaterialPipelineKey<M>
-where
-    M::Data: Hash,
-{
+impl Hash for MaterialPipelineKey {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.mesh_key.hash(state);
         self.bind_group_data.hash(state);
@@ -418,11 +406,8 @@ impl<M: Material> Clone for MaterialPipeline<M> {
     }
 }
 
-impl<M: Material> SpecializedMeshPipeline for MaterialPipeline<M>
-where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
-    type Key = MaterialPipelineKey<M>;
+impl<M: Material> SpecializedMeshPipeline for MaterialPipeline<M> {
+    type Key = MaterialPipelineKey;
 
     fn specialize(
         &self,
@@ -709,9 +694,7 @@ pub fn queue_material_meshes<M: Material>(
         ),
         Has<OrderIndependentTransparencySettings>,
     )>,
-) where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
+) {
     for (
         view,
         visible_entities,

@@ -66,10 +66,7 @@ impl<M: Material> Default for PrepassPipelinePlugin<M> {
     }
 }
 
-impl<M: Material> Plugin for PrepassPipelinePlugin<M>
-where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
+impl<M: Material> Plugin for PrepassPipelinePlugin<M> {
     fn build(&self, app: &mut App) {
         load_internal_asset!(
             app,
@@ -133,10 +130,7 @@ impl<M: Material> Default for PrepassPlugin<M> {
     }
 }
 
-impl<M: Material> Plugin for PrepassPlugin<M>
-where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
+impl<M: Material> Plugin for PrepassPlugin<M> {
     fn build(&self, app: &mut App) {
         let no_prepass_plugin_loaded = app
             .world()
@@ -366,11 +360,8 @@ impl<M: Material> FromWorld for PrepassPipeline<M> {
     }
 }
 
-impl<M: Material> SpecializedMeshPipeline for PrepassPipeline<M>
-where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
-    type Key = MaterialPipelineKey<M>;
+impl<M: Material> SpecializedMeshPipeline for PrepassPipeline<M> {
+    type Key = MaterialPipelineKey;
 
     fn specialize(
         &self,
@@ -802,9 +793,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
         Option<&MotionVectorPrepass>,
         Option<&DeferredPrepass>,
     )>,
-) where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
+) {
     let opaque_draw_prepass = opaque_draw_functions
         .read()
         .get_id::<DrawPrepass<M>>()
