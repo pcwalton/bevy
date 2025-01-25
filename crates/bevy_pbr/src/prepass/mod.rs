@@ -44,7 +44,7 @@ use crate::meshlet::{
 use crate::*;
 
 use bevy_render::view::RenderVisibleEntities;
-use core::{hash::Hash, marker::PhantomData};
+use core::marker::PhantomData;
 
 pub const PREPASS_SHADER_HANDLE: Handle<Shader> = Handle::weak_from_u128(921124473254008983);
 
@@ -943,7 +943,9 @@ pub fn queue_prepass_material_meshes<M: Material>(
                     mesh_key,
                     bind_group_data: material_bind_group
                         .get_extra_data(material.binding.slot)
-                        .clone(),
+                        .clone_value()
+                        .try_into_reflect()
+                        .unwrap(),
                 },
                 &mesh.layout,
             );

@@ -196,5 +196,6 @@ impl<S: SpecializedMeshPipeline> SpecializedMeshPipelines<S> {
 pub enum SpecializedMeshPipelineError {
     #[error(transparent)]
     MissingVertexAttribute(#[from] MissingVertexAttributeError),
+    #[error("Invalid bind group data")]
     InvalidBindGroupData,
 }

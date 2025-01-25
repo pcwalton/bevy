@@ -149,6 +149,22 @@ where
 // causes the `TypePath` derive to not generate an implementation.
 impl_type_path!((in bevy_pbr::extended_material) ExtendedMaterial<B: Material, E: MaterialExtension>);
 
+#[derive(Reflect)]
+#[reflect(opaque)]
+struct ExtendedMaterialBindGroupData {
+    base: Box<dyn Reflect>,
+    extension: Box<dyn Reflect>,
+}
+
+impl Clone for ExtendedMaterialBindGroupData {
+    fn clone(&self) -> ExtendedMaterialBindGroupData {
+        ExtendedMaterialBindGroupData {
+            base: self.base.clone_value().try_into_reflect().unwrap(),
+            extension: self.extension.clone_value().try_into_reflect().unwrap(),
+        }
+    }
+}
+
 impl<B: Material, E: MaterialExtension> AsBindGroup for ExtendedMaterial<B, E> {
     type Param = (<B as AsBindGroup>::Param, <E as AsBindGroup>::Param);
 
@@ -195,7 +211,10 @@ impl<B: Material, E: MaterialExtension> AsBindGroup for ExtendedMaterial<B, E> {
 
         Ok(UnpreparedBindGroup {
             bindings,
-            data: Box::new([base_data, extended_bindgroup.data]) as Box<dyn Reflect>,
+            data: Box::new(ExtendedMaterialBindGroupData {
+                base: base_data,
+                extension: extended_bindgroup.data,
+            }) as Box<dyn Reflect>,
         })
     }
 
@@ -337,7 +356,10 @@ impl<B: Material, E: MaterialExtension> Material for ExtendedMaterial<B, E> {
             mesh_key: key.mesh_key,
             bind_group_data: match bind_group_data.get(0) {
                 None => return Err(SpecializedMeshPipelineError::InvalidBindGroupData),
-                Some(base_bind_group_data) => base_bind_group_data.to_owned(),
+                Some(base_bind_group_data) => base_bind_group_data
+                    .clone_value()
+                    .try_into_reflect()
+                    .unwrap(),
             },
         };
         B::specialize(&base_pipeline, descriptor, layout, base_key)?;
@@ -366,7 +388,10 @@ impl<B: Material, E: MaterialExtension> Material for ExtendedMaterial<B, E> {
                 mesh_key: key.mesh_key,
                 bind_group_data: match bind_group_data.get(1) {
                     None => return Err(SpecializedMeshPipelineError::InvalidBindGroupData),
-                    Some(extended_bind_group_data) => extended_bind_group_data.to_owned(),
+                    Some(extended_bind_group_data) => extended_bind_group_data
+                        .clone_value()
+                        .try_into_reflect()
+                        .unwrap(),
                 },
             },
         )

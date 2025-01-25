@@ -24,7 +24,6 @@ use bevy_render::{
 };
 use bevy_utils::default;
 use core::{any, iter, marker::PhantomData, num::NonZero};
-use smallbox::{space::S32, SmallBox};
 use tracing::error;
 
 /// An object that creates and stores bind groups for a single material type.
@@ -665,7 +664,7 @@ where
     }
 }
 
-impl<M> MaterialNonBindlessBindGroup<M> {
+impl<M> MaterialNonBindlessBindGroup<M> where M: Material {
     /// Creates a new material bind group.
     fn new() -> MaterialNonBindlessBindGroup<M> {
         MaterialNonBindlessBindGroup {

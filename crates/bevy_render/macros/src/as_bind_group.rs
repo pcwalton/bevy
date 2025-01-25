@@ -561,10 +561,10 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let (prepared_data, get_prepared_data) = if let Some(prepared) = attr_prepared_data_ident {
-        let get_prepared_data = quote! { self.into() };
+        let get_prepared_data = quote! { ::std::boxed::Box::new(#prepared::from(self)) };
         (quote! {#prepared}, get_prepared_data)
     } else {
-        let prepared_data = quote! { () };
+        let prepared_data = quote! { ::std::boxed::Box::new(()) };
         (prepared_data.clone(), prepared_data)
     };
 

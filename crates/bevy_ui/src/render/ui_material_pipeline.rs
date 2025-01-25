@@ -1,4 +1,4 @@
-use core::{hash::Hash, marker::PhantomData, ops::Range};
+use core::{marker::PhantomData, ops::Range};
 
 use crate::*;
 use bevy_asset::*;
@@ -42,10 +42,7 @@ impl<M: UiMaterial> Default for UiMaterialPlugin<M> {
     }
 }
 
-impl<M: UiMaterial> Plugin for UiMaterialPlugin<M>
-where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
+impl<M: UiMaterial> Plugin for UiMaterialPlugin<M> {
     fn build(&self, app: &mut App) {
         load_internal_asset!(
             app,
@@ -138,11 +135,8 @@ pub struct UiMaterialPipeline<M: UiMaterial> {
     marker: PhantomData<M>,
 }
 
-impl<M: UiMaterial> SpecializedRenderPipeline for UiMaterialPipeline<M>
-where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
-    type Key = UiMaterialKey<M>;
+impl<M: UiMaterial> SpecializedRenderPipeline for UiMaterialPipeline<M> {
+    type Key = UiMaterialKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
         let vertex_layout = VertexBufferLayout::from_vertex_formats(
@@ -580,7 +574,8 @@ pub fn prepare_uimaterial_nodes<M: UiMaterial>(
 pub struct PreparedUiMaterial<T: UiMaterial> {
     pub bindings: BindingResources,
     pub bind_group: BindGroup,
-    pub key: T::Data,
+    pub key: Box<dyn Reflect>,
+    pub phantom: PhantomData<T>,
 }
 
 impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M> {
@@ -597,7 +592,8 @@ impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M> {
             Ok(prepared) => Ok(PreparedUiMaterial {
                 bindings: prepared.bindings,
                 bind_group: prepared.bind_group,
-                key: prepared.data,
+                key: prepared.data.clone_value().try_into_reflect().unwrap(),
+                phantom: PhantomData,
             }),
             Err(AsBindGroupError::RetryNextUpdate) => {
                 Err(PrepareAssetError::RetryNextUpdate(material))
@@ -617,9 +613,7 @@ pub fn queue_ui_material_nodes<M: UiMaterial>(
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
     mut render_views: Query<&UiCameraView, With<ExtractedView>>,
     camera_views: Query<&ExtractedView>,
-) where
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
+) {
     let draw_function = draw_functions.read().id::<DrawUiMaterial<M>>();
 
     for (entity, extracted_uinode) in extracted_uinodes.uinodes.iter() {
@@ -647,7 +641,7 @@ pub fn queue_ui_material_nodes<M: UiMaterial>(
             &ui_material_pipeline,
             UiMaterialKey {
                 hdr: view.hdr,
-                bind_group_data: material.key.clone(),
+                bind_group_data: material.key.clone_value().try_into_reflect().unwrap(),
             },
         );
         if transparent_phase.items.capacity() < extracted_uinodes.uinodes.len() {

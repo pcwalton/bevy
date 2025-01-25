@@ -1102,7 +1102,9 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
 
 bitflags! {
     /// The pipeline key for `StandardMaterial`, packed into 64 bits.
-    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Reflect)]
+    #[reflect(Hash)]
+    #[reflect(opaque)]
     pub struct StandardMaterialKey: u64 {
         const CULL_FRONT               = 0x000001;
         const CULL_BACK                = 0x000002;

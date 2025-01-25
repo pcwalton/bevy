@@ -118,44 +118,45 @@ pub trait UiMaterial: AsBindGroup + Asset + Clone + Sized {
         reason = "The parameters here are intentionally unused by the default implementation; however, putting underscores here will result in the underscores being copied by rust-analyzer's tab completion."
     )]
     #[inline]
-    fn specialize(descriptor: &mut RenderPipelineDescriptor, key: UiMaterialKey<Self>) {}
+    fn specialize(descriptor: &mut RenderPipelineDescriptor, key: UiMaterialKey) {}
 }
 
-pub struct UiMaterialKey<M: UiMaterial> {
+pub struct UiMaterialKey {
     pub hdr: bool,
-    pub bind_group_data: M::Data,
+    pub bind_group_data: Box<dyn Reflect>,
 }
 
-impl<M: UiMaterial> Eq for UiMaterialKey<M> where M::Data: PartialEq {}
+impl Eq for UiMaterialKey {}
 
-impl<M: UiMaterial> PartialEq for UiMaterialKey<M>
-where
-    M::Data: PartialEq,
-{
+impl PartialEq for UiMaterialKey {
     fn eq(&self, other: &Self) -> bool {
-        self.hdr == other.hdr && self.bind_group_data == other.bind_group_data
+        self.hdr == other.hdr
+            && self
+                .bind_group_data
+                .reflect_partial_eq(other.bind_group_data.as_partial_reflect())
+                == Some(true)
     }
 }
 
-impl<M: UiMaterial> Clone for UiMaterialKey<M>
-where
-    M::Data: Clone,
-{
+impl Clone for UiMaterialKey {
     fn clone(&self) -> Self {
         Self {
             hdr: self.hdr,
-            bind_group_data: self.bind_group_data.clone(),
+            bind_group_data: self
+                .bind_group_data
+                .clone_value()
+                .try_into_reflect()
+                .unwrap(),
         }
     }
 }
 
-impl<M: UiMaterial> Hash for UiMaterialKey<M>
-where
-    M::Data: Hash,
-{
+impl Hash for UiMaterialKey {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.hdr.hash(state);
-        self.bind_group_data.hash(state);
+        if let Some(hash) = self.bind_group_data.reflect_hash() {
+            state.write_u64(hash);
+        }
     }
 }
 

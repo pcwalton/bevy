@@ -1705,7 +1705,9 @@ pub fn queue_shadows<M: Material>(
                         mesh_key,
                         bind_group_data: material_bind_group
                             .get_extra_data(material.binding.slot)
-                            .clone(),
+                            .clone_value()
+                            .try_into_reflect()
+                            .unwrap(),
                     },
                     &mesh.layout,
                 );

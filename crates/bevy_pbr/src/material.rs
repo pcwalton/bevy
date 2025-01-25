@@ -360,7 +360,11 @@ impl Eq for MaterialPipelineKey {}
 
 impl PartialEq for MaterialPipelineKey {
     fn eq(&self, other: &Self) -> bool {
-        self.mesh_key == other.mesh_key && self.bind_group_data == other.bind_group_data
+        self.mesh_key == other.mesh_key
+            && self
+                .bind_group_data
+                .reflect_partial_eq(other.bind_group_data.as_partial_reflect())
+                == Some(true)
     }
 }
 
@@ -368,7 +372,11 @@ impl Clone for MaterialPipelineKey {
     fn clone(&self) -> Self {
         Self {
             mesh_key: self.mesh_key,
-            bind_group_data: self.bind_group_data.clone(),
+            bind_group_data: self
+                .bind_group_data
+                .clone_value()
+                .try_into_reflect()
+                .unwrap(),
         }
     }
 }
@@ -376,7 +384,9 @@ impl Clone for MaterialPipelineKey {
 impl Hash for MaterialPipelineKey {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.mesh_key.hash(state);
-        self.bind_group_data.hash(state);
+        if let Some(hash) = self.bind_group_data.reflect_hash() {
+            state.write_u64(hash);
+        }
     }
 }
 
@@ -875,7 +885,9 @@ pub fn queue_material_meshes<M: Material>(
                     mesh_key,
                     bind_group_data: material_bind_group
                         .get_extra_data(material.binding.slot)
-                        .clone(),
+                        .clone_value()
+                        .try_into_reflect()
+                        .unwrap(),
                 },
                 &mesh.layout,
             );

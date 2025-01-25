@@ -373,7 +373,9 @@ impl Clone for Material2dKey {
 impl Hash for Material2dKey {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.mesh_key.hash(state);
-        self.bind_group_data.hash(state);
+        if let Some(hash) = self.bind_group_data.reflect_hash() {
+            state.write_u64(hash);
+        }
     }
 }
 
