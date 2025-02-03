@@ -1082,11 +1082,20 @@ pub fn queue_prepass_material_meshes<M: Material>(
         }
 
         for (render_entity, visible_entity) in visible_entities.iter::<Mesh3d>() {
-            let Some((_, pipeline_id)) =
+            let Some((current_change_tick, pipeline_id)) =
                 specialized_material_pipeline_cache.get(&(*view_entity, *visible_entity))
             else {
                 continue;
             };
+
+            if opaque_phase.as_mut().is_some_and(|opaque_phase| {
+                opaque_phase.check_cache(*visible_entity, *current_change_tick)
+            }) || alpha_mask_phase.as_mut().is_some_and(|alpha_mask_phase| {
+                alpha_mask_phase.check_cache(*visible_entity, *current_change_tick)
+            }) {
+                continue;
+            }
+
             let Some(material_asset_id) = render_material_instances.get(visible_entity) else {
                 continue;
             };
@@ -1127,6 +1136,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                 mesh_instance.should_batch(),
                                 &gpu_preprocessing_support,
                             ),
+                            *current_change_tick,
                         );
                     } else if let Some(opaque_phase) = opaque_phase.as_mut() {
                         let (vertex_slab, index_slab) =
@@ -1150,6 +1160,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                 mesh_instance.should_batch(),
                                 &gpu_preprocessing_support,
                             ),
+                            *current_change_tick,
                         );
                     }
                 }
@@ -1175,6 +1186,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                 mesh_instance.should_batch(),
                                 &gpu_preprocessing_support,
                             ),
+                            *current_change_tick,
                         );
                     } else if let Some(alpha_mask_phase) = alpha_mask_phase.as_mut() {
                         let (vertex_slab, index_slab) =
@@ -1197,6 +1209,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                 mesh_instance.should_batch(),
                                 &gpu_preprocessing_support,
                             ),
+                            *current_change_tick,
                         );
                     }
                 }

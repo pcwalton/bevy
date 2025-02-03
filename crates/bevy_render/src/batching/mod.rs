@@ -182,6 +182,10 @@ where
     BPI: BinnedPhaseItem,
 {
     for phase in phases.values_mut() {
+        phase.multidrawable_mesh_keys = phase.multidrawable_mesh_values.keys().cloned().collect();
+        phase.batchable_mesh_keys = phase.batchable_mesh_values.keys().cloned().collect();
+        phase.unbatchable_mesh_keys = phase.unbatchable_mesh_values.keys().cloned().collect();
+
         phase.multidrawable_mesh_keys.sort_unstable();
         phase.batchable_mesh_keys.sort_unstable();
         phase.unbatchable_mesh_keys.sort_unstable();
