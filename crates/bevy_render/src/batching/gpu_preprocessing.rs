@@ -1393,7 +1393,8 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                     match batch_set {
                         None => {
                             batch_set = Some(BinnedRenderPhaseBatchSet {
-                                batches: vec![batch],
+                                first_batch: batch,
+                                batch_count: 1,
                                 bin_key: bin_key.clone(),
                                 index: indirect_parameters_buffers
                                     .batch_set_count(batch_set_key.indexed())
@@ -1401,7 +1402,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                             });
                         }
                         Some(ref mut batch_set) => {
-                            batch_set.batches.push(batch);
+                            batch_set.batch_count += 1;
                         }
                     }
                 }
@@ -1530,7 +1531,8 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                         // However, custom render pipelines might do so, such as
                         // the `specialized_mesh_pipeline` example.
                         vec.push(BinnedRenderPhaseBatchSet {
-                            batches: vec![batch],
+                            first_batch: batch,
+                            batch_count: 1,
                             bin_key: key.1.clone(),
                             index: indirect_parameters_buffers.batch_set_count(key.0.indexed())
                                 as u32,
