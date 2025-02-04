@@ -23,7 +23,7 @@ use wgpu::{BindingResource, BufferUsages, DownlevelFlags, Features};
 use crate::{
     experimental::occlusion_culling::OcclusionCulling,
     render_phase::{
-        BinnedPhaseItem, BinnedRenderPhaseBatch, BinnedRenderPhaseBatchSet,
+        self, BinnedPhaseItem, BinnedRenderPhaseBatch, BinnedRenderPhaseBatchSet,
         BinnedRenderPhaseBatchSets, CachedRenderPipelinePhaseItem, PhaseItemBatchSetKey as _,
         PhaseItemExtraIndex, SortedPhaseItem, SortedRenderPhase, UnbatchableBinnedEntityIndices,
         ViewBinnedRenderPhases, ViewSortedRenderPhases,
@@ -1296,7 +1296,8 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
                 let first_output_index = data_buffer.len() as u32;
                 let mut batch: Option<BinnedRenderPhaseBatch> = None;
 
-                for &main_entity in &bin.entities {
+                for main_entity_bits in bin.entities() {
+                    let main_entity = render_phase::unpack_main_entity(*main_entity_bits);
                     let Some(input_index) = GFBD::get_binned_index(&system_param_item, main_entity)
                     else {
                         continue;
@@ -1393,7 +1394,8 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
             let first_output_index = data_buffer.len() as u32;
 
             let mut batch: Option<BinnedRenderPhaseBatch> = None;
-            for &main_entity in &phase.batchable_mesh_values[key].entities {
+            for main_entity_bits in phase.batchable_mesh_values[key].entities() {
+                let main_entity = render_phase::unpack_main_entity(*main_entity_bits);
                 let Some(input_index) = GFBD::get_binned_index(&system_param_item, main_entity)
                 else {
                     continue;

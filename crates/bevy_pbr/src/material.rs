@@ -1045,6 +1045,9 @@ pub fn queue_material_meshes<M: Material>(
                 }
             }
         }
+
+        opaque_phase.sweep_dirty_entities();
+        alpha_mask_phase.sweep_dirty_entities();
     }
 }
 

@@ -8,6 +8,7 @@ use smallvec::{smallvec, SmallVec};
 use tracing::error;
 use wgpu::BindingResource;
 
+use crate::render_phase;
 use crate::{
     render_phase::{
         BinnedPhaseItem, BinnedRenderPhaseBatch, BinnedRenderPhaseBatchSets,
@@ -110,7 +111,8 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
 
         for key in &phase.batchable_mesh_keys {
             let mut batch_set: SmallVec<[BinnedRenderPhaseBatch; 1]> = smallvec![];
-            for &main_entity in &phase.batchable_mesh_values[key].entities {
+            for main_entity_bits in phase.batchable_mesh_values[key].entities() {
+                let main_entity = render_phase::unpack_main_entity(*main_entity_bits);
                 let Some(buffer_data) =
                     GFBD::get_binned_batch_data(&system_param_item, main_entity)
                 else {

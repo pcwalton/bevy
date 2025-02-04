@@ -31,18 +31,21 @@ mod rangefinder;
 use bevy_app::{App, Plugin};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::component::Tick;
+use bevy_ecs::entity::EntityHash;
 use bevy_platform_support::collections::{hash_map::Entry, HashMap};
 use bevy_utils::default;
 pub use draw::*;
 pub use draw_state::*;
 use encase::{internal::WriteInto, ShaderSize};
+use fixedbitset::FixedBitSet;
+use indexmap::{IndexMap, IndexSet};
 use nonmax::NonMaxU32;
 pub use rangefinder::*;
 use wgpu::Features;
 
 use crate::batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport};
 use crate::renderer::RenderDevice;
-use crate::sync_world::{MainEntity, MainEntityHashMap, MainEntityHashSet};
+use crate::sync_world::{MainEntity, MainEntityHashMap};
 use crate::view::RetainedViewEntity;
 use crate::{
     batching::{
@@ -60,6 +63,7 @@ use bevy_ecs::{
 };
 use core::{fmt::Debug, hash::Hash, iter, marker::PhantomData, ops::Range, slice::SliceIndex};
 use smallvec::SmallVec;
+use std::mem;
 
 /// Stores the rendering instructions for a single phase that uses bins in all
 /// views.
@@ -160,7 +164,8 @@ where
     /// unbatchable entities.
     pub(crate) batch_sets: BinnedRenderPhaseBatchSets<BPI::BinKey>,
 
-    pub cached_bin_keys: MainEntityHashMap<CachedBinKey<BPI>>,
+    pub cached_bin_keys: IndexMap<MainEntity, CachedBinKey<BPI>, EntityHash>,
+    clean_indices: FixedBitSet,
 }
 
 /// All entities that share a mesh and a material and can be batched as part of
@@ -168,7 +173,7 @@ where
 #[derive(Default)]
 pub struct RenderBin {
     /// A list of the entities in each bin.
-    pub entities: MainEntityHashSet,
+    entities: IndexSet<MainEntity, EntityHash>,
 }
 
 pub struct CachedBinKey<BPI>
@@ -382,17 +387,11 @@ where
                             .get_mut()
                             .entry(bin_key.clone())
                             .or_default()
-                            .entities
                             .insert(main_entity);
                     }
                     Entry::Vacant(entry) => {
                         let mut new_batch_set = HashMap::default();
-                        new_batch_set.insert(
-                            bin_key.clone(),
-                            RenderBin {
-                                entities: iter::once(main_entity).collect(),
-                            },
-                        );
+                        new_batch_set.insert(bin_key.clone(), RenderBin::from_entity(main_entity));
                         entry.insert(new_batch_set);
                     }
                 }
@@ -404,12 +403,10 @@ where
                     .entry((batch_set_key.clone(), bin_key.clone()).clone())
                 {
                     Entry::Occupied(mut entry) => {
-                        entry.get_mut().entities.insert(main_entity);
+                        entry.get_mut().insert(main_entity);
                     }
                     Entry::Vacant(entry) => {
-                        entry.insert(RenderBin {
-                            entities: iter::once(main_entity).collect(),
-                        });
+                        entry.insert(RenderBin::from_entity(main_entity));
                     }
                 }
             }
@@ -440,26 +437,29 @@ where
                     .entry((batch_set_key.clone(), bin_key.clone()).clone())
                 {
                     Entry::Occupied(mut entry) => {
-                        entry.get_mut().entities.insert(main_entity);
+                        entry.get_mut().insert(main_entity);
                     }
                     Entry::Vacant(entry) => {
-                        entry.insert(RenderBin {
-                            entities: iter::once(main_entity).collect(),
-                        });
+                        entry.insert(RenderBin::from_entity(main_entity));
                     }
                 }
             }
         }
 
-        self.cached_bin_keys.insert(
-            main_entity,
-            CachedBinKey {
-                batch_set_key,
-                bin_key,
-                phase_type,
-                change_tick,
-            },
-        );
+        let index = self
+            .cached_bin_keys
+            .insert_full(
+                main_entity,
+                CachedBinKey {
+                    batch_set_key,
+                    bin_key,
+                    phase_type,
+                    change_tick,
+                },
+            )
+            .0;
+
+        self.clean_indices.grow_and_insert(index);
     }
 
     /// Encodes the GPU commands needed to render all entities in this phase.
@@ -683,13 +683,13 @@ where
         let mut draw_functions = draw_functions.write();
 
         for ((batch_set_key, bin_key), bin) in &self.non_mesh_items {
-            for entity in &bin.entities {
+            for &entity in &bin.entities {
                 // Come up with a fake batch range and extra index. The draw
                 // function is expected to manage any sort of batching logic itself.
                 let binned_phase_item = BPI::new(
                     batch_set_key.clone(),
                     bin_key.clone(),
-                    (Entity::PLACEHOLDER, *entity),
+                    (Entity::PLACEHOLDER, entity),
                     0..1,
                     PhaseItemExtraIndex::None,
                 );
@@ -718,68 +718,90 @@ where
         self.batchable_mesh_keys.clear();
         self.unbatchable_mesh_keys.clear();
         self.batch_sets.clear();
+
+        self.clean_indices.clear();
+        self.clean_indices.grow(self.cached_bin_keys.len());
+        self.clean_indices
+            .set_range(self.cached_bin_keys.len().., true);
     }
 
     /// Returns true if the entity is clean or false otherwise.
     pub fn check_cache(&mut self, visible_entity: MainEntity, current_change_tick: Tick) -> bool {
-        if let Entry::Occupied(entry) = self.cached_bin_keys.entry(visible_entity) {
-            let cached_bin_key = entry.get();
-            if cached_bin_key.change_tick == current_change_tick {
+        if let indexmap::map::Entry::Occupied(entry) = self.cached_bin_keys.entry(visible_entity) {
+            if entry.get().change_tick == current_change_tick {
+                self.clean_indices.insert(entry.index());
                 return true;
             }
+        }
 
-            // Invalidate.
-            match cached_bin_key.phase_type {
-                BinnedRenderPhaseType::MultidrawableMesh => {
-                    if let Entry::Occupied(mut batch_set_entry) = self
-                        .multidrawable_mesh_values
-                        .entry(cached_bin_key.batch_set_key.clone())
+        false
+    }
+
+    pub fn sweep_dirty_entities(&mut self) {
+        // FIXME: This is dumb.
+        if self.clean_indices.is_full() {
+            return;
+        }
+
+        // FIXME: This is dumb. Write this iterator manually.
+        let vector: Vec<usize> = self.clean_indices.zeroes().collect();
+        for index in vector.into_iter().rev() {
+            let Some((entity, entity_bin_key)) = self.cached_bin_keys.swap_remove_index(index)
+            else {
+                continue;
+            };
+            self.remove_entity(entity_bin_key, entity.into());
+        }
+    }
+
+    fn remove_entity(&mut self, entity_bin_key: CachedBinKey<BPI>, entity: MainEntity) {
+        match entity_bin_key.phase_type {
+            BinnedRenderPhaseType::MultidrawableMesh => {
+                if let Entry::Occupied(mut batch_set_entry) = self
+                    .multidrawable_mesh_values
+                    .entry(entity_bin_key.batch_set_key.clone())
+                {
+                    if let Entry::Occupied(mut bin_entry) = batch_set_entry
+                        .get_mut()
+                        .entry(entity_bin_key.bin_key.clone())
                     {
-                        if let Entry::Occupied(mut bin_entry) = batch_set_entry
-                            .get_mut()
-                            .entry(cached_bin_key.bin_key.clone())
-                        {
-                            bin_entry.get_mut().entities.remove(&visible_entity);
-                            if bin_entry.get_mut().entities.is_empty() {
-                                bin_entry.remove();
-                            }
-                        }
-                        if batch_set_entry.get_mut().is_empty() {
-                            batch_set_entry.remove();
-                        }
-                    }
-                }
-
-                BinnedRenderPhaseType::BatchableMesh => {
-                    if let Entry::Occupied(mut bin_entry) = self.batchable_mesh_values.entry((
-                        cached_bin_key.batch_set_key.clone(),
-                        cached_bin_key.bin_key.clone(),
-                    )) {
-                        bin_entry.get_mut().entities.remove(&visible_entity);
-                        if bin_entry.get_mut().entities.is_empty() {
+                        bin_entry.get_mut().remove(entity);
+                        if bin_entry.get_mut().is_empty() {
                             bin_entry.remove();
                         }
                     }
-                }
-
-                BinnedRenderPhaseType::UnbatchableMesh => {
-                    if let Entry::Occupied(mut bin_entry) = self.unbatchable_mesh_values.entry((
-                        cached_bin_key.batch_set_key.clone(),
-                        cached_bin_key.bin_key.clone(),
-                    )) {
-                        bin_entry.get_mut().entities.remove(&visible_entity);
-                        if bin_entry.get_mut().entities.is_empty() {
-                            bin_entry.remove();
-                        }
+                    if batch_set_entry.get_mut().is_empty() {
+                        batch_set_entry.remove();
                     }
                 }
-
-                BinnedRenderPhaseType::NonMesh => todo!(),
             }
 
-            entry.remove();
+            BinnedRenderPhaseType::BatchableMesh => {
+                if let Entry::Occupied(mut bin_entry) = self.batchable_mesh_values.entry((
+                    entity_bin_key.batch_set_key.clone(),
+                    entity_bin_key.bin_key.clone(),
+                )) {
+                    bin_entry.get_mut().remove(entity);
+                    if bin_entry.get_mut().is_empty() {
+                        bin_entry.remove();
+                    }
+                }
+            }
+
+            BinnedRenderPhaseType::UnbatchableMesh => {
+                if let Entry::Occupied(mut bin_entry) = self.unbatchable_mesh_values.entry((
+                    entity_bin_key.batch_set_key.clone(),
+                    entity_bin_key.bin_key.clone(),
+                )) {
+                    bin_entry.get_mut().entities.remove(&entity);
+                    if bin_entry.get_mut().entities.is_empty() {
+                        bin_entry.remove();
+                    }
+                }
+            }
+
+            BinnedRenderPhaseType::NonMesh => todo!(),
         }
-        false
     }
 }
 
@@ -805,7 +827,8 @@ where
                 }
                 GpuPreprocessingMode::None => BinnedRenderPhaseBatchSets::DynamicUniforms(vec![]),
             },
-            cached_bin_keys: HashMap::default(),
+            cached_bin_keys: IndexMap::default(),
+            clean_indices: FixedBitSet::new(),
         }
     }
 }
@@ -1447,4 +1470,42 @@ impl BinnedRenderPhaseType {
             (false, _) => BinnedRenderPhaseType::UnbatchableMesh,
         }
     }
+}
+
+impl RenderBin {
+    #[inline]
+    fn from_entity(entity: MainEntity) -> RenderBin {
+        let mut entities = IndexSet::default();
+        entities.insert(entity);
+        RenderBin { entities }
+    }
+
+    #[inline]
+    fn insert(&mut self, entity: MainEntity) {
+        self.entities.insert(entity);
+    }
+
+    #[inline]
+    fn remove(&mut self, entity_to_remove: MainEntity) {
+        self.entities.swap_remove(&entity_to_remove);
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+    }
+
+    #[inline]
+    pub fn entities(&self) -> &IndexSet<MainEntity, EntityHash> {
+        &self.entities
+    }
+}
+
+#[inline]
+pub fn unpack_main_entity(packed: MainEntity) -> MainEntity {
+    packed
+}
+
+pub fn pack_main_entity(entity: MainEntity) -> MainEntity {
+    entity
 }
