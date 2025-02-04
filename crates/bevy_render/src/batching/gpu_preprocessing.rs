@@ -13,7 +13,7 @@ use bevy_ecs::{
 };
 use bevy_encase_derive::ShaderType;
 use bevy_math::UVec4;
-use bevy_platform_support::collections::hash_map::Entry;
+use bevy_platform_support::collections::{hash_map::Entry, HashMap, HashSet};
 use bevy_utils::{default, TypeIdMap};
 use bytemuck::{Pod, Zeroable};
 use nonmax::NonMaxU32;
@@ -30,7 +30,7 @@ use crate::{
     },
     render_resource::{Buffer, BufferVec, GpuArrayBufferable, RawBufferVec, UninitBufferVec},
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
-    view::{ExtractedView, NoIndirectDrawing},
+    view::{ExtractedView, NoIndirectDrawing, RetainedViewEntity},
     Render, RenderApp, RenderSet,
 };
 
@@ -157,7 +157,7 @@ where
     /// corresponds to each instance.
     ///
     /// This is keyed off each view. Each view has a separate buffer.
-    pub work_item_buffers: EntityHashMap<TypeIdMap<PreprocessWorkItemBuffers>>,
+    pub work_item_buffers: HashMap<RetainedViewEntity, TypeIdMap<PreprocessWorkItemBuffers>>,
 
     /// The uniform data inputs for the current frame.
     ///
@@ -409,8 +409,8 @@ impl Default for LatePreprocessWorkItemIndirectParameters {
 /// You may need to call this function if you're implementing your own custom
 /// render phases. See the `specialized_mesh_pipeline` example.
 pub fn get_or_create_work_item_buffer<'a, I>(
-    work_item_buffers: &'a mut EntityHashMap<TypeIdMap<PreprocessWorkItemBuffers>>,
-    view: Entity,
+    work_item_buffers: &'a mut HashMap<RetainedViewEntity, TypeIdMap<PreprocessWorkItemBuffers>>,
+    view: RetainedViewEntity,
     no_indirect_drawing: bool,
     gpu_occlusion_culling: bool,
     late_indexed_indirect_parameters_buffer: &'_ mut RawBufferVec<
@@ -489,6 +489,27 @@ impl PreprocessWorkItemBuffers {
                     } else {
                         gpu_occlusion_culling.late_non_indexed.add();
                     }
+                }
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        match *self {
+            PreprocessWorkItemBuffers::Direct(ref mut buffer) => {
+                buffer.clear();
+            }
+            PreprocessWorkItemBuffers::Indirect {
+                indexed: ref mut indexed_buffer,
+                non_indexed: ref mut non_indexed_buffer,
+                ref mut gpu_occlusion_culling,
+            } => {
+                indexed_buffer.clear();
+                non_indexed_buffer.clear();
+
+                if let Some(ref mut gpu_occlusion_culling) = *gpu_occlusion_culling {
+                    gpu_occlusion_culling.late_indexed.clear();
+                    gpu_occlusion_culling.late_non_indexed.clear();
                 }
             }
         }
@@ -942,7 +963,7 @@ where
     pub fn new() -> Self {
         BatchedInstanceBuffers {
             data_buffer: UninitBufferVec::new(BufferUsages::STORAGE),
-            work_item_buffers: EntityHashMap::default(),
+            work_item_buffers: HashMap::default(),
             current_input_buffer: InstanceInputUniformBuffer::new(),
             previous_input_buffer: InstanceInputUniformBuffer::new(),
             late_indexed_indirect_parameters_buffer: RawBufferVec::new(
@@ -968,7 +989,12 @@ where
         self.data_buffer.clear();
         self.late_indexed_indirect_parameters_buffer.clear();
         self.late_non_indexed_indirect_parameters_buffer.clear();
-        self.work_item_buffers.clear();
+
+        for view_work_item_buffers in self.work_item_buffers.values_mut() {
+            for phase_work_item_buffers in view_work_item_buffers.values_mut() {
+                phase_work_item_buffers.clear();
+            }
+        }
     }
 }
 
@@ -1074,13 +1100,17 @@ pub fn delete_old_work_item_buffers<GFBD>(
     mut gpu_batched_instance_buffers: ResMut<
         BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>,
     >,
-    extracted_views: Query<Entity, With<ExtractedView>>,
+    extracted_views: Query<&ExtractedView>,
 ) where
     GFBD: GetFullBatchData,
 {
+    let retained_view_entities: HashSet<_> = extracted_views
+        .iter()
+        .map(|extracted_view| extracted_view.retained_view_entity)
+        .collect();
     gpu_batched_instance_buffers
         .work_item_buffers
-        .retain(|entity, _| extracted_views.contains(*entity));
+        .retain(|retained_view_entity, _| retained_view_entities.contains(retained_view_entity));
 }
 
 /// Batch the items in a sorted render phase, when GPU instance buffer building
@@ -1118,7 +1148,7 @@ pub fn batch_and_prepare_sorted_render_phase<I, GFBD>(
         // Create the work item buffer if necessary.
         let work_item_buffer = get_or_create_work_item_buffer::<I>(
             work_item_buffers,
-            view,
+            extracted_view.retained_view_entity,
             no_indirect_drawing,
             gpu_occlusion_culling,
             late_indexed_indirect_parameters_buffer,
@@ -1279,7 +1309,7 @@ pub fn batch_and_prepare_binned_render_phase<BPI, GFBD>(
         // used this frame.
         let work_item_buffer = get_or_create_work_item_buffer::<BPI>(
             work_item_buffers,
-            view,
+            extracted_view.retained_view_entity,
             no_indirect_drawing,
             gpu_occlusion_culling,
             late_indexed_indirect_parameters_buffer,
