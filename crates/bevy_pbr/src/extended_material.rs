@@ -5,8 +5,9 @@ use bevy_render::{
     alpha::AlphaMode,
     mesh::MeshVertexBufferLayoutRef,
     render_resource::{
-        AsBindGroup, AsBindGroupError, BindGroupLayout, RenderPipelineDescriptor, Shader,
-        ShaderRef, SpecializedMeshPipelineError, UnpreparedBindGroup,
+        AsBindGroup, AsBindGroupError, BindGroupLayout, BindlessSlotCount,
+        RenderPipelineDescriptor, Shader, ShaderRef, SpecializedMeshPipelineError,
+        UnpreparedBindGroup,
     },
     renderer::RenderDevice,
 };
@@ -153,11 +154,19 @@ impl<B: Material, E: MaterialExtension> AsBindGroup for ExtendedMaterial<B, E> {
     type Data = (<B as AsBindGroup>::Data, <E as AsBindGroup>::Data);
     type Param = (<B as AsBindGroup>::Param, <E as AsBindGroup>::Param);
 
-    fn bindless_slot_count() -> Option<u32> {
+    fn bindless_slot_count() -> Option<BindlessSlotCount> {
         match (B::bindless_slot_count(), E::bindless_slot_count()) {
-            (Some(base_bindless_slot_count), Some(extension_bindless_slot_count)) => {
-                Some(base_bindless_slot_count.min(extension_bindless_slot_count))
+            (Some(BindlessSlotCount::Auto), Some(BindlessSlotCount::Auto)) => {
+                Some(BindlessSlotCount::Auto)
             }
+            (Some(BindlessSlotCount::Auto), Some(BindlessSlotCount::Custom(limit)))
+            | (Some(BindlessSlotCount::Custom(limit)), Some(BindlessSlotCount::Auto)) => {
+                Some(BindlessSlotCount::Custom(limit))
+            }
+            (
+                Some(BindlessSlotCount::Custom(base_limit)),
+                Some(BindlessSlotCount::Custom(extension_limit)),
+            ) => Some(BindlessSlotCount::Custom(base_limit.min(extension_limit))),
             _ => None,
         }
     }

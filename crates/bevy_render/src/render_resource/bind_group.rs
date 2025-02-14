@@ -16,6 +16,11 @@ use wgpu::{BindGroupEntry, BindGroupLayoutEntry, BindingResource, TextureViewDim
 
 define_atomic_id!(BindGroupId);
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 16;
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 256;
+
 /// Bind groups are responsible for binding render resources (e.g. buffers, textures, samplers)
 /// to a [`TrackedRenderPass`](crate::render_phase::TrackedRenderPass).
 /// This makes them accessible in the pipeline (shaders) as uniforms.
@@ -364,7 +369,7 @@ pub trait AsBindGroup {
     /// Note that the *actual* slot count may be different from this value, due
     /// to platform limitations. For example, if bindless resources aren't
     /// supported on this platform, the actual slot count will be 1.
-    fn bindless_slot_count() -> Option<u32> {
+    fn bindless_slot_count() -> Option<BindlessSlotCount> {
         None
     }
 
@@ -463,6 +468,12 @@ pub enum AsBindGroupError {
     CreateBindGroupDirectly,
     #[error("At binding index {0}, the provided image sampler `{1}` does not match the required sampler type(s) `{2}`.")]
     InvalidSamplerType(u32, String, String),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum BindlessSlotCount {
+    Auto,
+    Custom(u32),
 }
 
 /// A prepared bind group returned as a result of [`AsBindGroup::as_bind_group`].

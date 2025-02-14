@@ -15,15 +15,16 @@ use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_render::{
     render_resource::{
         BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource,
-        BindingType, Buffer, BufferBinding, BufferInitDescriptor, BufferUsages,
+        BindingType, BindlessSlotCount, Buffer, BufferBinding, BufferInitDescriptor, BufferUsages,
         OwnedBindingResource, Sampler, SamplerDescriptor, TextureViewDimension,
-        UnpreparedBindGroup, WgpuSampler, WgpuTextureView,
+        UnpreparedBindGroup, WgpuSampler, WgpuTextureView, AUTO_BINDLESS_SLOT_COUNT,
     },
     renderer::RenderDevice,
     texture::FallbackImage,
 };
 use bevy_utils::default;
-use core::{any, iter, marker::PhantomData, num::NonZero};
+use core::{any, marker::PhantomData, num::NonZero};
+use roaring::RoaringBitmap;
 use tracing::error;
 
 /// An object that creates and stores bind groups for a single material type.
@@ -91,7 +92,11 @@ where
     ///
     /// We keep this value so that we can quickly find the next free slot when
     /// we go to allocate.
-    used_slot_bitmap: u32,
+    free_slots: RoaringBitmap,
+
+    allocation_count: u32,
+
+    max_allocation_count: u32,
 }
 
 /// Information that the allocator keeps about each bind group for which
@@ -157,17 +162,17 @@ impl From<u32> for MaterialBindGroupIndex {
 /// non-bindless mode, this slot is always 0.
 #[derive(Clone, Copy, Debug, Default, Reflect, Deref, DerefMut)]
 #[reflect(Default)]
-pub struct MaterialBindGroupSlot(pub u16);
+pub struct MaterialBindGroupSlot(pub u32);
 
 impl From<u32> for MaterialBindGroupSlot {
     fn from(value: u32) -> Self {
-        MaterialBindGroupSlot(value as u16)
+        MaterialBindGroupSlot(value)
     }
 }
 
 impl From<MaterialBindGroupSlot> for u32 {
     fn from(value: MaterialBindGroupSlot) -> Self {
-        value.0 as u32
+        value.0
     }
 }
 
@@ -447,12 +452,18 @@ where
 {
     /// Returns a new bind group.
     fn new() -> MaterialBindlessBindGroup<M> {
-        let count = M::bindless_slot_count().unwrap_or(1);
+        let max_allocation_count = match M::bindless_slot_count() {
+            None => 1,
+            Some(BindlessSlotCount::Custom(limit)) => limit,
+            Some(BindlessSlotCount::Auto) => AUTO_BINDLESS_SLOT_COUNT,
+        };
 
         MaterialBindlessBindGroup {
             bind_group: None,
-            unprepared_bind_groups: iter::repeat_with(|| None).take(count as usize).collect(),
-            used_slot_bitmap: 0,
+            unprepared_bind_groups: vec![],
+            free_slots: RoaringBitmap::full(),
+            allocation_count: 0,
+            max_allocation_count,
         }
     }
 
@@ -463,8 +474,13 @@ where
         debug_assert!(!self.is_full());
 
         // Mark the slot as used.
-        let slot = self.used_slot_bitmap.trailing_ones();
-        self.used_slot_bitmap |= 1 << slot;
+        let slot = self
+            .free_slots
+            .iter()
+            .next()
+            .expect("There should be a free slot if we aren't full");
+        self.free_slots.remove(slot);
+        self.allocation_count += 1;
 
         slot.into()
     }
@@ -477,6 +493,10 @@ where
         slot: MaterialBindGroupSlot,
         unprepared_bind_group: UnpreparedBindGroup<M::Data>,
     ) {
+        let needed_len = slot.0 as usize + 1;
+        if self.unprepared_bind_groups.len() < needed_len {
+            self.unprepared_bind_groups.resize_with(needed_len, || None);
+        }
         self.unprepared_bind_groups[slot.0 as usize] = Some(unprepared_bind_group);
 
         // Invalidate the cached bind group so that we rebuild it again.
@@ -486,7 +506,19 @@ where
     /// Marks the given slot as free.
     fn free(&mut self, slot: MaterialBindGroupSlot) {
         self.unprepared_bind_groups[slot.0 as usize] = None;
-        self.used_slot_bitmap &= !(1 << slot.0);
+        self.free_slots.insert(slot.0);
+        self.allocation_count -= 1;
+
+        // Shrink to fit.
+        // It'd be nice if we could do this in O(1), but `hibitset` doesn't
+        // currently support reverse iteration.
+        while self
+            .unprepared_bind_groups
+            .last()
+            .is_some_and(Option::is_none)
+        {
+            self.unprepared_bind_groups.pop();
+        }
 
         // Invalidate the cached bind group so that we rebuild it again.
         self.bind_group = None;
@@ -495,7 +527,7 @@ where
     /// Returns true if all the slots are full or false if at least one slot in
     /// this bind group is free.
     fn is_full(&self) -> bool {
-        self.used_slot_bitmap == (1 << (self.unprepared_bind_groups.len() as u32)) - 1
+        self.allocation_count == self.max_allocation_count
     }
 
     /// Returns the actual bind group, or `None` if it hasn't been created yet.

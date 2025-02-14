@@ -3,19 +3,19 @@
 #import bevy_pbr::pbr_types::StandardMaterial
 
 #ifdef BINDLESS
-@group(2) @binding(0) var<storage> material: binding_array<StandardMaterial, 16>;
-@group(2) @binding(1) var base_color_texture: binding_array<texture_2d<f32>, 16>;
-@group(2) @binding(2) var base_color_sampler: binding_array<sampler, 16>;
-@group(2) @binding(3) var emissive_texture: binding_array<texture_2d<f32>, 16>;
-@group(2) @binding(4) var emissive_sampler: binding_array<sampler, 16>;
-@group(2) @binding(5) var metallic_roughness_texture: binding_array<texture_2d<f32>, 16>;
-@group(2) @binding(6) var metallic_roughness_sampler: binding_array<sampler, 16>;
-@group(2) @binding(7) var occlusion_texture: binding_array<texture_2d<f32>, 16>;
-@group(2) @binding(8) var occlusion_sampler: binding_array<sampler, 16>;
-@group(2) @binding(9) var normal_map_texture: binding_array<texture_2d<f32>, 16>;
-@group(2) @binding(10) var normal_map_sampler: binding_array<sampler, 16>;
-@group(2) @binding(11) var depth_map_texture: binding_array<texture_2d<f32>, 16>;
-@group(2) @binding(12) var depth_map_sampler: binding_array<sampler, 16>;
+@group(2) @binding(0) var<storage> material: binding_array<StandardMaterial>;
+@group(2) @binding(1) var base_color_texture: binding_array<texture_2d<f32>>;
+@group(2) @binding(2) var base_color_sampler: binding_array<sampler>;
+@group(2) @binding(3) var emissive_texture: binding_array<texture_2d<f32>>;
+@group(2) @binding(4) var emissive_sampler: binding_array<sampler>;
+@group(2) @binding(5) var metallic_roughness_texture: binding_array<texture_2d<f32>>;
+@group(2) @binding(6) var metallic_roughness_sampler: binding_array<sampler>;
+@group(2) @binding(7) var occlusion_texture: binding_array<texture_2d<f32>>;
+@group(2) @binding(8) var occlusion_sampler: binding_array<sampler>;
+@group(2) @binding(9) var normal_map_texture: binding_array<texture_2d<f32>>;
+@group(2) @binding(10) var normal_map_sampler: binding_array<sampler>;
+@group(2) @binding(11) var depth_map_texture: binding_array<texture_2d<f32>>;
+@group(2) @binding(12) var depth_map_sampler: binding_array<sampler>;
 #else   // BINDLESS
 @group(2) @binding(0) var<uniform> material: StandardMaterial;
 @group(2) @binding(1) var base_color_texture: texture_2d<f32>;

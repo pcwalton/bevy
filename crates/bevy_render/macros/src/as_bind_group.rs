@@ -39,6 +39,11 @@ enum BindingState<'a> {
     },
 }
 
+enum BindlessCountAttr {
+    Auto,
+    Limit(Lit),
+}
+
 pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
     let manifest = BevyManifest::shared();
     let render_path = manifest.get_path("bevy_render");
@@ -110,10 +115,16 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                 }
                 binding_states[binding_index as usize] = BindingState::OccupiedConvertedUniform;
             } else if attr_ident == BINDLESS_ATTRIBUTE_NAME {
-                if let Ok(count_lit) =
-                    attr.parse_args_with(|input: ParseStream| input.parse::<Lit>())
-                {
-                    attr_bindless_count = Some(count_lit);
+                match attr.meta {
+                    Meta::Path(_) => attr_bindless_count = Some(BindlessCountAttr::Auto),
+                    Meta::List(_) => {
+                        if let Ok(count_lit) =
+                            attr.parse_args_with(|input: ParseStream| input.parse::<Lit>())
+                        {
+                            attr_bindless_count = Some(BindlessCountAttr::Limit(count_lit));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -135,7 +146,7 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
     // Count the number of sampler fields needed. We might have to disable
     // bindless if bindless arrays take the GPU over the maximum number of
     // samplers.
-    let mut sampler_binding_count = 0;
+    let mut sampler_binding_count: u32 = 0;
 
     // Read field-level attributes
     for field in fields {
@@ -571,41 +582,76 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
     // Calculate the number of samplers that we need, so that we don't go over
     // the limit on certain platforms. See
     // https://github.com/bevyengine/bevy/issues/16988.
-    let samplers_needed = match attr_bindless_count {
-        Some(Lit::Int(ref bindless_count)) => match bindless_count.base10_parse::<u32>() {
+    let bindless_count_syntax = match attr_bindless_count {
+        Some(BindlessCountAttr::Auto) => {
+            quote! { #render_path::render_resource::AUTO_BINDLESS_SLOT_COUNT }
+        }
+        Some(BindlessCountAttr::Limit(ref count)) => {
+            quote! { #count }
+        }
+        None => quote! { 0 },
+    };
+    /*let samplers_needed = match attr_bindless_count {
+        Some(BindlessCountAttr::Limit(Lit::Int(ref bindless_count))) => match bindless_count.base10_parse::<u32>() {
             Ok(bindless_count) => sampler_binding_count * bindless_count,
             Err(_) => 0,
         },
         _ => 0,
-    };
+    };*/
 
     // Calculate the actual number of bindless slots, taking hardware
     // limitations into account.
     let (bindless_slot_count, actual_bindless_slot_count_declaration) = match attr_bindless_count {
-        Some(bindless_count) => (
-            quote! {
-                fn bindless_slot_count() -> Option<u32> {
-                    Some(#bindless_count)
-                }
-
-                fn bindless_supported(render_device: &#render_path::renderer::RenderDevice) -> bool {
-                    render_device.features().contains(
-                        #render_path::settings::WgpuFeatures::BUFFER_BINDING_ARRAY |
-                        #render_path::settings::WgpuFeatures::TEXTURE_BINDING_ARRAY
-                    ) &&
-                    render_device.limits().max_storage_buffers_per_shader_stage > 0 &&
-                        render_device.limits().max_samplers_per_shader_stage >= #samplers_needed
-                }
-            },
-            quote! {
+        Some(ref bindless_count) => {
+            let bindless_supported_syntax = quote! {
+                    fn bindless_supported(
+                        render_device: &#render_path::renderer::RenderDevice
+                    ) -> bool {
+                        render_device.features().contains(
+                            #render_path::settings::WgpuFeatures::BUFFER_BINDING_ARRAY |
+                            #render_path::settings::WgpuFeatures::TEXTURE_BINDING_ARRAY
+                        ) &&
+                        render_device.limits().max_storage_buffers_per_shader_stage > 0 &&
+                            render_device.limits().max_samplers_per_shader_stage >=
+                                (#sampler_binding_count * #bindless_count_syntax)
+                    }
+            };
+            let actual_bindless_slot_count_declaration = quote! {
                 let #actual_bindless_slot_count = if Self::bindless_supported(render_device) &&
                         !force_no_bindless {
-                    ::core::num::NonZeroU32::new(#bindless_count)
+                    ::core::num::NonZeroU32::new(#bindless_count_syntax)
                 } else {
                     None
                 };
-            },
-        ),
+            };
+            let bindless_slot_count_declaration = match bindless_count {
+                BindlessCountAttr::Auto => {
+                    quote! {
+                        fn bindless_slot_count() -> Option<
+                            #render_path::render_resource::BindlessSlotCount
+                        > {
+                            Some(#render_path::render_resource::BindlessSlotCount::Auto)
+                        }
+                    }
+                }
+                BindlessCountAttr::Limit(lit) => {
+                    quote! {
+                        fn bindless_slot_count() -> Option<
+                            #render_path::render_resource::BindlessSlotCount
+                        > {
+                            Some(#render_path::render_resource::BindlessSlotCount::Custom(#lit))
+                        }
+                    }
+                }
+            };
+            (
+                quote! {
+                    #bindless_slot_count_declaration
+                    #bindless_supported_syntax
+                },
+                actual_bindless_slot_count_declaration,
+            )
+        }
         None => (
             TokenStream::new().into(),
             quote! { let #actual_bindless_slot_count: Option<::core::num::NonZeroU32> = None; },
