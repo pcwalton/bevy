@@ -12,9 +12,11 @@ pub use bevy_render_macros::AsBindGroup;
 use core::ops::Deref;
 use encase::ShaderType;
 use thiserror::Error;
-use wgpu::{BindGroupEntry, BindGroupLayoutEntry, BindingResource, SamplerBindingType, TextureViewDimension};
+use wgpu::{
+    BindGroupEntry, BindGroupLayoutEntry, BindingResource, SamplerBindingType, TextureViewDimension,
+};
 
-use super::BindlessDescriptor;
+use super::{BindlessDescriptor, BindlessSlotCount};
 
 define_atomic_id!(BindGroupId);
 

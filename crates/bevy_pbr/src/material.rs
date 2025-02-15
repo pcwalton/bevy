@@ -1194,11 +1194,6 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
             ref mut material_param,
         ): &mut SystemParamItem<Self::Param>,
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
-        // Allocate a material binding ID if needed.
-        let material_binding_id = *render_material_bindings
-            .entry(material_id.into())
-            .or_insert_with(|| bind_group_allocator.allocate());
-
         let draw_opaque_pbr = opaque_draw_functions.read().id::<DrawMaterial<M>>();
         let draw_alpha_mask_pbr = alpha_mask_draw_functions.read().id::<DrawMaterial<M>>();
         let draw_transmissive_pbr = transmissive_draw_functions.read().id::<DrawMaterial<M>>();
@@ -1264,10 +1259,10 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
             false,
         ) {
             Ok(unprepared) => {
-                bind_group_allocator.init(render_device, material_binding_id, unprepared);
+                let binding = bind_group_allocator.allocate(unprepared);
 
                 Ok(PreparedMaterial {
-                    binding: material_binding_id,
+                    binding,
                     properties: MaterialProperties {
                         alpha_mode: material.alpha_mode(),
                         depth_bias: material.depth_bias(),
@@ -1292,6 +1287,8 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
                 // and is requesting a fully-custom bind group. Invoke
                 // `as_bind_group` as requested, and store the resulting bind
                 // group in the slot.
+                todo!("CreateBindGroupDirectly");
+                /*
                 match material.as_bind_group(
                     &pipeline.material_layout,
                     render_device,
@@ -1328,6 +1325,7 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
 
                     Err(other) => Err(PrepareAssetError::AsBindGroupError(other)),
                 }
+                */
             }
 
             Err(other) => Err(PrepareAssetError::AsBindGroupError(other)),

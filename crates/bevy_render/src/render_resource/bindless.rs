@@ -5,7 +5,9 @@ use std::{
     num::{NonZeroU32, NonZeroU64},
 };
 
-use wgpu::{BindGroupLayoutEntry, SamplerBindingType, ShaderStages, TextureSampleType};
+use wgpu::{
+    BindGroupLayoutEntry, SamplerBindingType, ShaderStages, TextureSampleType, TextureViewDimension,
+};
 
 use crate::render_resource::binding_types::storage_buffer_read_only_sized;
 
@@ -17,6 +19,18 @@ use super::binding_types::{
 pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 16;
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 256;
+
+pub static BINDING_NUMBERS: [(BindlessResourceType, u32); 9] = [
+    (BindlessResourceType::SamplerFiltering, 1),
+    (BindlessResourceType::SamplerNonFiltering, 2),
+    (BindlessResourceType::SamplerComparison, 3),
+    (BindlessResourceType::Texture1d, 4),
+    (BindlessResourceType::Texture2d, 5),
+    (BindlessResourceType::Texture2dArray, 6),
+    (BindlessResourceType::Texture3d, 7),
+    (BindlessResourceType::TextureCube, 8),
+    (BindlessResourceType::TextureCubeArray, 9),
+];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BindlessSlotCount {
@@ -30,20 +44,19 @@ pub struct BindlessDescriptor {
     pub buffers: Cow<'static, [BindlessBufferDescriptor]>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum BindlessResourceType {
-    None = 0,
-    Buffer = 1,
-    SamplerFiltering = 2,
-    SamplerNonFiltering = 3,
-    SamplerComparison = 4,
-    Texture1d = 5,
-    Texture2d = 6,
-    Texture2dArray = 7,
-    Texture3d = 8,
-    TextureCube = 9,
-    TextureCubeArray = 10,
+    None,
+    Buffer,
+    SamplerFiltering,
+    SamplerNonFiltering,
+    SamplerComparison,
+    Texture1d,
+    Texture2d,
+    Texture2dArray,
+    Texture3d,
+    TextureCube,
+    TextureCubeArray,
 }
 
 #[derive(Clone, Copy)]
@@ -100,6 +113,38 @@ impl BindlessSlotCount {
         match *self {
             BindlessSlotCount::Auto => AUTO_BINDLESS_SLOT_COUNT,
             BindlessSlotCount::Custom(limit) => limit,
+        }
+    }
+}
+
+impl BindlessResourceType {
+    pub fn binding_number(&self) -> Option<&'static u32> {
+        match BINDING_NUMBERS.binary_search_by_key(self, |(key, _)| *key) {
+            Ok(position) => Some(&BINDING_NUMBERS[position].1),
+            Err(_) => None,
+        }
+    }
+}
+
+impl From<TextureViewDimension> for BindlessResourceType {
+    fn from(texture_view_dimension: TextureViewDimension) -> Self {
+        match texture_view_dimension {
+            TextureViewDimension::D1 => BindlessResourceType::Texture1d,
+            TextureViewDimension::D2 => BindlessResourceType::Texture2d,
+            TextureViewDimension::D2Array => BindlessResourceType::Texture2dArray,
+            TextureViewDimension::Cube => BindlessResourceType::TextureCube,
+            TextureViewDimension::CubeArray => BindlessResourceType::TextureCubeArray,
+            TextureViewDimension::D3 => BindlessResourceType::Texture3d,
+        }
+    }
+}
+
+impl From<SamplerBindingType> for BindlessResourceType {
+    fn from(sampler_binding_type: SamplerBindingType) -> Self {
+        match sampler_binding_type {
+            SamplerBindingType::Filtering => BindlessResourceType::SamplerFiltering,
+            SamplerBindingType::NonFiltering => BindlessResourceType::SamplerNonFiltering,
+            SamplerBindingType::Comparison => BindlessResourceType::SamplerComparison,
         }
     }
 }
