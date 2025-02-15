@@ -14,6 +14,10 @@
 #import bevy_pbr::meshlet_visibility_buffer_resolve::resolve_vertex_output
 #endif
 
+#ifdef BINDLESS
+#import bevy_pbr::pbr_bindings::material_bindings
+#endif  // BINDLESS
+
 #ifdef PREPASS_FRAGMENT
 @fragment
 fn fragment(

@@ -10,11 +10,12 @@ use bevy_reflect::{prelude::ReflectDefault, Reflect};
 use bevy_render::{
     render_resource::{
         BindGroup, BindGroupEntry, BindGroupLayout, BindingResource, BindlessDescriptor,
-        BindlessResourceType, Buffer, BufferBinding, BufferId, BufferUsages, OwnedBindingResource,
-        RawBufferVec, Sampler, SamplerDescriptor, SamplerId, TextureView, TextureViewDimension,
-        TextureViewId, UnpreparedBindGroup, WgpuSampler, WgpuTextureView,
+        BindlessResourceType, Buffer, BufferBinding, BufferId, BufferUsages, CompareFunction,
+        FilterMode, OwnedBindingResource, RawBufferVec, Sampler, SamplerDescriptor, SamplerId,
+        TextureView, TextureViewDimension, TextureViewId, UnpreparedBindGroup, WgpuSampler,
+        WgpuTextureView,
     },
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderQueue},
     texture::FallbackImage,
 };
 use bevy_utils::default;
@@ -33,6 +34,7 @@ where
     slabs: Vec<MaterialBindlessSlab<M>>,
     bind_group_layout: BindGroupLayout,
     bindless_descriptor: BindlessDescriptor,
+    slab_capacity: u32,
 }
 
 pub struct MaterialBindlessSlab<M>
@@ -61,11 +63,14 @@ where
     M: Material,
 {
     buffer: RawBufferVec<u32>,
+    buffer_dirty: BufferDirtyState,
     free_slots: Vec<u32>,
     phantom: PhantomData<M>,
 }
 
 struct MaterialBindlessBindingArray<R> {
+    // This is necessary because of the `wgpu` API.
+    binding_index: u32,
     bindings: Vec<Option<MaterialBindlessBinding<R>>>,
     resource_to_slot: HashMap<BindingResourceId, u32>,
     free_slots: Vec<u32>,
@@ -82,7 +87,9 @@ struct MaterialBindlessBinding<R> {
 pub struct FallbackBindlessResources {
     /// A dummy sampler that we fill unused slots in bindless sampler arrays
     /// with.
-    fallback_sampler: Sampler,
+    filtering_sampler: Sampler,
+    non_filtering_sampler: Sampler,
+    comparison_sampler: Sampler,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -135,6 +142,12 @@ impl From<u32> for MaterialBindGroupIndex {
 #[reflect(Default)]
 pub struct MaterialBindGroupSlot(pub u32);
 
+enum BufferDirtyState {
+    Clean,
+    NeedsReserve,
+    NeedsUpload,
+}
+
 impl From<u32> for MaterialBindGroupSlot {
     fn from(value: u32) -> Self {
         MaterialBindGroupSlot(value)
@@ -177,10 +190,17 @@ impl<M> MaterialBindlessSlabBindings<M>
 where
     M: Material,
 {
-    fn new() -> MaterialBindlessSlabBindings<M> {
+    fn new(bindless_descriptor: &BindlessDescriptor) -> MaterialBindlessSlabBindings<M> {
+        // Preallocate space for one bindings table, so that there will always be a buffer.
+        let mut buffer = RawBufferVec::new(BufferUsages::STORAGE);
+        for _ in 0..bindless_descriptor.resources.len() {
+            buffer.push(0);
+        }
+
         MaterialBindlessSlabBindings {
-            buffer: RawBufferVec::new(BufferUsages::STORAGE),
+            buffer,
             free_slots: vec![],
+            buffer_dirty: BufferDirtyState::NeedsReserve,
             phantom: PhantomData,
         }
     }
@@ -201,6 +221,29 @@ where
             self.buffer
                 .set(bindless_index + range.start as u32, resource_slot);
         }
+
+        self.buffer_dirty = BufferDirtyState::NeedsReserve;
+    }
+
+    fn prepare_buffer(&mut self, render_device: &RenderDevice) {
+        match self.buffer_dirty {
+            BufferDirtyState::Clean | BufferDirtyState::NeedsUpload => {}
+            BufferDirtyState::NeedsReserve => {
+                let capacity = self.buffer.len();
+                self.buffer.reserve(capacity, render_device);
+                self.buffer_dirty = BufferDirtyState::NeedsUpload;
+            }
+        }
+    }
+
+    fn write_buffer(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
+        match self.buffer_dirty {
+            BufferDirtyState::Clean => {}
+            BufferDirtyState::NeedsReserve | BufferDirtyState::NeedsUpload => {
+                self.buffer.write_buffer(render_device, render_queue);
+                self.buffer_dirty = BufferDirtyState::Clean;
+            }
+        }
     }
 }
 
@@ -213,6 +256,9 @@ where
             slabs: vec![],
             bind_group_layout: M::bind_group_layout(render_device),
             bindless_descriptor: M::bindless_descriptor().expect("TODO: non-bindless"),
+            slab_capacity: M::bindless_slot_count()
+                .expect("TODO: non-bindless")
+                .resolve(),
         }
     }
 
@@ -234,7 +280,10 @@ where
         }
 
         let group = MaterialBindGroupIndex(self.slabs.len() as u32);
-        self.slabs.push(MaterialBindlessSlab::new());
+        self.slabs.push(MaterialBindlessSlab::new(
+            self.slab_capacity,
+            &self.bindless_descriptor,
+        ));
 
         let Ok(slot) = self
             .slabs
@@ -263,13 +312,19 @@ where
         fallback_image: &FallbackImage,
     ) {
         for slab in &mut self.slabs {
-            slab.prepare_bind_group(
+            slab.prepare(
                 render_device,
                 &self.bind_group_layout,
                 fallback_bindless_resources,
                 fallback_image,
                 &self.bindless_descriptor,
             );
+        }
+    }
+
+    pub fn write_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
+        for slab in &mut self.slabs {
+            slab.write_buffer(render_device, render_queue);
         }
     }
 }
@@ -509,7 +564,7 @@ where
         Ok(MaterialBindGroupSlot(slot))
     }
 
-    fn prepare_bind_group(
+    fn prepare(
         &mut self,
         render_device: &RenderDevice,
         bind_group_layout: &BindGroupLayout,
@@ -517,6 +572,8 @@ where
         fallback_image: &FallbackImage,
         bindless_descriptor: &BindlessDescriptor,
     ) {
+        self.bindings.prepare_buffer(render_device);
+
         if self.bind_group.is_some() {
             return;
         }
@@ -527,29 +584,45 @@ where
             bindless_descriptor,
         );
 
-        let bind_group_entries: Vec<_> = binding_resource_arrays
-            .iter()
-            .map(|&(&binding, ref binding_resource_array)| BindGroupEntry {
+        let mut bind_group_entries = vec![BindGroupEntry {
+            binding: 0,
+            resource: self
+                .bindings
+                .buffer
+                .buffer()
+                .expect("Bindings buffer must exist")
+                .as_entire_binding(),
+        }];
+
+        for &(&binding, ref binding_resource_array) in binding_resource_arrays.iter() {
+            bind_group_entries.push(BindGroupEntry {
                 binding,
                 resource: match *binding_resource_array {
                     BindingResourceArray::Buffers(ref buffer_bindings) => {
+                        println!("setting buffer array binding {}", binding);
                         BindingResource::BufferArray(&buffer_bindings[..])
                     }
                     BindingResourceArray::TextureViews(ref texture_views) => {
+                        println!("setting texture view array binding {}", binding);
                         BindingResource::TextureViewArray(&texture_views[..])
                     }
                     BindingResourceArray::Samplers(ref samplers) => {
+                        println!("setting sampler array binding {}", binding);
                         BindingResource::SamplerArray(&samplers[..])
                     }
                 },
-            })
-            .collect();
+            });
+        }
 
         self.bind_group = Some(render_device.create_bind_group(
             M::label(),
             bind_group_layout,
             &bind_group_entries,
         ));
+    }
+
+    fn write_buffer(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
+        self.bindings.write_buffer(render_device, render_queue);
     }
 
     fn create_binding_resource_arrays<'a>(
@@ -561,21 +634,49 @@ where
         let mut binding_resource_arrays = vec![];
 
         // Build sampler bindings.
-        for (bindless_resource_type, sampler_bindless_binding_array) in self.samplers.iter() {
-            let sampler_bindings = sampler_bindless_binding_array
-                .bindings
-                .iter()
-                .map(|maybe_bindless_binding| match *maybe_bindless_binding {
-                    Some(ref bindless_binding) => &bindless_binding.resource,
-                    None => &*fallback_bindless_resources.fallback_sampler,
-                })
-                .collect();
-            binding_resource_arrays.push((
-                bindless_resource_type
-                    .binding_number()
-                    .expect("Sampler bindless resource type must have a binding number"),
-                BindingResourceArray::Samplers(sampler_bindings),
-            ));
+        //for (bindless_resource_type, sampler_bindless_binding_array) in self.samplers.iter() {
+        for (bindless_resource_type, fallback_sampler) in [
+            (
+                BindlessResourceType::SamplerFiltering,
+                &fallback_bindless_resources.filtering_sampler,
+            ),
+            (
+                BindlessResourceType::SamplerNonFiltering,
+                &fallback_bindless_resources.non_filtering_sampler,
+            ),
+            (
+                BindlessResourceType::SamplerComparison,
+                &fallback_bindless_resources.comparison_sampler,
+            ),
+        ] {
+            match self.samplers.get(&bindless_resource_type) {
+                Some(sampler_bindless_binding_array) => {
+                    let sampler_bindings = sampler_bindless_binding_array
+                        .bindings
+                        .iter()
+                        .map(|maybe_bindless_binding| match *maybe_bindless_binding {
+                            Some(ref bindless_binding) => &bindless_binding.resource,
+                            None => &**fallback_sampler,
+                        })
+                        .collect();
+                    binding_resource_arrays.push((
+                        &sampler_bindless_binding_array.binding_index,
+                        BindingResourceArray::Samplers(sampler_bindings),
+                    ));
+                }
+
+                // Fill with a single fallback sampler.
+                None => {
+                    let binding_number = bindless_resource_type
+                        .binding_number()
+                        .expect("Sampler bindless resource type must have a binding number");
+
+                    binding_resource_arrays.push((
+                        binding_number,
+                        BindingResourceArray::Samplers(vec![&**fallback_sampler]),
+                    ));
+                }
+            }
         }
 
         // Build texture bindings.
@@ -593,36 +694,46 @@ where
                 &fallback_image.cube_array,
             ),
         ] {
-            let Some(texture_bindless_binding_array) = self.textures.get(&bindless_resource_type)
-            else {
-                continue;
-            };
-            let texture_bindings = texture_bindless_binding_array
-                .bindings
-                .iter()
-                .map(|maybe_bindless_binding| match *maybe_bindless_binding {
-                    Some(ref bindless_binding) => &*bindless_binding.resource,
-                    None => &*fallback_image.texture_view,
-                })
-                .collect();
-            binding_resource_arrays.push((
-                bindless_resource_type
-                    .binding_number()
-                    .expect("Texture bindless resource type must have a binding number"),
-                BindingResourceArray::TextureViews(texture_bindings),
-            ));
+            match self.textures.get(&bindless_resource_type) {
+                Some(texture_bindless_binding_array) => {
+                    let texture_bindings = texture_bindless_binding_array
+                        .bindings
+                        .iter()
+                        .map(|maybe_bindless_binding| match *maybe_bindless_binding {
+                            Some(ref bindless_binding) => &*bindless_binding.resource,
+                            None => &*fallback_image.texture_view,
+                        })
+                        .collect();
+                    binding_resource_arrays.push((
+                        &texture_bindless_binding_array.binding_index,
+                        BindingResourceArray::TextureViews(texture_bindings),
+                    ));
+                }
+
+                // Fill with a single fallback image.
+                None => {
+                    let binding_number = bindless_resource_type
+                        .binding_number()
+                        .expect("Texture bindless resource type must have a binding number");
+
+                    binding_resource_arrays.push((
+                        binding_number,
+                        BindingResourceArray::TextureViews(vec![&*fallback_image.texture_view]),
+                    ));
+                }
+            }
         }
 
         // Build buffer bindings.
         // FIXME: O(n^2), may want to mandate that `BindlessDescriptor::buffers` is sorted
         for bindless_buffer_descriptor in bindless_descriptor.buffers.iter() {
-            let Some((bindless_buffer_index, buffer_bindless_binding_array)) = self
-                .buffers
-                .get_key_value(&bindless_buffer_descriptor.index)
+            let Some(buffer_bindless_binding_array) =
+                self.buffers.get(&bindless_buffer_descriptor.bindless_index)
             else {
                 error!(
-                    "Slab didn't contain a binding array for buffer {}",
-                    bindless_buffer_descriptor.index
+                    "Slab didn't contain a binding array for buffer binding {}, bindless {}",
+                    bindless_buffer_descriptor.binding_index,
+                    bindless_buffer_descriptor.bindless_index,
                 );
                 continue;
             };
@@ -644,7 +755,7 @@ where
                 })
                 .collect();
             binding_resource_arrays.push((
-                bindless_buffer_index,
+                &buffer_bindless_binding_array.binding_index,
                 BindingResourceArray::Buffers(buffer_bindings),
             ));
         }
@@ -665,6 +776,17 @@ where
 }
 
 impl<R> MaterialBindlessBindingArray<R> {
+    fn new(binding_index: u32, capacity: u32) -> MaterialBindlessBindingArray<R> {
+        MaterialBindlessBindingArray {
+            binding_index,
+            bindings: vec![],
+            resource_to_slot: HashMap::default(),
+            free_slots: vec![],
+            len: 0,
+            capacity,
+        }
+    }
+
     fn has_free_slots(&self, slot_count: u32) -> bool {
         self.len + slot_count < self.capacity
     }
@@ -677,7 +799,12 @@ impl<R> MaterialBindlessBindingArray<R> {
         debug_assert_ne!(self.len, self.capacity);
         let slot = self.free_slots.pop().unwrap_or(self.len);
         self.resource_to_slot.insert(binding_resource_id, slot);
+
+        if self.bindings.len() < slot as usize + 1 {
+            self.bindings.resize_with(slot as usize + 1, || None);
+        }
         self.bindings[slot as usize] = Some(MaterialBindlessBinding::new(resource));
+
         self.len += 1;
         slot
     }
@@ -708,13 +835,70 @@ impl<M> MaterialBindlessSlab<M>
 where
     M: Material,
 {
-    fn new() -> MaterialBindlessSlab<M> {
+    fn new(
+        slab_capacity: u32,
+        bindless_descriptor: &BindlessDescriptor,
+    ) -> MaterialBindlessSlab<M> {
+        let mut buffers = HashMap::default();
+        let mut samplers = HashMap::default();
+        let mut textures = HashMap::default();
+
+        for (bindless_index, bindless_resource_type) in
+            bindless_descriptor.resources.iter().enumerate()
+        {
+            match *bindless_resource_type {
+                BindlessResourceType::None => {}
+                BindlessResourceType::Buffer => {
+                    let binding_index = bindless_descriptor
+                        .buffers
+                        .iter()
+                        .find(|bindless_buffer_descriptor| {
+                            bindless_buffer_descriptor.bindless_index as usize == bindless_index
+                        })
+                        .expect(
+                            "Bindless buffer descriptor matching that bindless index should be \
+                             present",
+                        )
+                        .binding_index;
+                    buffers.insert(
+                        bindless_index as u32,
+                        MaterialBindlessBindingArray::new(binding_index, slab_capacity),
+                    );
+                }
+                BindlessResourceType::SamplerFiltering
+                | BindlessResourceType::SamplerNonFiltering
+                | BindlessResourceType::SamplerComparison => {
+                    samplers.insert(
+                        *bindless_resource_type,
+                        MaterialBindlessBindingArray::new(
+                            *bindless_resource_type.binding_number().unwrap(),
+                            slab_capacity,
+                        ),
+                    );
+                }
+                BindlessResourceType::Texture1d
+                | BindlessResourceType::Texture2d
+                | BindlessResourceType::Texture2dArray
+                | BindlessResourceType::Texture3d
+                | BindlessResourceType::TextureCube
+                | BindlessResourceType::TextureCubeArray => {
+                    textures.insert(
+                        *bindless_resource_type,
+                        MaterialBindlessBindingArray::new(
+                            *bindless_resource_type.binding_number().unwrap(),
+                            slab_capacity,
+                        ),
+                    );
+                }
+            }
+        }
+
         MaterialBindlessSlab {
             bind_group: None,
-            bindings: MaterialBindlessSlabBindings::new(),
-            samplers: HashMap::default(),
-            textures: HashMap::default(),
-            buffers: HashMap::default(),
+            bindings: MaterialBindlessSlabBindings::new(bindless_descriptor),
+            samplers,
+            textures,
+            buffers,
             extra_data: vec![],
             live_allocation_count: 0,
         }
@@ -725,8 +909,20 @@ impl FromWorld for FallbackBindlessResources {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
         FallbackBindlessResources {
-            fallback_sampler: render_device.create_sampler(&SamplerDescriptor {
-                label: Some("fallback sampler"),
+            filtering_sampler: render_device.create_sampler(&SamplerDescriptor {
+                label: Some("fallback filtering sampler"),
+                ..default()
+            }),
+            non_filtering_sampler: render_device.create_sampler(&SamplerDescriptor {
+                label: Some("fallback non-filtering sampler"),
+                mag_filter: FilterMode::Nearest,
+                min_filter: FilterMode::Nearest,
+                mipmap_filter: FilterMode::Nearest,
+                ..default()
+            }),
+            comparison_sampler: render_device.create_sampler(&SamplerDescriptor {
+                label: Some("fallback comparison sampler"),
+                compare: Some(CompareFunction::Always),
                 ..default()
             }),
         }

@@ -11,6 +11,10 @@
     pbr_types,
 }
 
+#ifdef BINDLESS
+#import bevy_pbr::pbr_bindings::material_bindings
+#endif  // BINDLESS
+
 // Cutoff used for the premultiplied alpha modes BLEND, ADD, and ALPHA_TO_COVERAGE.
 const PREMULTIPLIED_ALPHA_CUTOFF = 0.05;
 

@@ -6,7 +6,6 @@ use syn::{
     parenthesized,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
-    spanned::Spanned,
     token::Comma,
     Data, DataStruct, Error, Fields, Lit, LitInt, LitStr, Meta, MetaList, Result,
 };
@@ -138,7 +137,9 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
 
                         bindless_buffer_descriptors.push(quote! {
                             #render_path::render_resource::BindlessBufferDescriptor {
-                                index: #binding_index,
+                                // FIXME: This is confusing!
+                                binding_index: #bindless_binding,
+                                bindless_index: #binding_index,
                                 element_size: ::core::mem::size_of::<#converted_shader_type>(),
                             }
                         });

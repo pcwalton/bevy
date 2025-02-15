@@ -61,7 +61,10 @@ pub enum BindlessResourceType {
 
 #[derive(Clone, Copy)]
 pub struct BindlessBufferDescriptor {
-    pub index: u32,
+    /// The true bindless index.
+    pub binding_index: u32,
+    /// The index in the bindless table.
+    pub bindless_index: u32,
     pub element_size: usize,
 }
 
@@ -77,34 +80,34 @@ pub fn create_bindless_bind_group_layout_entries(
             false,
             NonZeroU64::new(bindless_resource_count as u64 * size_of::<u32>() as u64),
         )
-        .build(0, ShaderStages::FRAGMENT),
+        .build(0, ShaderStages::all()),
         sampler(SamplerBindingType::Filtering)
             .count(bindless_slot_count)
-            .build(1, ShaderStages::FRAGMENT),
+            .build(1, ShaderStages::all()),
         sampler(SamplerBindingType::NonFiltering)
             .count(bindless_slot_count)
-            .build(2, ShaderStages::FRAGMENT),
+            .build(2, ShaderStages::all()),
         sampler(SamplerBindingType::Comparison)
             .count(bindless_slot_count)
-            .build(3, ShaderStages::FRAGMENT),
+            .build(3, ShaderStages::all()),
         texture_1d(TextureSampleType::Float { filterable: true })
             .count(bindless_slot_count)
-            .build(4, ShaderStages::FRAGMENT),
+            .build(4, ShaderStages::all()),
         texture_2d(TextureSampleType::Float { filterable: true })
             .count(bindless_slot_count)
-            .build(5, ShaderStages::FRAGMENT),
+            .build(5, ShaderStages::all()),
         texture_2d_array(TextureSampleType::Float { filterable: true })
             .count(bindless_slot_count)
-            .build(6, ShaderStages::FRAGMENT),
+            .build(6, ShaderStages::all()),
         texture_3d(TextureSampleType::Float { filterable: true })
             .count(bindless_slot_count)
-            .build(7, ShaderStages::FRAGMENT),
+            .build(7, ShaderStages::all()),
         texture_cube(TextureSampleType::Float { filterable: true })
             .count(bindless_slot_count)
-            .build(8, ShaderStages::FRAGMENT),
+            .build(8, ShaderStages::all()),
         texture_cube_array(TextureSampleType::Float { filterable: true })
             .count(bindless_slot_count)
-            .build(9, ShaderStages::FRAGMENT),
+            .build(9, ShaderStages::all()),
     ]
 }
 

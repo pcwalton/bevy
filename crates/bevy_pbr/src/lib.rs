@@ -35,7 +35,6 @@ mod light;
 mod light_probe;
 mod lightmap;
 mod material;
-mod material_bind_groups;
 mod material_bind_groups_2;
 mod mesh_material;
 mod parallax;
@@ -360,7 +359,7 @@ impl Plugin for PbrPlugin {
                 ClusteredDecalPlugin,
             ))
             .add_plugins((
-                decal::ForwardDecalPlugin,
+                //decal::ForwardDecalPlugin,
                 SyncComponentPlugin::<DirectionalLight>::default(),
                 SyncComponentPlugin::<PointLight>::default(),
                 SyncComponentPlugin::<SpotLight>::default(),

@@ -34,6 +34,7 @@ use bevy_platform_support::collections::HashMap;
 use bevy_reflect::std_traits::ReflectDefault;
 use bevy_reflect::Reflect;
 use bevy_render::mesh::mark_3d_meshes_as_changed_if_their_assets_changed;
+use bevy_render::renderer::RenderQueue;
 use bevy_render::{
     batching::gpu_preprocessing::GpuPreprocessingSupport,
     extract_resource::ExtractResource,
@@ -330,7 +331,11 @@ where
                 )
                 .add_systems(
                     Render,
-                    prepare_material_bind_groups::<M>
+                    (
+                        prepare_material_bind_groups::<M>,
+                        write_material_bind_group_buffers::<M>,
+                    )
+                        .chain()
                         .in_set(RenderSet::PrepareBindGroups)
                         .after(prepare_assets::<PreparedMaterial<M>>),
                 );
@@ -1379,4 +1384,14 @@ pub fn prepare_material_bind_groups<M>(
     M: Material,
 {
     allocator.prepare_bind_groups(&render_device, &fallback_resources, &fallback_image);
+}
+
+pub fn write_material_bind_group_buffers<M>(
+    mut allocator: ResMut<MaterialBindGroupAllocator<M>>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+) where
+    M: Material,
+{
+    allocator.write_buffers(&render_device, &render_queue);
 }

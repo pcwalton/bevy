@@ -28,6 +28,10 @@
 #import bevy_pbr::forward_io::VertexOutput
 #endif
 
+#ifdef BINDLESS
+#import bevy_pbr::pbr_bindings::material_bindings
+#endif  // BINDLESS
+
 // prepare a basic PbrInput from the vertex stage output, mesh binding and view binding
 fn pbr_input_from_vertex_output(
     in: VertexOutput,
