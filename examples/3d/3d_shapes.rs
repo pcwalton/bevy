@@ -21,16 +21,16 @@ fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins.set(ImagePlugin::default_nearest()),
-            #[cfg(not(target_arch = "wasm32"))]
-            WireframePlugin,
+            //#[cfg(not(target_arch = "wasm32"))]
+            //WireframePlugin,
         ))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 rotate,
-                #[cfg(not(target_arch = "wasm32"))]
-                toggle_wireframe,
+                //#[cfg(not(target_arch = "wasm32"))]
+                //toggle_wireframe,
             ),
         )
         .run();
@@ -50,10 +50,12 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let debug_material = materials.add(StandardMaterial {
-        base_color_texture: Some(images.add(uv_debug_texture())),
-        ..default()
-    });
+    let mut make_debug_material = || {
+        materials.add(StandardMaterial {
+            base_color_texture: Some(images.add(uv_debug_texture())),
+            ..default()
+        })
+    };
 
     let shapes = [
         meshes.add(Cuboid::default()),
@@ -82,7 +84,7 @@ fn setup(
     for (i, shape) in shapes.into_iter().enumerate() {
         commands.spawn((
             Mesh3d(shape),
-            MeshMaterial3d(debug_material.clone()),
+            MeshMaterial3d(make_debug_material()),
             Transform::from_xyz(
                 -SHAPES_X_EXTENT / 2. + i as f32 / (num_shapes - 1) as f32 * SHAPES_X_EXTENT,
                 2.0,
@@ -98,7 +100,7 @@ fn setup(
     for (i, shape) in extrusions.into_iter().enumerate() {
         commands.spawn((
             Mesh3d(shape),
-            MeshMaterial3d(debug_material.clone()),
+            MeshMaterial3d(make_debug_material()),
             Transform::from_xyz(
                 -EXTRUSION_X_EXTENT / 2.
                     + i as f32 / (num_extrusions - 1) as f32 * EXTRUSION_X_EXTENT,
@@ -132,7 +134,7 @@ fn setup(
         Transform::from_xyz(0.0, 7., 14.0).looking_at(Vec3::new(0., 1., 0.), Vec3::Y),
     ));
 
-    #[cfg(not(target_arch = "wasm32"))]
+    /*#[cfg(not(target_arch = "wasm32"))]
     commands.spawn((
         Text::new("Press space to toggle wireframes"),
         Node {
@@ -141,7 +143,7 @@ fn setup(
             left: Val::Px(12.0),
             ..default()
         },
-    ));
+    ));*/
 }
 
 fn rotate(mut query: Query<&mut Transform, With<Shape>>, time: Res<Time>) {
@@ -179,7 +181,7 @@ fn uv_debug_texture() -> Image {
     )
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/*#[cfg(not(target_arch = "wasm32"))]
 fn toggle_wireframe(
     mut wireframe_config: ResMut<WireframeConfig>,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -187,4 +189,4 @@ fn toggle_wireframe(
     if keyboard.just_pressed(KeyCode::Space) {
         wireframe_config.global = !wireframe_config.global;
     }
-}
+}*/

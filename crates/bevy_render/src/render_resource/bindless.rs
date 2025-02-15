@@ -18,7 +18,8 @@ use super::binding_types::{
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 16;
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 256;
+//pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 256;
+pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 8;
 
 pub static BINDING_NUMBERS: [(BindlessResourceType, u32); 9] = [
     (BindlessResourceType::SamplerFiltering, 1),

@@ -280,6 +280,7 @@ where
         }
 
         let group = MaterialBindGroupIndex(self.slabs.len() as u32);
+        //println!("Allocation in slab failed, creating new slab {:?}", group);
         self.slabs.push(MaterialBindlessSlab::new(
             self.slab_capacity,
             &self.bindless_descriptor,
@@ -524,7 +525,7 @@ where
                         .expect("Buffer binding array should exist")
                         .insert(binding_resource_id, buffer);
                     allocated_resource_slots.insert(binding_index, slot);
-                    println!("inserted buffer at {:?} = {:?}", slot, id);
+                    //println!("inserted buffer at {:?} = {:?}", slot, id);
                 }
                 OwnedBindingResource::TextureView(texture_view_dimension, texture_view) => {
                     let bindless_resource_type = BindlessResourceType::from(texture_view_dimension);
@@ -601,15 +602,15 @@ where
                 binding,
                 resource: match *binding_resource_array {
                     BindingResourceArray::Buffers(ref buffer_bindings) => {
-                        println!("setting buffer array binding {}", binding);
+                        //println!("setting buffer array binding {}", binding);
                         BindingResource::BufferArray(&buffer_bindings[..])
                     }
                     BindingResourceArray::TextureViews(ref texture_views) => {
-                        println!("setting texture view array binding {}", binding);
+                        //println!("setting texture view array binding {}", binding);
                         BindingResource::TextureViewArray(&texture_views[..])
                     }
                     BindingResourceArray::Samplers(ref samplers) => {
-                        println!("setting sampler array binding {}", binding);
+                        //println!("setting sampler array binding {}", binding);
                         BindingResource::SamplerArray(&samplers[..])
                     }
                 },

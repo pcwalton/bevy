@@ -7,6 +7,10 @@
     mesh_bindings::mesh
 }
 
+#ifdef BINDLESS
+#import bevy_pbr::pbr_bindings::material_bindings
+#endif  // BINDLESS
+
 fn sample_depth_map(uv: vec2<f32>, material_bind_group_slot: u32) -> f32 {
     // We use `textureSampleLevel` over `textureSample` because the wgpu DX12
     // backend (Fxc) panics when using "gradient instructions" inside a loop.
