@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use bevy_asset::{Asset, Handle};
 use bevy_ecs::system::SystemParamItem;
 use bevy_reflect::{impl_type_path, Reflect};
@@ -5,7 +7,7 @@ use bevy_render::{
     alpha::AlphaMode,
     mesh::MeshVertexBufferLayoutRef,
     render_resource::{
-        AsBindGroup, AsBindGroupError, BindGroupLayout, BindlessSlotCount,
+        AsBindGroup, AsBindGroupError, BindGroupLayout, BindlessDescriptor, BindlessSlotCount,
         RenderPipelineDescriptor, Shader, ShaderRef, SpecializedMeshPipelineError,
         UnpreparedBindGroup,
     },
@@ -227,6 +229,22 @@ impl<B: Material, E: MaterialExtension> AsBindGroup for ExtendedMaterial<B, E> {
             force_no_bindless,
         ));
         entries
+    }
+
+    fn bindless_descriptor() -> Option<BindlessDescriptor> {
+        match (B::bindless_descriptor(), E::bindless_descriptor()) {
+            (Some(base_bindless_descriptor), Some(extended_bindless_descriptor)) => {
+                let mut buffers = base_bindless_descriptor.buffers.into_owned();
+                let mut resources = base_bindless_descriptor.resources.into_owned();
+                buffers.extend(extended_bindless_descriptor.buffers.iter().cloned());
+                resources.extend(extended_bindless_descriptor.resources.iter().cloned());
+                Some(BindlessDescriptor {
+                    buffers: Cow::Owned(buffers),
+                    resources: Cow::Owned(resources),
+                })
+            }
+            _ => None,
+        }
     }
 }
 
