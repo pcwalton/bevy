@@ -5,6 +5,7 @@ use std::{
     num::{NonZeroU32, NonZeroU64},
 };
 
+use bevy_derive::{Deref, DerefMut};
 use wgpu::{
     BindGroupLayoutEntry, SamplerBindingType, ShaderStages, TextureSampleType, TextureViewDimension,
 };
@@ -21,16 +22,31 @@ pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 16;
 //pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 256;
 pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 8;
 
-pub static BINDING_NUMBERS: [(BindlessResourceType, u32); 9] = [
-    (BindlessResourceType::SamplerFiltering, 1),
-    (BindlessResourceType::SamplerNonFiltering, 2),
-    (BindlessResourceType::SamplerComparison, 3),
-    (BindlessResourceType::Texture1d, 4),
-    (BindlessResourceType::Texture2d, 5),
-    (BindlessResourceType::Texture2dArray, 6),
-    (BindlessResourceType::Texture3d, 7),
-    (BindlessResourceType::TextureCube, 8),
-    (BindlessResourceType::TextureCubeArray, 9),
+pub static BINDING_NUMBERS: [(BindlessResourceType, BindingNumber); 9] = [
+    (
+        BindlessResourceType::SamplerFiltering,
+        BindingNumber(1),
+    ),
+    (
+        BindlessResourceType::SamplerNonFiltering,
+        BindingNumber(2),
+    ),
+    (
+        BindlessResourceType::SamplerComparison,
+        BindingNumber(3),
+    ),
+    (BindlessResourceType::Texture1d, BindingNumber(4)),
+    (BindlessResourceType::Texture2d, BindingNumber(5)),
+    (
+        BindlessResourceType::Texture2dArray,
+        BindingNumber(6),
+    ),
+    (BindlessResourceType::Texture3d, BindingNumber(7)),
+    (BindlessResourceType::TextureCube, BindingNumber(8)),
+    (
+        BindlessResourceType::TextureCubeArray,
+        BindingNumber(9),
+    ),
 ];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -62,12 +78,18 @@ pub enum BindlessResourceType {
 
 #[derive(Clone, Copy)]
 pub struct BindlessBufferDescriptor {
-    /// The true bindless index.
-    pub binding_index: u32,
-    /// The index in the bindless table.
-    pub bindless_index: u32,
+    pub binding_number: BindingNumber,
+    pub bindless_index: BindlessIndex,
     pub element_size: usize,
 }
+
+/// The index of the actual binding in the bind group.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deref, DerefMut)]
+pub struct BindingNumber(pub u32);
+
+/// The index in the bindless table.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deref, DerefMut)]
+pub struct BindlessIndex(pub u32);
 
 pub fn create_bindless_bind_group_layout_entries(
     bindless_resource_count: u32,
@@ -122,10 +144,20 @@ impl BindlessSlotCount {
 }
 
 impl BindlessResourceType {
-    pub fn binding_number(&self) -> Option<&'static u32> {
+    pub fn binding_number(&self) -> Option<&'static BindingNumber> {
         match BINDING_NUMBERS.binary_search_by_key(self, |(key, _)| *key) {
-            Ok(position) => Some(&BINDING_NUMBERS[position].1),
+            Ok(binding_number) => Some(&BINDING_NUMBERS[binding_number].1),
             Err(_) => None,
+        }
+    }
+}
+
+impl TryFrom<BindlessResourceType> for BindingNumber {
+    type Error = ();
+    fn try_from(bindless_resource_type: BindlessResourceType) -> Result<Self, Self::Error> {
+        match bindless_resource_type.binding_number() {
+            Some(binding_number_ref) => Ok(*binding_number_ref),
+            None => Err(()),
         }
     }
 }
@@ -150,5 +182,17 @@ impl From<SamplerBindingType> for BindlessResourceType {
             SamplerBindingType::NonFiltering => BindlessResourceType::SamplerNonFiltering,
             SamplerBindingType::Comparison => BindlessResourceType::SamplerComparison,
         }
+    }
+}
+
+impl From<u32> for BindlessIndex {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<u32> for BindingNumber {
+    fn from(value: u32) -> Self {
+        Self(value)
     }
 }

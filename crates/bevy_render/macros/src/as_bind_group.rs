@@ -138,8 +138,10 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                         bindless_buffer_descriptors.push(quote! {
                             #render_path::render_resource::BindlessBufferDescriptor {
                                 // FIXME: This is confusing!
-                                binding_index: #bindless_binding,
-                                bindless_index: #binding_index,
+                                binding_number:
+                                    #render_path::render_resource::BindingNumber(#bindless_binding),
+                                bindless_index:
+                                    #render_path::render_resource::BindlessIndex(#binding_index),
                                 element_size: ::core::mem::size_of::<#converted_shader_type>(),
                             }
                         });
