@@ -36,6 +36,7 @@ mod light_probe;
 mod lightmap;
 mod material;
 mod material_bind_groups;
+mod material_bind_groups_2;
 mod mesh_material;
 mod parallax;
 mod pbr_material;

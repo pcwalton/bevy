@@ -18,7 +18,7 @@ fn sample_depth_map(uv: vec2<f32>, material_bind_group_slot: u32) -> f32 {
     // See https://stackoverflow.com/questions/56581141/direct3d11-gradient-instruction-used-in-a-loop-with-varying-iteration-forcing
     return textureSampleLevel(
 #ifdef BINDLESS
-        depth_map_texture[material_bind_group_slot],
+        material_bindings[material_bind_group_slot].depth_map_texture,
         depth_map_sampler[material_bind_group_slot],
 #else   // BINDLESS
         depth_map_texture,
