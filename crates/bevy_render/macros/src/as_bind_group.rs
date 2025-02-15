@@ -8,7 +8,7 @@ use syn::{
     punctuated::Punctuated,
     spanned::Spanned,
     token::Comma,
-    Data, DataStruct, Error, Fields, Lit, LitInt, LitStr, Meta, MetaList, Path, Result,
+    Data, DataStruct, Error, Fields, Lit, LitInt, LitStr, Meta, MetaList, Result,
 };
 
 const UNIFORM_ATTRIBUTE_NAME: Symbol = Symbol("uniform");
@@ -139,7 +139,7 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                         bindless_buffer_descriptors.push(quote! {
                             #render_path::render_resource::BindlessBufferDescriptor {
                                 index: #binding_index,
-                                element_size: <#converted_shader_type as #render_path::render_resource::ShaderType>::min_size()
+                                element_size: ::core::mem::size_of::<#converted_shader_type>(),
                             }
                         });
 
@@ -148,7 +148,7 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                             &mut bindless_resource_types,
                             binding_index,
                             quote! { #render_path::render_resource::BindlessResourceType::Buffer },
-                        )
+                        );
                     }
                 }
 
@@ -533,12 +533,14 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                     sampler_binding_count += 1;
 
                     non_bindless_binding_layouts.push(quote!{
-                        #render_path::render_resource::BindGroupLayoutEntry {
-                            binding: #binding_index,
-                            visibility: #visibility,
-                            ty: #render_path::render_resource::BindingType::Sampler(#render_path::render_resource::#sampler_binding_type),
-                            count: #actual_bindless_slot_count,
-                        }
+                        #bind_group_layout_entries.push(
+                            #render_path::render_resource::BindGroupLayoutEntry {
+                                binding: #binding_index,
+                                visibility: #visibility,
+                                ty: #render_path::render_resource::BindingType::Sampler(#render_path::render_resource::#sampler_binding_type),
+                                count: #actual_bindless_slot_count,
+                            }
+                        );
                     });
 
                     // TODO: Support other types of samplers.
@@ -622,7 +624,7 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                                 has_dynamic_offset: false,
                                 min_binding_size: Some(<#field_ty as #render_path::render_resource::ShaderType>::min_size()),
                             },
-                            count: actual_bindless_slot_count,
+                            count: #actual_bindless_slot_count,
                         }
                     );
                 });
@@ -670,7 +672,7 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                             has_dynamic_offset: false,
                             min_binding_size: Some(<#uniform_struct_name as #render_path::render_resource::ShaderType>::min_size()),
                         },
-                        count: actual_bindless_slot_count,
+                        count: #actual_bindless_slot_count,
                     });
                 });
             }
@@ -757,10 +759,10 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
 
                 let bindless_descriptor_syntax = quote! {
                     static RESOURCES: &[#render_path::render_resource::BindlessResourceType] = &[
-                        #(#bindless_resource_types,*)*
+                        #(#bindless_resource_types),*
                     ];
                     static BUFFERS: &[#render_path::render_resource::BindlessBufferDescriptor] = &[
-                        #(#bindless_buffer_descriptors,*)*
+                        #(#bindless_buffer_descriptors),*
                     ];
                     Some(#render_path::render_resource::BindlessDescriptor {
                         resources: ::std::borrow::Cow::Borrowed(RESOURCES),
@@ -945,13 +947,13 @@ impl Parse for UniformBindingMeta {
         let mut bindless: Option<LitInt> = None;
         if input.parse::<Comma>().is_ok() {
             if input
-                .parse::<Path>()?
+                .parse::<syn::Path>()?
                 .get_ident()
                 .is_none_or(|ident| *ident != BINDLESS_ATTRIBUTE_NAME)
             {
                 return Err(Error::new_spanned(ident, "Expected `bindless`"));
             }
-            let mut parser;
+            let parser;
             parenthesized!(parser in input);
             bindless = Some(parser.parse()?);
         }

@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, ops::Index};
+use core::{marker::PhantomData, ops::Index};
 
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
@@ -11,21 +11,19 @@ use bevy_render::{
     render_resource::{
         BindGroup, BindGroupEntry, BindGroupLayout, BindingResource, BindlessDescriptor,
         BindlessResourceType, Buffer, BufferBinding, BufferId, BufferUsages, OwnedBindingResource,
-        RawBufferVec, Sampler, SamplerId, TextureView, TextureViewDimension, TextureViewId,
-        UnpreparedBindGroup, WgpuSampler, WgpuTextureView,
+        RawBufferVec, Sampler, SamplerDescriptor, SamplerId, TextureView, TextureViewDimension,
+        TextureViewId, UnpreparedBindGroup, WgpuSampler, WgpuTextureView,
     },
     renderer::RenderDevice,
     texture::FallbackImage,
 };
+use bevy_utils::default;
 use tracing::{error, trace, warn};
 
 use crate::Material;
 
 // FIXME: Make this something that can be specified in `AsBindGroup`.
 const BINDINGS_SIZE: u32 = 32;
-
-/// The minimum byte size of each fallback buffer.
-const MIN_FALLBACK_BUFFER_SIZE: u64 = 16;
 
 #[derive(Resource)]
 pub struct MaterialBindGroupAllocator<M>
@@ -35,10 +33,9 @@ where
     slabs: Vec<MaterialBindlessSlab<M>>,
     bind_group_layout: BindGroupLayout,
     bindless_descriptor: BindlessDescriptor,
-    slab_capacity: u32,
 }
 
-struct MaterialBindlessSlab<M>
+pub struct MaterialBindlessSlab<M>
 where
     M: Material,
 {
@@ -46,15 +43,15 @@ where
     ///
     /// If this is `None`, then the bind group is dirty and needs to be
     /// regenerated.
-    pub bind_group: Option<BindGroup>,
-    /// Cached version of the bindless slot count for this material.
-    bindless_slot_count: u32,
+    bind_group: Option<BindGroup>,
 
     bindings: MaterialBindlessSlabBindings<M>,
 
     samplers: HashMap<BindlessResourceType, MaterialBindlessBindingArray<Sampler>>,
     textures: HashMap<BindlessResourceType, MaterialBindlessBindingArray<TextureView>>,
     buffers: HashMap<u32, MaterialBindlessBindingArray<Buffer>>,
+
+    extra_data: Vec<Option<M::Data>>,
 
     live_allocation_count: u32,
 }
@@ -81,6 +78,13 @@ struct MaterialBindlessBinding<R> {
     ref_count: u32,
 }
 
+#[derive(Resource)]
+pub struct FallbackBindlessResources {
+    /// A dummy sampler that we fill unused slots in bindless sampler arrays
+    /// with.
+    fallback_sampler: Sampler,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum BindingResourceId {
     Buffer(BufferId),
@@ -95,11 +99,9 @@ enum BindingResourceId {
 /// to satisfy the lifetime requirements.
 enum BindingResourceArray<'a> {
     Buffers(Vec<BufferBinding<'a>>),
-    TextureViews(TextureViewDimension, Vec<&'a WgpuTextureView>),
+    TextureViews(Vec<&'a WgpuTextureView>),
     Samplers(Vec<&'a WgpuSampler>),
 }
-
-struct MaterialFallbackBuffers(HashMap<u32, Buffer>);
 
 #[derive(Clone, Copy, Debug, Default, Reflect)]
 pub struct MaterialBindingId {
@@ -182,6 +184,24 @@ where
             phantom: PhantomData,
         }
     }
+
+    fn set(
+        &mut self,
+        slot: MaterialBindGroupSlot,
+        allocated_resource_slots: &HashMap<u32, u32>,
+        bindless_descriptor: &BindlessDescriptor,
+    ) {
+        let table_len = bindless_descriptor.resources.len();
+        let range = (slot.0 as usize * table_len)..((slot.0 as usize + 1) * table_len);
+        while self.buffer.len() < range.end {
+            self.buffer.push(0);
+        }
+
+        for (&bindless_index, &resource_slot) in allocated_resource_slots {
+            self.buffer
+                .set(bindless_index + range.start as u32, resource_slot);
+        }
+    }
 }
 
 impl<M> MaterialBindGroupAllocator<M>
@@ -193,9 +213,6 @@ where
             slabs: vec![],
             bind_group_layout: M::bind_group_layout(render_device),
             bindless_descriptor: M::bindless_descriptor().expect("TODO: non-bindless"),
-            slab_capacity: M::bindless_slot_count()
-                .expect("TODO: non-bindless")
-                .resolve(),
         }
     }
 
@@ -205,7 +222,7 @@ where
     ) -> MaterialBindingId {
         for (slab_index, slab) in self.slabs.iter_mut().enumerate() {
             trace!("Trying to allocate in slab {}", slab_index);
-            match slab.try_allocate(unprepared_bind_group) {
+            match slab.try_allocate(unprepared_bind_group, &self.bindless_descriptor) {
                 Ok(slot) => {
                     return MaterialBindingId {
                         group: MaterialBindGroupIndex(slab_index as u32),
@@ -219,35 +236,39 @@ where
         let group = MaterialBindGroupIndex(self.slabs.len() as u32);
         self.slabs.push(MaterialBindlessSlab::new());
 
-        let slot = match self
+        let Ok(slot) = self
             .slabs
             .last_mut()
             .expect("We just pushed a slab")
-            .try_allocate(unprepared_bind_group)
-        {
-            Ok(slot) => slot,
-            Err(_) => panic!("An allocation into an empty slab should always succeed"),
+            .try_allocate(unprepared_bind_group, &self.bindless_descriptor)
+        else {
+            panic!("An allocation into an empty slab should always succeed")
         };
 
         MaterialBindingId { group, slot }
     }
 
     pub fn free(&mut self, material_binding_id: MaterialBindingId) {
-        warn!("TODO: free")
+        warn!("TODO: free");
+    }
+
+    pub fn get(&self, group: MaterialBindGroupIndex) -> Option<&MaterialBindlessSlab<M>> {
+        self.slabs.get(group.0 as usize)
     }
 
     pub fn prepare_bind_groups(
         &mut self,
         render_device: &RenderDevice,
-        fallback_sampler: &Sampler,
+        fallback_bindless_resources: &FallbackBindlessResources,
         fallback_image: &FallbackImage,
     ) {
         for slab in &mut self.slabs {
             slab.prepare_bind_group(
                 render_device,
                 &self.bind_group_layout,
-                fallback_sampler,
+                fallback_bindless_resources,
                 fallback_image,
+                &self.bindless_descriptor,
             );
         }
     }
@@ -269,11 +290,12 @@ where
 {
     fn try_allocate(
         &mut self,
-        unprepared_bind_group: UnpreparedBindGroup<M::Data>,
+        mut unprepared_bind_group: UnpreparedBindGroup<M::Data>,
+        bindless_descriptor: &BindlessDescriptor,
     ) -> Result<MaterialBindGroupSlot, UnpreparedBindGroup<M::Data>> {
-        let mut pre_existing_resources = HashMap::default();
+        let mut pre_existing_resources = HashMap::new();
         let mut needed_free_buffer_slots = vec![];
-        let mut needed_free_fixed_resource_slots = HashMap::default();
+        let mut needed_free_fixed_resource_slots = HashMap::new();
 
         // Locate pre-existing resources.
 
@@ -311,7 +333,7 @@ where
                         None => {
                             *needed_free_fixed_resource_slots
                                 .entry(bindless_resource_type)
-                                .or_default() += 1
+                                .or_default() += 1;
                         }
                     }
                 }
@@ -330,7 +352,7 @@ where
                         None => {
                             *needed_free_fixed_resource_slots
                                 .entry(bindless_resource_type)
-                                .or_default() += 1
+                                .or_default() += 1;
                         }
                     }
                 }
@@ -381,7 +403,7 @@ where
         }
 
         // OK, we can allocate in this slab.
-        let mut slot = self
+        let slot = self
             .bindings
             .free_slots
             .pop()
@@ -401,7 +423,9 @@ where
                         self.buffers
                             .get_mut(&binding_index)
                             .expect("Buffer binding array should exist")
-                            .bindings[*pre_existing_resource_slot as usize]
+                            .bindings
+                            .get_mut(*pre_existing_resource_slot as usize)
+                            .and_then(|binding| binding.as_mut())
                             .expect("Slot should exist")
                             .ref_count += 1;
                     }
@@ -411,7 +435,9 @@ where
                         self.textures
                             .get_mut(&bindless_resource_type)
                             .expect("Texture binding array should exist")
-                            .bindings[*pre_existing_resource_slot as usize]
+                            .bindings
+                            .get_mut(*pre_existing_resource_slot as usize)
+                            .and_then(|binding| binding.as_mut())
                             .expect("Slot should exist")
                             .ref_count += 1;
                     }
@@ -421,7 +447,9 @@ where
                         self.samplers
                             .get_mut(&bindless_resource_type)
                             .expect("Sampler binding array should exist")
-                            .bindings[*pre_existing_resource_slot as usize]
+                            .bindings
+                            .get_mut(*pre_existing_resource_slot as usize)
+                            .and_then(|binding| binding.as_mut())
                             .expect("Slot should exist")
                             .ref_count += 1;
                     }
@@ -448,6 +476,7 @@ where
                         .get_mut(&bindless_resource_type)
                         .expect("Texture array should exist")
                         .insert(binding_resource_id, texture_view);
+                    allocated_resource_slots.insert(binding_index, slot);
                 }
                 OwnedBindingResource::Sampler(sampler_binding_type, sampler) => {
                     let bindless_resource_type = BindlessResourceType::from(sampler_binding_type);
@@ -456,12 +485,23 @@ where
                         .get_mut(&bindless_resource_type)
                         .expect("Sampler should exist")
                         .insert(binding_resource_id, sampler);
+                    allocated_resource_slots.insert(binding_index, slot);
                 }
             }
         }
 
         // Serialize the allocated resource slots.
-        self.bindings.set(slot, allocated_resource_slots);
+        self.bindings.set(
+            MaterialBindGroupSlot(slot),
+            &allocated_resource_slots,
+            bindless_descriptor,
+        );
+
+        // Insert extra data.
+        if self.extra_data.len() < (slot as usize + 1) {
+            self.extra_data.resize_with(slot as usize + 1, || None);
+        }
+        self.extra_data[slot as usize] = Some(unprepared_bind_group.data);
 
         // Invalidate the cached bind group.
         self.bind_group = None;
@@ -473,15 +513,19 @@ where
         &mut self,
         render_device: &RenderDevice,
         bind_group_layout: &BindGroupLayout,
-        fallback_sampler: &Sampler,
+        fallback_bindless_resources: &FallbackBindlessResources,
         fallback_image: &FallbackImage,
+        bindless_descriptor: &BindlessDescriptor,
     ) {
         if self.bind_group.is_some() {
             return;
         }
 
-        let binding_resource_arrays =
-            self.create_binding_resource_arrays(fallback_sampler, fallback_image);
+        let binding_resource_arrays = self.create_binding_resource_arrays(
+            fallback_bindless_resources,
+            fallback_image,
+            bindless_descriptor,
+        );
 
         let bind_group_entries: Vec<_> = binding_resource_arrays
             .iter()
@@ -491,7 +535,7 @@ where
                     BindingResourceArray::Buffers(ref buffer_bindings) => {
                         BindingResource::BufferArray(&buffer_bindings[..])
                     }
-                    BindingResourceArray::TextureViews(_, ref texture_views) => {
+                    BindingResourceArray::TextureViews(ref texture_views) => {
                         BindingResource::TextureViewArray(&texture_views[..])
                     }
                     BindingResourceArray::Samplers(ref samplers) => {
@@ -510,11 +554,10 @@ where
 
     fn create_binding_resource_arrays<'a>(
         &'a self,
-        fallback_sampler: &'a Sampler,
+        fallback_bindless_resources: &'a FallbackBindlessResources,
         fallback_image: &'a FallbackImage,
+        bindless_descriptor: &'a BindlessDescriptor,
     ) -> Vec<(&'a u32, BindingResourceArray<'a>)> {
-        let bindless_descriptor = M::bindless_descriptor().expect("Need a bindless descriptor");
-
         let mut binding_resource_arrays = vec![];
 
         // Build sampler bindings.
@@ -524,7 +567,7 @@ where
                 .iter()
                 .map(|maybe_bindless_binding| match *maybe_bindless_binding {
                     Some(ref bindless_binding) => &bindless_binding.resource,
-                    None => &**fallback_sampler,
+                    None => &*fallback_bindless_resources.fallback_sampler,
                 })
                 .collect();
             binding_resource_arrays.push((
@@ -536,36 +579,18 @@ where
         }
 
         // Build texture bindings.
-        for (bindless_resource_type, fallback_image, texture_view_dimension) in [
-            (
-                BindlessResourceType::Texture1d,
-                &fallback_image.d1,
-                TextureViewDimension::D1,
-            ),
-            (
-                BindlessResourceType::Texture2d,
-                &fallback_image.d2,
-                TextureViewDimension::D2,
-            ),
+        for (bindless_resource_type, fallback_image) in [
+            (BindlessResourceType::Texture1d, &fallback_image.d1),
+            (BindlessResourceType::Texture2d, &fallback_image.d2),
             (
                 BindlessResourceType::Texture2dArray,
                 &fallback_image.d2_array,
-                TextureViewDimension::D2Array,
             ),
-            (
-                BindlessResourceType::Texture3d,
-                &fallback_image.d3,
-                TextureViewDimension::D3,
-            ),
-            (
-                BindlessResourceType::TextureCube,
-                &fallback_image.cube,
-                TextureViewDimension::Cube,
-            ),
+            (BindlessResourceType::Texture3d, &fallback_image.d3),
+            (BindlessResourceType::TextureCube, &fallback_image.cube),
             (
                 BindlessResourceType::TextureCubeArray,
                 &fallback_image.cube_array,
-                TextureViewDimension::CubeArray,
             ),
         ] {
             let Some(texture_bindless_binding_array) = self.textures.get(&bindless_resource_type)
@@ -584,7 +609,7 @@ where
                 bindless_resource_type
                     .binding_number()
                     .expect("Texture bindless resource type must have a binding number"),
-                BindingResourceArray::TextureViews(texture_view_dimension, texture_bindings),
+                BindingResourceArray::TextureViews(texture_bindings),
             ));
         }
 
@@ -626,13 +651,20 @@ where
 
         binding_resource_arrays
     }
+
+    pub fn bind_group(&self) -> Option<&BindGroup> {
+        self.bind_group.as_ref()
+    }
+
+    pub fn get_extra_data(&self, slot: MaterialBindGroupSlot) -> &M::Data {
+        self.extra_data
+            .get(slot.0 as usize)
+            .and_then(|data| data.as_ref())
+            .expect("Extra data not present")
+    }
 }
 
 impl<R> MaterialBindlessBindingArray<R> {
-    fn is_empty(&self) -> bool {
-        self.resource_to_slot.is_empty()
-    }
-
     fn has_free_slots(&self, slot_count: u32) -> bool {
         self.len + slot_count < self.capacity
     }
@@ -643,7 +675,7 @@ impl<R> MaterialBindlessBindingArray<R> {
 
     fn insert(&mut self, binding_resource_id: BindingResourceId, resource: R) -> u32 {
         debug_assert_ne!(self.len, self.capacity);
-        let slot = self.free_slots.pop().unwrap_or_else(|| self.len);
+        let slot = self.free_slots.pop().unwrap_or(self.len);
         self.resource_to_slot.insert(binding_resource_id, slot);
         self.bindings[slot as usize] = Some(MaterialBindlessBinding::new(resource));
         self.len += 1;
@@ -677,17 +709,26 @@ where
     M: Material,
 {
     fn new() -> MaterialBindlessSlab<M> {
-        let bindless_slot_count = M::bindless_slot_count()
-            .expect("TODO: non-bindless")
-            .resolve();
         MaterialBindlessSlab {
             bind_group: None,
-            bindless_slot_count,
             bindings: MaterialBindlessSlabBindings::new(),
             samplers: HashMap::default(),
             textures: HashMap::default(),
             buffers: HashMap::default(),
+            extra_data: vec![],
             live_allocation_count: 0,
+        }
+    }
+}
+
+impl FromWorld for FallbackBindlessResources {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+        FallbackBindlessResources {
+            fallback_sampler: render_device.create_sampler(&SamplerDescriptor {
+                label: Some("fallback sampler"),
+                ..default()
+            }),
         }
     }
 }

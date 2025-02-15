@@ -1,4 +1,6 @@
-use crate::material_bind_groups_2::{MaterialBindGroupAllocator, MaterialBindingId};
+use crate::material_bind_groups_2::{
+    FallbackBindlessResources, MaterialBindGroupAllocator, MaterialBindingId,
+};
 #[cfg(feature = "meshlet")]
 use crate::meshlet::{
     prepare_material_meshlet_meshes_main_opaque_pass, queue_material_meshlet_meshes,
@@ -560,7 +562,7 @@ impl<P: PhaseItem, M: Material, const I: usize> RenderCommand<P> for SetMaterial
         else {
             return RenderCommandResult::Skip;
         };
-        let Some(bind_group) = material_bind_group.get_bind_group() else {
+        let Some(bind_group) = material_bind_group.bind_group() else {
             return RenderCommandResult::Skip;
         };
         pass.set_bind_group(I, bind_group, &[]);
@@ -1376,5 +1378,5 @@ pub fn prepare_material_bind_groups<M>(
 ) where
     M: Material,
 {
-    allocator.prepare_bind_groups(&render_device, &fallback_image, &fallback_resources);
+    allocator.prepare_bind_groups(&render_device, &fallback_resources, &fallback_image);
 }
