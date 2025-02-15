@@ -1,4 +1,4 @@
-use core::{marker::PhantomData, ops::Index};
+use core::marker::PhantomData;
 
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
@@ -23,11 +23,16 @@ use tracing::{error, trace};
 
 use crate::Material;
 
-// FIXME: Make this something that can be specified in `AsBindGroup`.
-const BINDINGS_SIZE: u32 = 32;
-
 #[derive(Resource)]
-pub struct MaterialBindGroupAllocator<M>
+pub enum MaterialBindGroupAllocator<M>
+where
+    M: Material,
+{
+    Bindless(Box<MaterialBindGroupBindlessAllocator<M>>),
+    NonBindless(Box<MaterialBindGroupNonBindlessAllocator<M>>),
+}
+
+pub struct MaterialBindGroupBindlessAllocator<M>
 where
     M: Material,
 {
@@ -88,6 +93,13 @@ where
 {
     resource: R,
     ref_count: u32,
+}
+
+struct MaterialBindGroupNonBindlessAllocator<M>
+where
+    M: Material,
+{
+    phantom: PhantomData<M>,
 }
 
 #[derive(Resource)]
@@ -159,6 +171,13 @@ trait GetBindingResourceId {
     fn binding_resource_id(&self, resource_type: BindlessResourceType) -> BindingResourceId;
 }
 
+pub enum MaterialSlab<'a, M>
+where
+    M: Material,
+{
+    Bindless(&'a MaterialBindlessSlab<M>),
+}
+
 impl From<u32> for MaterialBindGroupSlot {
     fn from(value: u32) -> Self {
         MaterialBindGroupSlot(value)
@@ -182,18 +201,6 @@ impl<'a> From<&'a OwnedBindingResource> for BindingResourceId {
                 BindingResourceId::Sampler(sampler.id())
             }
         }
-    }
-}
-
-impl<M> Index<u32> for MaterialBindlessSlabBindings<M>
-where
-    M: Material,
-{
-    type Output = [u32];
-
-    fn index(&self, index: u32) -> &Self::Output {
-        &self.buffer.values()[(index as usize * BINDINGS_SIZE as usize)
-            ..(((index as usize) + 1) * BINDINGS_SIZE as usize)]
     }
 }
 
@@ -221,6 +228,92 @@ impl GetBindingResourceId for TextureView {
             _ => panic!("Resource type is not a texture"),
         };
         BindingResourceId::TextureView(texture_view_dimension, self.id())
+    }
+}
+
+impl<M> MaterialBindGroupAllocator<M>
+where
+    M: Material,
+{
+    fn new(render_device: &RenderDevice) -> MaterialBindGroupAllocator<M> {
+        if M::bindless_slot_count()
+            .is_some_and(|bindless_slot_count| bindless_slot_count.resolve() > 1)
+        {
+            MaterialBindGroupAllocator::Bindless(Box::new(MaterialBindGroupBindlessAllocator::new(
+                render_device,
+            )))
+        } else {
+            MaterialBindGroupAllocator::NonBindless(Box::new(
+                MaterialBindGroupNonBindlessAllocator::new(render_device),
+            ))
+        }
+    }
+
+    pub fn get(&self, group: MaterialBindGroupIndex) -> Option<MaterialSlab<M>> {
+        match *self {
+            MaterialBindGroupAllocator::Bindless(ref bindless_allocator) => bindless_allocator
+                .get(group)
+                .map(|bindless_slab| MaterialSlab::Bindless(bindless_slab)),
+            MaterialBindGroupAllocator::NonBindless(ref non_bindless_allocator) => {
+                todo!()
+            }
+        }
+    }
+
+    pub fn allocate(
+        &mut self,
+        unprepared_bind_group: UnpreparedBindGroup<M::Data>,
+    ) -> MaterialBindingId {
+        match *self {
+            MaterialBindGroupAllocator::Bindless(
+                ref mut material_bind_group_bindless_allocator,
+            ) => material_bind_group_bindless_allocator.allocate(unprepared_bind_group),
+            MaterialBindGroupAllocator::NonBindless(
+                ref mut material_bind_group_non_bindless_allocator,
+            ) => todo!(),
+        }
+    }
+
+    pub fn free(&mut self, material_binding_id: MaterialBindingId) {
+        match *self {
+            MaterialBindGroupAllocator::Bindless(
+                ref mut material_bind_group_bindless_allocator,
+            ) => material_bind_group_bindless_allocator.free(material_binding_id),
+            MaterialBindGroupAllocator::NonBindless(
+                ref mut material_bind_group_non_bindless_allocator,
+            ) => todo!(),
+        }
+    }
+
+    pub fn prepare_bind_groups(
+        &mut self,
+        render_device: &RenderDevice,
+        fallback_bindless_resources: &FallbackBindlessResources,
+        fallback_image: &FallbackImage,
+    ) {
+        match *self {
+            MaterialBindGroupAllocator::Bindless(
+                ref mut material_bind_group_bindless_allocator,
+            ) => material_bind_group_bindless_allocator.prepare_bind_groups(
+                render_device,
+                fallback_bindless_resources,
+                fallback_image,
+            ),
+            MaterialBindGroupAllocator::NonBindless(
+                ref mut material_bind_group_non_bindless_allocator,
+            ) => todo!(),
+        }
+    }
+
+    pub fn write_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
+        match *self {
+            MaterialBindGroupAllocator::Bindless(
+                ref mut material_bind_group_bindless_allocator,
+            ) => material_bind_group_bindless_allocator.write_buffers(render_device, render_queue),
+            MaterialBindGroupAllocator::NonBindless(
+                ref mut material_bind_group_non_bindless_allocator,
+            ) => todo!(),
+        }
     }
 }
 
@@ -297,12 +390,12 @@ where
     }
 }
 
-impl<M> MaterialBindGroupAllocator<M>
+impl<M> MaterialBindGroupBindlessAllocator<M>
 where
     M: Material,
 {
-    pub fn new(render_device: &RenderDevice) -> MaterialBindGroupAllocator<M> {
-        MaterialBindGroupAllocator {
+    fn new(render_device: &RenderDevice) -> MaterialBindGroupBindlessAllocator<M> {
+        MaterialBindGroupBindlessAllocator {
             slabs: vec![],
             bind_group_layout: M::bind_group_layout(render_device),
             bindless_descriptor: M::bindless_descriptor().expect("TODO: non-bindless"),
@@ -312,7 +405,7 @@ where
         }
     }
 
-    pub fn allocate(
+    fn allocate(
         &mut self,
         mut unprepared_bind_group: UnpreparedBindGroup<M::Data>,
     ) -> MaterialBindingId {
@@ -348,18 +441,18 @@ where
         MaterialBindingId { group, slot }
     }
 
-    pub fn free(&mut self, material_binding_id: MaterialBindingId) {
+    fn free(&mut self, material_binding_id: MaterialBindingId) {
         self.slabs
             .get_mut(material_binding_id.group.0 as usize)
             .expect("Slab should exist")
             .free(material_binding_id.slot, &self.bindless_descriptor);
     }
 
-    pub fn get(&self, group: MaterialBindGroupIndex) -> Option<&MaterialBindlessSlab<M>> {
+    fn get(&self, group: MaterialBindGroupIndex) -> Option<&MaterialBindlessSlab<M>> {
         self.slabs.get(group.0 as usize)
     }
 
-    pub fn prepare_bind_groups(
+    fn prepare_bind_groups(
         &mut self,
         render_device: &RenderDevice,
         fallback_bindless_resources: &FallbackBindlessResources,
@@ -376,7 +469,7 @@ where
         }
     }
 
-    pub fn write_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
+    fn write_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
         for slab in &mut self.slabs {
             slab.write_buffer(render_device, render_queue);
         }
@@ -863,11 +956,11 @@ where
         binding_resource_arrays
     }
 
-    pub fn bind_group(&self) -> Option<&BindGroup> {
+    fn bind_group(&self) -> Option<&BindGroup> {
         self.bind_group.as_ref()
     }
 
-    pub fn get_extra_data(&self, slot: MaterialBindGroupSlot) -> &M::Data {
+    fn get_extra_data(&self, slot: MaterialBindGroupSlot) -> &M::Data {
         self.extra_data
             .get(slot.0 as usize)
             .and_then(|data| data.as_ref())
@@ -1062,6 +1155,34 @@ impl FromWorld for FallbackBindlessResources {
                 compare: Some(CompareFunction::Always),
                 ..default()
             }),
+        }
+    }
+}
+
+impl<M> MaterialBindGroupNonBindlessAllocator<M>
+where
+    M: Material,
+{
+    fn new(render_device: &RenderDevice) -> MaterialBindGroupNonBindlessAllocator<M> {
+        todo!()
+    }
+}
+
+impl<'a, M> MaterialSlab<'a, M>
+where
+    M: Material,
+{
+    pub fn get_extra_data(&self, slot: MaterialBindGroupSlot) -> &M::Data {
+        match *self {
+            MaterialSlab::Bindless(material_bindless_slab) => {
+                material_bindless_slab.get_extra_data(slot)
+            }
+        }
+    }
+
+    pub fn bind_group(&self) -> Option<&'a BindGroup> {
+        match *self {
+            MaterialSlab::Bindless(material_bindless_slab) => material_bindless_slab.bind_group(),
         }
     }
 }
