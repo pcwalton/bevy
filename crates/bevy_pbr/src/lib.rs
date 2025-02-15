@@ -359,7 +359,7 @@ impl Plugin for PbrPlugin {
                 ClusteredDecalPlugin,
             ))
             .add_plugins((
-                //decal::ForwardDecalPlugin,
+                decal::ForwardDecalPlugin,
                 SyncComponentPlugin::<DirectionalLight>::default(),
                 SyncComponentPlugin::<PointLight>::default(),
                 SyncComponentPlugin::<SpotLight>::default(),

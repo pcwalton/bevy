@@ -21,16 +21,16 @@ fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins.set(ImagePlugin::default_nearest()),
-            //#[cfg(not(target_arch = "wasm32"))]
-            //WireframePlugin,
+            #[cfg(not(target_arch = "wasm32"))]
+            WireframePlugin,
         ))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 rotate,
-                //#[cfg(not(target_arch = "wasm32"))]
-                //toggle_wireframe,
+                #[cfg(not(target_arch = "wasm32"))]
+                toggle_wireframe,
             ),
         )
         .run();
@@ -181,7 +181,7 @@ fn uv_debug_texture() -> Image {
     )
 }
 
-/*#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
 fn toggle_wireframe(
     mut wireframe_config: ResMut<WireframeConfig>,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -189,4 +189,4 @@ fn toggle_wireframe(
     if keyboard.just_pressed(KeyCode::Space) {
         wireframe_config.global = !wireframe_config.global;
     }
-}*/
+}

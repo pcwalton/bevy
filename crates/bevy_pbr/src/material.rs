@@ -1268,7 +1268,10 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
             Ok(unprepared) => {
                 let binding = *render_material_bindings
                     .entry(material_id.into())
-                    .or_insert_with(|| bind_group_allocator.allocate(unprepared));
+                    .or_insert_with(|| {
+                        bind_group_allocator
+                            .allocate_unprepared(unprepared, &pipeline.material_layout)
+                    });
 
                 Ok(PreparedMaterial {
                     binding,
@@ -1296,8 +1299,6 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
                 // and is requesting a fully-custom bind group. Invoke
                 // `as_bind_group` as requested, and store the resulting bind
                 // group in the slot.
-                todo!("CreateBindGroupDirectly");
-                /*
                 match material.as_bind_group(
                     &pipeline.material_layout,
                     render_device,
@@ -1305,11 +1306,9 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
                 ) {
                     Ok(prepared_bind_group) => {
                         // Store the resulting bind group directly in the slot.
-                        bind_group_allocator.init_custom(
-                            material_binding_id,
-                            prepared_bind_group.bind_group,
-                            prepared_bind_group.data,
-                        );
+                        let material_binding_id =
+                            bind_group_allocator.allocate_prepared(prepared_bind_group);
+                        render_material_bindings.insert(material_id.into(), material_binding_id);
 
                         Ok(PreparedMaterial {
                             binding: material_binding_id,
@@ -1334,7 +1333,6 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
 
                     Err(other) => Err(PrepareAssetError::AsBindGroupError(other)),
                 }
-                */
             }
 
             Err(other) => Err(PrepareAssetError::AsBindGroupError(other)),
