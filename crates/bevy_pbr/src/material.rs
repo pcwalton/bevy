@@ -1266,7 +1266,9 @@ impl<M: Material> RenderAsset for PreparedMaterial<M> {
             false,
         ) {
             Ok(unprepared) => {
-                let binding = bind_group_allocator.allocate(unprepared);
+                let binding = *render_material_bindings
+                    .entry(material_id.into())
+                    .or_insert_with(|| bind_group_allocator.allocate(unprepared));
 
                 Ok(PreparedMaterial {
                     binding,

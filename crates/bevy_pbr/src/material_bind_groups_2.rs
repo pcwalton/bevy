@@ -517,12 +517,14 @@ where
             let binding_resource_id = BindingResourceId::from(&owned_binding_resource);
             match owned_binding_resource {
                 OwnedBindingResource::Buffer(buffer) => {
+                    let id = buffer.id();
                     let slot = self
                         .buffers
                         .get_mut(&binding_index)
                         .expect("Buffer binding array should exist")
                         .insert(binding_resource_id, buffer);
                     allocated_resource_slots.insert(binding_index, slot);
+                    println!("inserted buffer at {:?} = {:?}", slot, id);
                 }
                 OwnedBindingResource::TextureView(texture_view_dimension, texture_view) => {
                     let bindless_resource_type = BindlessResourceType::from(texture_view_dimension);
@@ -634,7 +636,6 @@ where
         let mut binding_resource_arrays = vec![];
 
         // Build sampler bindings.
-        //for (bindless_resource_type, sampler_bindless_binding_array) in self.samplers.iter() {
         for (bindless_resource_type, fallback_sampler) in [
             (
                 BindlessResourceType::SamplerFiltering,
