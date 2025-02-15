@@ -673,7 +673,7 @@ where
                             ) => vec.push(texture_view),
                             (
                                 &mut BindingResourceArray::Samplers(ref mut vec),
-                                OwnedBindingResource::Sampler(sampler),
+                                OwnedBindingResource::Sampler(_, sampler),
                             ) => vec.push(sampler),
                             _ => {
                                 error!(

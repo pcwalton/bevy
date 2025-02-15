@@ -57,6 +57,8 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
     let mut binding_impls = Vec::new();
     let mut bindless_binding_layouts = Vec::new();
     let mut non_bindless_binding_layouts = Vec::new();
+    let mut bindless_resource_types = Vec::new();
+    let mut bindless_buffer_descriptors = Vec::new();
     let mut attr_prepared_data_ident = None;
     let mut attr_bindless_count = None;
 
@@ -133,6 +135,20 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                                 }
                             );
                         });
+
+                        bindless_buffer_descriptors.push(quote! {
+                            #render_path::render_resource::BindlessBufferDescriptor {
+                                index: #binding_index,
+                                element_size: <#converted_shader_type as #render_path::render_resource::ShaderType>::min_size()
+                            }
+                        });
+
+                        add_bindless_resource_type(
+                            &render_path,
+                            &mut bindless_resource_types,
+                            binding_index,
+                            quote! { #render_path::render_resource::BindlessResourceType::Buffer },
+                        )
                     }
                 }
 
@@ -358,6 +374,7 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                         );
                     });
                 }
+
                 BindingType::Texture => {
                     let TextureAttrs {
                         dimension,
@@ -405,7 +422,48 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                             }
                         );
                     });
+
+                    let bindless_resource_type = match *dimension {
+                        BindingTextureDimension::D1 => {
+                            quote! {
+                                #render_path::render_resource::BindlessResourceType::Texture1d
+                            }
+                        }
+                        BindingTextureDimension::D2 => {
+                            quote! {
+                                #render_path::render_resource::BindlessResourceType::Texture2d
+                            }
+                        }
+                        BindingTextureDimension::D2Array => {
+                            quote! {
+                                #render_path::render_resource::BindlessResourceType::Texture2dArray
+                            }
+                        }
+                        BindingTextureDimension::Cube => {
+                            quote! {
+                                #render_path::render_resource::BindlessResourceType::TextureCube
+                            }
+                        }
+                        BindingTextureDimension::CubeArray => {
+                            quote! {
+                                #render_path::render_resource::BindlessResourceType::TextureCubeArray
+                            }
+                        }
+                        BindingTextureDimension::D3 => {
+                            quote! {
+                                #render_path::render_resource::BindlessResourceType::Texture3d
+                            }
+                        }
+                    };
+
+                    add_bindless_resource_type(
+                        &render_path,
+                        &mut bindless_resource_types,
+                        binding_index,
+                        bindless_resource_type,
+                    )
                 }
+
                 BindingType::Sampler => {
                     let SamplerAttrs {
                         sampler_binding_type,
@@ -439,7 +497,10 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                     binding_impls.insert(0, quote! {
                         (
                             #binding_index,
-                            #render_path::render_resource::OwnedBindingResource::Sampler({
+                            #render_path::render_resource::OwnedBindingResource::Sampler(
+                                // TODO: Support other types.
+                                #render_path::render_resource::WgpuSamplerBindingType::Filtering,
+                                {
                                 let handle: Option<&#asset_path::Handle<#image_path::Image>> = (&self.#field_name).into();
                                 if let Some(handle) = handle {
                                     let image = images.get(handle).ok_or_else(|| #render_path::render_resource::AsBindGroupError::RetryNextUpdate)?;
@@ -639,62 +700,81 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
 
     // Calculate the actual number of bindless slots, taking hardware
     // limitations into account.
-    let (bindless_slot_count, actual_bindless_slot_count_declaration) = match attr_bindless_count {
-        Some(ref bindless_count) => {
-            let bindless_supported_syntax = quote! {
-                    fn bindless_supported(
-                        render_device: &#render_path::renderer::RenderDevice
-                    ) -> bool {
-                        render_device.features().contains(
-                            #render_path::settings::WgpuFeatures::BUFFER_BINDING_ARRAY |
-                            #render_path::settings::WgpuFeatures::TEXTURE_BINDING_ARRAY
-                        ) &&
-                        render_device.limits().max_storage_buffers_per_shader_stage > 0 &&
-                            render_device.limits().max_samplers_per_shader_stage >=
-                                (#sampler_binding_count * #bindless_count_syntax)
-                    }
-            };
-            let actual_bindless_slot_count_declaration = quote! {
-                let #actual_bindless_slot_count = if Self::bindless_supported(render_device) &&
-                        !force_no_bindless {
-                    ::core::num::NonZeroU32::new(#bindless_count_syntax)
-                } else {
-                    None
+    let (bindless_slot_count, actual_bindless_slot_count_declaration, bindless_descriptor_syntax) =
+        match attr_bindless_count {
+            Some(ref bindless_count) => {
+                let bindless_supported_syntax = quote! {
+                        fn bindless_supported(
+                            render_device: &#render_path::renderer::RenderDevice
+                        ) -> bool {
+                            render_device.features().contains(
+                                #render_path::settings::WgpuFeatures::BUFFER_BINDING_ARRAY |
+                                #render_path::settings::WgpuFeatures::TEXTURE_BINDING_ARRAY
+                            ) &&
+                            render_device.limits().max_storage_buffers_per_shader_stage > 0 &&
+                                render_device.limits().max_samplers_per_shader_stage >=
+                                    (#sampler_binding_count * #bindless_count_syntax)
+                        }
                 };
-            };
-            let bindless_slot_count_declaration = match bindless_count {
-                BindlessCountAttr::Auto => {
-                    quote! {
-                        fn bindless_slot_count() -> Option<
-                            #render_path::render_resource::BindlessSlotCount
-                        > {
-                            Some(#render_path::render_resource::BindlessSlotCount::Auto)
+                let actual_bindless_slot_count_declaration = quote! {
+                    let #actual_bindless_slot_count = if Self::bindless_supported(render_device) &&
+                            !force_no_bindless {
+                        ::core::num::NonZeroU32::new(#bindless_count_syntax)
+                    } else {
+                        None
+                    };
+                };
+                let bindless_slot_count_declaration = match bindless_count {
+                    BindlessCountAttr::Auto => {
+                        quote! {
+                            fn bindless_slot_count() -> Option<
+                                #render_path::render_resource::BindlessSlotCount
+                            > {
+                                Some(#render_path::render_resource::BindlessSlotCount::Auto)
+                            }
                         }
                     }
-                }
-                BindlessCountAttr::Limit(lit) => {
-                    quote! {
-                        fn bindless_slot_count() -> Option<
-                            #render_path::render_resource::BindlessSlotCount
-                        > {
-                            Some(#render_path::render_resource::BindlessSlotCount::Custom(#lit))
+                    BindlessCountAttr::Limit(lit) => {
+                        quote! {
+                            fn bindless_slot_count() -> Option<
+                                #render_path::render_resource::BindlessSlotCount
+                            > {
+                                Some(#render_path::render_resource::BindlessSlotCount::Custom(#lit))
+                            }
                         }
                     }
-                }
-            };
-            (
-                quote! {
-                    #bindless_slot_count_declaration
-                    #bindless_supported_syntax
-                },
-                actual_bindless_slot_count_declaration,
-            )
-        }
-        None => (
-            TokenStream::new().into(),
-            quote! { let #actual_bindless_slot_count: Option<::core::num::NonZeroU32> = None; },
-        ),
-    };
+                };
+
+                let bindless_descriptor_syntax = quote! {
+                    static RESOURCES: &[#render_path::render_resource::BindlessResourceType] = &[
+                        #(#bindless_resource_types,*)*
+                    ];
+                    static BUFFERS: &[#render_path::render_resource::BindlessBufferDescriptor] = &[
+                        #(#bindless_buffer_descriptors,*)*
+                    ];
+                    Some(#render_path::render_resource::BindlessDescriptor {
+                        resources: ::std::borrow::Cow::Borrowed(RESOURCES),
+                        buffers: ::std::borrow::Cow::Borrowed(BUFFERS),
+                    })
+                };
+
+                (
+                    quote! {
+                        #bindless_slot_count_declaration
+                        #bindless_supported_syntax
+                    },
+                    actual_bindless_slot_count_declaration,
+                    bindless_descriptor_syntax,
+                )
+            }
+            None => (
+                TokenStream::new().into(),
+                quote! { let #actual_bindless_slot_count: Option<::core::num::NonZeroU32> = None; },
+                quote! { None },
+            ),
+        };
+
+    let bindless_resource_count = bindless_resource_types.len() as u32;
 
     Ok(TokenStream::from(quote! {
         #(#field_struct_impls)*
@@ -741,10 +821,10 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                 let mut #bind_group_layout_entries = Vec::new();
                 match #actual_bindless_slot_count {
                     Some(bindless_slot_count) => {
-                        bind_group_layout_entries.extend(
-                            #render_path::render_resource::create_bindless_bind_group_layout(
-                                render_device,
-                                bindless_slot_count
+                        #bind_group_layout_entries.extend(
+                            #render_path::render_resource::create_bindless_bind_group_layout_entries(
+                                #bindless_resource_count,
+                                bindless_slot_count.into(),
                             ).into_iter()
                         );
                         #(#bindless_binding_layouts)*;
@@ -755,8 +835,31 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                 };
                 #bind_group_layout_entries
             }
+
+            fn bindless_descriptor() -> Option<#render_path::render_resource::BindlessDescriptor> {
+                #bindless_descriptor_syntax
+            }
         }
     }))
+}
+
+fn add_bindless_resource_type(
+    render_path: &syn::Path,
+    bindless_resource_types: &mut Vec<proc_macro2::TokenStream>,
+    binding_index: u32,
+    bindless_resource_type: proc_macro2::TokenStream,
+) {
+    if bindless_resource_types.len() < (binding_index as usize + 1) {
+        bindless_resource_types.resize_with(binding_index as usize + 1, || {
+            quote! {
+                #render_path::render_resource::BindlessBufferDescriptor {
+                    #render_path::render_resource::BindlessResourceType::None,
+                }
+            }
+        });
+    }
+
+    bindless_resource_types[binding_index as usize] = bindless_resource_type;
 }
 
 fn get_fallback_image(

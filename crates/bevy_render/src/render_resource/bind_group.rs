@@ -12,14 +12,11 @@ pub use bevy_render_macros::AsBindGroup;
 use core::ops::Deref;
 use encase::ShaderType;
 use thiserror::Error;
-use wgpu::{BindGroupEntry, BindGroupLayoutEntry, BindingResource, TextureViewDimension};
+use wgpu::{BindGroupEntry, BindGroupLayoutEntry, BindingResource, SamplerBindingType, TextureViewDimension};
+
+use super::BindlessDescriptor;
 
 define_atomic_id!(BindGroupId);
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 16;
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
-pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 256;
 
 /// Bind groups are responsible for binding render resources (e.g. buffers, textures, samplers)
 /// to a [`TrackedRenderPass`](crate::render_phase::TrackedRenderPass).
@@ -456,6 +453,10 @@ pub trait AsBindGroup {
     ) -> Vec<BindGroupLayoutEntry>
     where
         Self: Sized;
+
+    fn bindless_descriptor() -> Option<BindlessDescriptor> {
+        None
+    }
 }
 
 /// An error that occurs during [`AsBindGroup::as_bind_group`] calls.
@@ -468,12 +469,6 @@ pub enum AsBindGroupError {
     CreateBindGroupDirectly,
     #[error("At binding index {0}, the provided image sampler `{1}` does not match the required sampler type(s) `{2}`.")]
     InvalidSamplerType(u32, String, String),
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum BindlessSlotCount {
-    Auto,
-    Custom(u32),
 }
 
 /// A prepared bind group returned as a result of [`AsBindGroup::as_bind_group`].
@@ -501,7 +496,7 @@ pub struct BindingResources(pub Vec<(u32, OwnedBindingResource)>);
 pub enum OwnedBindingResource {
     Buffer(Buffer),
     TextureView(TextureViewDimension, TextureView),
-    Sampler(Sampler),
+    Sampler(SamplerBindingType, Sampler),
 }
 
 impl OwnedBindingResource {
@@ -509,7 +504,7 @@ impl OwnedBindingResource {
         match self {
             OwnedBindingResource::Buffer(buffer) => buffer.as_entire_binding(),
             OwnedBindingResource::TextureView(_, view) => BindingResource::TextureView(view),
-            OwnedBindingResource::Sampler(sampler) => BindingResource::Sampler(sampler),
+            OwnedBindingResource::Sampler(_, sampler) => BindingResource::Sampler(sampler),
         }
     }
 }
