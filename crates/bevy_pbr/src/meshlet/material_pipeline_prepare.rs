@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     environment_map::EnvironmentMapLight, irradiance_volume::IrradianceVolume,
-    material_bind_groups::MaterialBindGroupAllocator, *,
+    material_bind_groups_2::MaterialBindGroupAllocator, *,
 };
 use bevy_asset::AssetServer;
 use bevy_core_pipeline::{

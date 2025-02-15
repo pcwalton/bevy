@@ -461,7 +461,7 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                         &mut bindless_resource_types,
                         binding_index,
                         bindless_resource_type,
-                    )
+                    );
                 }
 
                 BindingType::Sampler => {
@@ -540,6 +540,16 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                             count: #actual_bindless_slot_count,
                         }
                     });
+
+                    // TODO: Support other types of samplers.
+                    add_bindless_resource_type(
+                        &render_path,
+                        &mut bindless_resource_types,
+                        binding_index,
+                        quote! {
+                            #render_path::render_resource::BindlessResourceType::SamplerFiltering
+                        },
+                    );
                 }
             }
         }

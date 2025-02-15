@@ -1,4 +1,4 @@
-use crate::material_bind_groups::{MaterialBindGroupIndex, MaterialBindGroupSlot};
+use crate::material_bind_groups_2::{MaterialBindGroupIndex, MaterialBindGroupSlot};
 use allocator::MeshAllocator;
 use bevy_asset::{load_internal_asset, AssetId, UntypedAssetId};
 use bevy_core_pipeline::{
@@ -46,7 +46,7 @@ use bevy_transform::components::GlobalTransform;
 use bevy_utils::{default, Parallel, TypeIdMap};
 use core::any::TypeId;
 use core::mem::size_of;
-use material_bind_groups::MaterialBindingId;
+use material_bind_groups_2::MaterialBindingId;
 use render::skin::{self, SkinIndex};
 use tracing::{error, warn};
 
