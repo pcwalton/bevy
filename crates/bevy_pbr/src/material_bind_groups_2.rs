@@ -12,10 +12,11 @@ use bevy_reflect::{prelude::ReflectDefault, Reflect};
 use bevy_render::{
     render_resource::{
         BindGroup, BindGroupEntry, BindGroupLayout, BindingNumber, BindingResource,
-        BindlessDescriptor, BindlessIndex, BindlessResourceType, Buffer, BufferBinding, BufferId,
-        BufferUsages, CompareFunction, FilterMode, OwnedBindingResource, PreparedBindGroup,
-        RawBufferVec, Sampler, SamplerDescriptor, SamplerId, TextureView, TextureViewDimension,
-        TextureViewId, UnpreparedBindGroup, WgpuSampler, WgpuTextureView,
+        BindlessDescriptor, BindlessIndex, BindlessResourceType, Buffer, BufferBinding,
+        BufferDescriptor, BufferId, BufferUsages, CompareFunction, FilterMode,
+        OwnedBindingResource, PreparedBindGroup, RawBufferVec, Sampler, SamplerDescriptor,
+        SamplerId, TextureView, TextureViewDimension, TextureViewId, UnpreparedBindGroup,
+        WgpuSampler, WgpuTextureView,
     },
     renderer::{RenderDevice, RenderQueue},
     texture::FallbackImage,
@@ -43,9 +44,11 @@ where
     slabs: Vec<MaterialBindlessSlab<M>>,
     bind_group_layout: BindGroupLayout,
     bindless_descriptor: BindlessDescriptor,
+    fallback_buffers: HashMap<BindlessIndex, Buffer>,
     slab_capacity: u32,
 }
 
+/// A single bind group and the bookkeeping necessary to allocate into it.
 pub struct MaterialBindlessSlab<M>
 where
     M: Material,
@@ -56,21 +59,38 @@ where
     /// regenerated.
     bind_group: Option<BindGroup>,
 
-    bindings: MaterialBindlessSlabBindings<M>,
+    /// A GPU-accessible buffer that holds the mapping from binding index to
+    /// bindless slot.
+    ///
+    /// This is conventionally assigned to bind group binding 0.
+    bindless_index_table: MaterialBindlessIndexTable<M>,
 
+    /// The binding arrays containing samplers.
     samplers: HashMap<BindlessResourceType, MaterialBindlessBindingArray<Sampler>>,
+    /// The binding arrays containing textures.
     textures: HashMap<BindlessResourceType, MaterialBindlessBindingArray<TextureView>>,
+    /// The binding arrays containing data buffers.
     buffers: HashMap<BindlessIndex, MaterialBindlessBindingArray<Buffer>>,
 
+    /// Holds extra CPU-accessible data that the material provides.
+    ///
+    /// Typically, this data is used for constructing the material key, for
+    /// pipeline specialization purposes.
     extra_data: Vec<Option<M::Data>>,
 
+    /// A free list of slot IDs.
     free_slots: Vec<MaterialBindGroupSlot>,
+    /// The total number of materials currently allocated in this slab.
     live_allocation_count: u32,
-    /// The total number of resources in the binding arrays.
+    /// The total number of resources currently allocated in the binding arrays.
     allocated_resource_count: u32,
 }
 
-struct MaterialBindlessSlabBindings<M>
+/// A GPU-accessible buffer that holds the mapping from binding index to
+/// bindless slot.
+///
+/// This is conventionally assigned to bind group binding 0.
+struct MaterialBindlessIndexTable<M>
 where
     M: Material,
 {
@@ -79,6 +99,8 @@ where
     phantom: PhantomData<M>,
 }
 
+/// A single binding array for storing bindless resources and the bookkeeping
+/// necessary to allocate into it.
 struct MaterialBindlessBindingArray<R>
 where
     R: GetBindingResourceId,
@@ -141,7 +163,7 @@ enum BindingResourceId {
 ///
 /// We need this because the `wgpu` bindless API takes a slice of references.
 /// Thus we need to create intermediate vectors of bindless resources in order
-/// to satisfy the lifetime requirements.
+/// to satisfy `wgpu`'s lifetime requirements.
 enum BindingResourceArray<'a> {
     Buffers(Vec<BufferBinding<'a>>),
     TextureViews(Vec<&'a WgpuTextureView>),
@@ -384,18 +406,18 @@ where
     }
 }
 
-impl<M> MaterialBindlessSlabBindings<M>
+impl<M> MaterialBindlessIndexTable<M>
 where
     M: Material,
 {
-    fn new(bindless_descriptor: &BindlessDescriptor) -> MaterialBindlessSlabBindings<M> {
+    fn new(bindless_descriptor: &BindlessDescriptor) -> MaterialBindlessIndexTable<M> {
         // Preallocate space for one bindings table, so that there will always be a buffer.
         let mut buffer = RawBufferVec::new(BufferUsages::STORAGE);
         for _ in 0..bindless_descriptor.resources.len() {
             buffer.push(0);
         }
 
-        MaterialBindlessSlabBindings {
+        MaterialBindlessIndexTable {
             buffer,
             buffer_dirty: BufferDirtyState::NeedsReserve,
             phantom: PhantomData,
@@ -455,11 +477,29 @@ where
     M: Material,
 {
     fn new(render_device: &RenderDevice) -> MaterialBindGroupBindlessAllocator<M> {
+        let bindless_descriptor = M::bindless_descriptor()
+            .expect("Non-bindless materials should use the non-bindless allocator");
+        let fallback_buffers = bindless_descriptor
+            .buffers
+            .iter()
+            .map(|bindless_buffer_descriptor| {
+                (
+                    bindless_buffer_descriptor.bindless_index,
+                    render_device.create_buffer(&BufferDescriptor {
+                        label: Some("bindless fallback buffer"),
+                        size: bindless_buffer_descriptor.element_size as u64,
+                        usage: BufferUsages::STORAGE,
+                        mapped_at_creation: false,
+                    }),
+                )
+            })
+            .collect();
+
         MaterialBindGroupBindlessAllocator {
             slabs: vec![],
             bind_group_layout: M::bind_group_layout(render_device),
-            bindless_descriptor: M::bindless_descriptor()
-                .expect("Non-bindless materials should use the non-bindless allocator"),
+            bindless_descriptor,
+            fallback_buffers,
             slab_capacity: M::bindless_slot_count()
                 .expect("Non-bindless materials should use the non-bindless allocator")
                 .resolve(),
@@ -531,12 +571,16 @@ where
                 render_device,
                 &self.bind_group_layout,
                 fallback_bindless_resources,
+                &self.fallback_buffers,
                 fallback_image,
                 &self.bindless_descriptor,
             );
         }
     }
 
+    /// Writes any buffers that we're managing to the GPU.
+    ///
+    /// Currently, this only consists of the bindless index tables.
     fn write_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
         for slab in &mut self.slabs {
             slab.write_buffer(render_device, render_queue);
@@ -751,7 +795,7 @@ where
         }
 
         // Serialize the allocated resource slots.
-        self.bindings
+        self.bindless_index_table
             .set(slot, &allocated_resource_slots, bindless_descriptor);
 
         // Insert extra data.
@@ -773,7 +817,7 @@ where
         for (bindless_index, (bindless_resource_type, &bindless_binding)) in bindless_descriptor
             .resources
             .iter()
-            .zip(self.bindings.get(slot, bindless_descriptor))
+            .zip(self.bindless_index_table.get(slot, bindless_descriptor))
             .enumerate()
         {
             let bindless_index = BindlessIndex::from(bindless_index as u32);
@@ -828,10 +872,11 @@ where
         render_device: &RenderDevice,
         bind_group_layout: &BindGroupLayout,
         fallback_bindless_resources: &FallbackBindlessResources,
+        fallback_buffers: &HashMap<BindlessIndex, Buffer>,
         fallback_image: &FallbackImage,
         bindless_descriptor: &BindlessDescriptor,
     ) {
-        self.bindings.prepare_buffer(render_device);
+        self.bindless_index_table.prepare_buffer(render_device);
 
         if self.bind_group.is_some() {
             return;
@@ -839,6 +884,7 @@ where
 
         let binding_resource_arrays = self.create_binding_resource_arrays(
             fallback_bindless_resources,
+            fallback_buffers,
             fallback_image,
             bindless_descriptor,
         );
@@ -846,7 +892,7 @@ where
         let mut bind_group_entries = vec![BindGroupEntry {
             binding: 0,
             resource: self
-                .bindings
+                .bindless_index_table
                 .buffer
                 .buffer()
                 .expect("Bindings buffer must exist")
@@ -880,13 +926,18 @@ where
         ));
     }
 
+    /// Writes any buffers that we're managing to the GPU.
+    ///
+    /// Currently, this only consists of the bindless index table.
     fn write_buffer(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
-        self.bindings.write_buffer(render_device, render_queue);
+        self.bindless_index_table
+            .write_buffer(render_device, render_queue);
     }
 
     fn create_binding_resource_arrays<'a>(
         &'a self,
         fallback_bindless_resources: &'a FallbackBindlessResources,
+        fallback_buffers: &'a HashMap<BindlessIndex, Buffer>,
         fallback_image: &'a FallbackImage,
         bindless_descriptor: &'a BindlessDescriptor,
     ) -> Vec<(&'a u32, BindingResourceArray<'a>)> {
@@ -1000,9 +1051,9 @@ where
                 .iter()
                 .map(|maybe_bindless_binding| {
                     let buffer = match *maybe_bindless_binding {
-                        None => {
-                            todo!("TODO: populate fallback buffers")
-                        }
+                        None => fallback_buffers
+                            .get(&bindless_buffer_descriptor.bindless_index)
+                            .expect("Fallback buffer should exist"),
                         Some(ref bindless_binding) => &bindless_binding.resource,
                     };
                     BufferBinding {
@@ -1180,7 +1231,7 @@ where
 
         MaterialBindlessSlab {
             bind_group: None,
-            bindings: MaterialBindlessSlabBindings::new(bindless_descriptor),
+            bindless_index_table: MaterialBindlessIndexTable::new(bindless_descriptor),
             samplers,
             textures,
             buffers,
