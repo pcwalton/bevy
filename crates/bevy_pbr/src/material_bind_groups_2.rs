@@ -1,3 +1,5 @@
+//! Management of material bind groups and their resources.
+
 use core::{marker::PhantomData, mem};
 
 use bevy_derive::{Deref, DerefMut};
@@ -23,6 +25,8 @@ use tracing::{error, trace};
 
 use crate::Material;
 
+/// A resource that places materials into bind groups and tracks their
+/// resources.
 #[derive(Resource)]
 pub enum MaterialBindGroupAllocator<M>
 where
@@ -46,7 +50,7 @@ pub struct MaterialBindlessSlab<M>
 where
     M: Material,
 {
-    /// Bind group.
+    /// The current bind group, if it's up to date.
     ///
     /// If this is `None`, then the bind group is dirty and needs to be
     /// regenerated.
@@ -60,7 +64,10 @@ where
 
     extra_data: Vec<Option<M::Data>>,
 
+    free_slots: Vec<MaterialBindGroupSlot>,
     live_allocation_count: u32,
+    /// The total number of resources in the binding arrays.
+    allocated_resource_count: u32,
 }
 
 struct MaterialBindlessSlabBindings<M>
@@ -69,7 +76,6 @@ where
 {
     buffer: RawBufferVec<u32>,
     buffer_dirty: BufferDirtyState,
-    free_slots: Vec<MaterialBindGroupSlot>,
     phantom: PhantomData<M>,
 }
 
@@ -84,7 +90,6 @@ where
     resource_to_slot: HashMap<BindingResourceId, u32>,
     free_slots: Vec<u32>,
     len: u32,
-    capacity: u32,
 }
 
 struct MaterialBindlessBinding<R>
@@ -185,11 +190,23 @@ trait GetBindingResourceId {
     fn binding_resource_id(&self, resource_type: BindlessResourceType) -> BindingResourceId;
 }
 
-pub enum MaterialSlab<'a, M>
+/// The public interface to a slab, which represents a single bind group.
+pub struct MaterialSlab<'a, M>(MaterialSlabImpl<'a, M>)
+where
+    M: Material;
+
+/// The actual implementation of a material slab.
+///
+/// This has bindless and non-bindless variants.
+enum MaterialSlabImpl<'a, M>
 where
     M: Material,
 {
+    /// The implementation of the slab interface we use when the slab
+    /// is bindless.
     Bindless(&'a MaterialBindlessSlab<M>),
+    /// The implementation of the slab interface we use when the slab
+    /// is non-bindless.
     NonBindless(MaterialNonBindlessSlab<'a, M>),
 }
 
@@ -268,19 +285,26 @@ where
         }
     }
 
+    /// Returns the slab with the given index, if one exists.
     pub fn get(&self, group: MaterialBindGroupIndex) -> Option<MaterialSlab<M>> {
         match *self {
             MaterialBindGroupAllocator::Bindless(ref bindless_allocator) => bindless_allocator
                 .get(group)
-                .map(|bindless_slab| MaterialSlab::Bindless(bindless_slab)),
+                .map(|bindless_slab| MaterialSlab(MaterialSlabImpl::Bindless(bindless_slab))),
             MaterialBindGroupAllocator::NonBindless(ref non_bindless_allocator) => {
-                non_bindless_allocator
-                    .get(group)
-                    .map(|non_bindless_slab| MaterialSlab::NonBindless(non_bindless_slab))
+                non_bindless_allocator.get(group).map(|non_bindless_slab| {
+                    MaterialSlab(MaterialSlabImpl::NonBindless(non_bindless_slab))
+                })
             }
         }
     }
 
+    /// Allocates an [`UnpreparedBindGroup`] and returns the resulting binding ID.
+    ///
+    /// This method should generally be preferred over
+    /// [`Self::allocate_prepared`], because this method supports both bindless
+    /// and non-bindless bind groups. Only use [`Self::allocate_preferred`] if
+    /// you need to prepare the bind group yourself.
     pub fn allocate_unprepared(
         &mut self,
         unprepared_bind_group: UnpreparedBindGroup<M::Data>,
@@ -314,6 +338,9 @@ where
         }
     }
 
+    /// Deallocates the material with the given binding ID.
+    ///
+    /// Any resources that are no longer referenced are removed from the slab.
     pub fn free(&mut self, material_binding_id: MaterialBindingId) {
         match *self {
             MaterialBindGroupAllocator::Bindless(
@@ -370,7 +397,6 @@ where
 
         MaterialBindlessSlabBindings {
             buffer,
-            free_slots: vec![],
             buffer_dirty: BufferDirtyState::NeedsReserve,
             phantom: PhantomData,
         }
@@ -422,12 +448,6 @@ where
             }
         }
     }
-
-    fn free(&mut self, slot: MaterialBindGroupSlot) {
-        // Note that this doesn't actually dirty the buffer. We just leave the
-        // old contents there.
-        self.free_slots.push(slot);
-    }
 }
 
 impl<M> MaterialBindGroupBindlessAllocator<M>
@@ -452,7 +472,11 @@ where
     ) -> MaterialBindingId {
         for (slab_index, slab) in self.slabs.iter_mut().enumerate() {
             trace!("Trying to allocate in slab {}", slab_index);
-            match slab.try_allocate(unprepared_bind_group, &self.bindless_descriptor) {
+            match slab.try_allocate(
+                unprepared_bind_group,
+                &self.bindless_descriptor,
+                self.slab_capacity,
+            ) {
                 Ok(slot) => {
                     return MaterialBindingId {
                         group: MaterialBindGroupIndex(slab_index as u32),
@@ -465,16 +489,19 @@ where
 
         let group = MaterialBindGroupIndex(self.slabs.len() as u32);
         //println!("Allocation in slab failed, creating new slab {:?}", group);
-        self.slabs.push(MaterialBindlessSlab::new(
-            self.slab_capacity,
-            &self.bindless_descriptor,
-        ));
+        self.slabs
+            .push(MaterialBindlessSlab::new(&self.bindless_descriptor));
 
+        // Allocate into the newly-pushed slab.
         let Ok(slot) = self
             .slabs
             .last_mut()
             .expect("We just pushed a slab")
-            .try_allocate(unprepared_bind_group, &self.bindless_descriptor)
+            .try_allocate(
+                unprepared_bind_group,
+                &self.bindless_descriptor,
+                self.slab_capacity,
+            )
         else {
             panic!("An allocation into an empty slab should always succeed")
         };
@@ -531,14 +558,23 @@ impl<M> MaterialBindlessSlab<M>
 where
     M: Material,
 {
+    /// Attempts to allocate the given unprepared bind group in this slab.
+    ///
+    /// If the allocation succeeds, this method returns the slot that the
+    /// allocation was placed in. If the allocation fails because the slab was
+    /// full, this method returns the unprepared bind group back to the caller
+    /// so that it can try to allocate again.
     fn try_allocate(
         &mut self,
         mut unprepared_bind_group: UnpreparedBindGroup<M::Data>,
         bindless_descriptor: &BindlessDescriptor,
+        slot_capacity: u32,
     ) -> Result<MaterialBindGroupSlot, UnpreparedBindGroup<M::Data>> {
         let mut pre_existing_resources = HashMap::new();
         let mut needed_free_buffer_slots = vec![];
-        let mut needed_free_fixed_resource_slots = HashMap::new();
+        let mut needed_free_fixed_resource_slots: HashMap<BindlessResourceType, u32> =
+            HashMap::default();
+        let mut total_needed_slots = 0;
 
         // Locate pre-existing resources.
 
@@ -578,6 +614,7 @@ where
                             *needed_free_fixed_resource_slots
                                 .entry(bindless_resource_type)
                                 .or_default() += 1;
+                            total_needed_slots += 1;
                         }
                     }
                 }
@@ -597,61 +634,35 @@ where
                             *needed_free_fixed_resource_slots
                                 .entry(bindless_resource_type)
                                 .or_default() += 1;
+                            total_needed_slots += 1;
                         }
                     }
                 }
             }
         }
 
-        // Check to see if we have enough free space in buffer binding arrays.
-        for &binding_index in &needed_free_buffer_slots {
-            if !self
-                .buffers
-                .get(&binding_index)
-                .expect("Buffer should be present")
-                .has_free_slots(1)
-            {
-                trace!(
-                    "Buffer at binding {:?} is full, can't allocate",
-                    binding_index
-                );
-                return Err(unprepared_bind_group);
-            }
+        // Check to see if we have enough free space.
+        //
+        // As a special case, note that if *nothing* is allocated in this slab,
+        // then we always allow a material to be placed in it, regardless of the
+        // number of bindings the material has. This is so that, if the
+        // platform's maximum bindless count is set too low to hold even a
+        // single material, we can still place each material into a separate
+        // slab instead of failing outright.
+        if self.allocated_resource_count > 0
+            && self.allocated_resource_count + total_needed_slots > slot_capacity
+        {
+            trace!("Slab is full, can't allocate");
+            return Err(unprepared_bind_group);
         }
 
-        // Check to see if we have enough free space in fixed resource binding
-        // arrays.
-        for (bindless_resource_type, &needed_slot_count) in &needed_free_fixed_resource_slots {
-            if let Some(sampler_binding_array) = self.samplers.get(bindless_resource_type) {
-                if !sampler_binding_array.has_free_slots(needed_slot_count) {
-                    trace!(
-                        "Sampler binding array {:?} is full, can't allocate",
-                        bindless_resource_type
-                    );
-                    return Err(unprepared_bind_group);
-                }
-                continue;
-            }
-
-            let texture_binding_array = self.textures.get(bindless_resource_type).expect(
-                "This bindless resource type should describe either a live sampler binding array \
-                or a live texture binding array",
-            );
-            if !texture_binding_array.has_free_slots(needed_slot_count) {
-                trace!(
-                    "Texture binding array {:?} is full, can't allocate",
-                    bindless_resource_type
-                );
-                return Err(unprepared_bind_group);
-            }
-        }
-
-        // OK, we can allocate in this slab.
+        // OK, we can allocate in this slab. Assign a slot ID.
         let slot = self
-            .bindings
             .free_slots
             .pop()
             .unwrap_or(MaterialBindGroupSlot(self.live_allocation_count));
+
+        // Bump the live allocation count.
         self.live_allocation_count += 1;
 
         let mut allocated_resource_slots = HashMap::default();
@@ -734,6 +745,9 @@ where
                     allocated_resource_slots.insert(bindless_index, slot);
                 }
             }
+
+            // Bump the allocated resource count.
+            self.allocated_resource_count += 1;
         }
 
         // Serialize the allocated resource slots.
@@ -752,7 +766,10 @@ where
         Ok(slot)
     }
 
+    /// Removes the material allocated in the given slot, with the given
+    /// descriptor, from this slab.
     fn free(&mut self, slot: MaterialBindGroupSlot, bindless_descriptor: &BindlessDescriptor) {
+        // Loop through each binding.
         for (bindless_index, (bindless_resource_type, &bindless_binding)) in bindless_descriptor
             .resources
             .iter()
@@ -760,42 +777,49 @@ where
             .enumerate()
         {
             let bindless_index = BindlessIndex::from(bindless_index as u32);
-            match *bindless_resource_type {
-                BindlessResourceType::None => {}
-                BindlessResourceType::Buffer => {
-                    self.buffers
-                        .get_mut(&bindless_index)
-                        .expect("Buffer should exist with that bindless index")
-                        .remove(bindless_binding);
-                }
+
+            // Free the binding.
+            let resource_freed = match *bindless_resource_type {
+                BindlessResourceType::None => false,
+                BindlessResourceType::Buffer => self
+                    .buffers
+                    .get_mut(&bindless_index)
+                    .expect("Buffer should exist with that bindless index")
+                    .remove(bindless_binding),
                 BindlessResourceType::SamplerFiltering
                 | BindlessResourceType::SamplerNonFiltering
-                | BindlessResourceType::SamplerComparison => {
-                    self.samplers
-                        .get_mut(bindless_resource_type)
-                        .expect("Sampler array should exist")
-                        .remove(bindless_binding);
-                }
+                | BindlessResourceType::SamplerComparison => self
+                    .samplers
+                    .get_mut(bindless_resource_type)
+                    .expect("Sampler array should exist")
+                    .remove(bindless_binding),
                 BindlessResourceType::Texture1d
                 | BindlessResourceType::Texture2d
                 | BindlessResourceType::Texture2dArray
                 | BindlessResourceType::Texture3d
                 | BindlessResourceType::TextureCube
-                | BindlessResourceType::TextureCubeArray => {
-                    self.textures
-                        .get_mut(bindless_resource_type)
-                        .expect("Texture array should exist")
-                        .remove(bindless_binding);
-                }
+                | BindlessResourceType::TextureCubeArray => self
+                    .textures
+                    .get_mut(bindless_resource_type)
+                    .expect("Texture array should exist")
+                    .remove(bindless_binding),
+            };
+
+            // If the slot is now free, decrement the allocated resource
+            // count.
+            if resource_freed {
+                self.allocated_resource_count -= 1;
             }
         }
 
-        self.bindings.free(slot);
+        // Clear out the extra data.
         self.extra_data[slot.0 as usize] = None;
 
         // Invalidate the cached bind group.
         self.bind_group = None;
 
+        // Release the slot ID.
+        self.free_slots.push(slot);
         self.live_allocation_count -= 1;
     }
 
@@ -1016,7 +1040,6 @@ where
     fn new(
         binding_number: BindingNumber,
         resource_type: BindlessResourceType,
-        capacity: u32,
     ) -> MaterialBindlessBindingArray<R> {
         MaterialBindlessBindingArray {
             binding_number,
@@ -1025,12 +1048,7 @@ where
             resource_to_slot: HashMap::default(),
             free_slots: vec![],
             len: 0,
-            capacity,
         }
-    }
-
-    fn has_free_slots(&self, slot_count: u32) -> bool {
-        self.len + slot_count < self.capacity
     }
 
     fn find(&self, binding_resource_id: BindingResourceId) -> Option<u32> {
@@ -1038,7 +1056,6 @@ where
     }
 
     fn insert(&mut self, binding_resource_id: BindingResourceId, resource: R) -> u32 {
-        debug_assert_ne!(self.len, self.capacity);
         let slot = self.free_slots.pop().unwrap_or(self.len);
         self.resource_to_slot.insert(binding_resource_id, slot);
 
@@ -1051,7 +1068,12 @@ where
         slot
     }
 
-    fn remove(&mut self, slot: u32) {
+    /// Removes a reference to an object from the slot.
+    ///
+    /// If the reference count dropped to 0 and the object was freed, this
+    /// method returns true. If the object was still referenced after removing
+    /// it, returns false.
+    fn remove(&mut self, slot: u32) -> bool {
         let maybe_binding = &mut self.bindings[slot as usize];
         let binding = maybe_binding
             .as_mut()
@@ -1059,7 +1081,7 @@ where
 
         binding.ref_count -= 1;
         if binding.ref_count != 0 {
-            return;
+            return false;
         }
 
         let binding_resource_id = binding.resource.binding_resource_id(self.resource_type);
@@ -1068,6 +1090,7 @@ where
         *maybe_binding = None;
         self.free_slots.push(slot);
         self.len -= 1;
+        true
     }
 }
 
@@ -1099,10 +1122,7 @@ impl<M> MaterialBindlessSlab<M>
 where
     M: Material,
 {
-    fn new(
-        slab_capacity: u32,
-        bindless_descriptor: &BindlessDescriptor,
-    ) -> MaterialBindlessSlab<M> {
+    fn new(bindless_descriptor: &BindlessDescriptor) -> MaterialBindlessSlab<M> {
         let mut buffers = HashMap::default();
         let mut samplers = HashMap::default();
         let mut textures = HashMap::default();
@@ -1127,11 +1147,7 @@ where
                         .binding_number;
                     buffers.insert(
                         bindless_index,
-                        MaterialBindlessBindingArray::new(
-                            binding_number,
-                            *bindless_resource_type,
-                            slab_capacity,
-                        ),
+                        MaterialBindlessBindingArray::new(binding_number, *bindless_resource_type),
                     );
                 }
                 BindlessResourceType::SamplerFiltering
@@ -1142,7 +1158,6 @@ where
                         MaterialBindlessBindingArray::new(
                             *bindless_resource_type.binding_number().unwrap(),
                             *bindless_resource_type,
-                            slab_capacity,
                         ),
                     );
                 }
@@ -1157,7 +1172,6 @@ where
                         MaterialBindlessBindingArray::new(
                             *bindless_resource_type.binding_number().unwrap(),
                             *bindless_resource_type,
-                            slab_capacity,
                         ),
                     );
                 }
@@ -1171,7 +1185,9 @@ where
             textures,
             buffers,
             extra_data: vec![],
+            free_slots: vec![],
             live_allocation_count: 0,
+            allocated_resource_count: 0,
         }
     }
 }
@@ -1265,7 +1281,7 @@ where
     fn get(&self, group: MaterialBindGroupIndex) -> Option<MaterialNonBindlessSlab<M>> {
         match self.bind_groups[group.0 as usize] {
             Some(MaterialNonBindlessAllocatedBindGroup::Prepared(ref prepared_bind_group)) => {
-                Some(MaterialNonBindlessSlab(&prepared_bind_group))
+                Some(MaterialNonBindlessSlab(prepared_bind_group))
             }
             Some(MaterialNonBindlessAllocatedBindGroup::Unprepared { .. }) | None => None,
         }
@@ -1309,20 +1325,20 @@ where
     M: Material,
 {
     pub fn get_extra_data(&self, slot: MaterialBindGroupSlot) -> &M::Data {
-        match *self {
-            MaterialSlab::Bindless(ref material_bindless_slab) => {
+        match self.0 {
+            MaterialSlabImpl::Bindless(material_bindless_slab) => {
                 material_bindless_slab.get_extra_data(slot)
             }
-            MaterialSlab::NonBindless(ref prepared_bind_group) => &prepared_bind_group.0.data,
+            MaterialSlabImpl::NonBindless(ref prepared_bind_group) => &prepared_bind_group.0.data,
         }
     }
 
     pub fn bind_group(&self) -> Option<&'a BindGroup> {
-        match *self {
-            MaterialSlab::Bindless(ref material_bindless_slab) => {
+        match self.0 {
+            MaterialSlabImpl::Bindless(material_bindless_slab) => {
                 material_bindless_slab.bind_group()
             }
-            MaterialSlab::NonBindless(ref prepared_bind_group) => {
+            MaterialSlabImpl::NonBindless(ref prepared_bind_group) => {
                 Some(&prepared_bind_group.0.bind_group)
             }
         }

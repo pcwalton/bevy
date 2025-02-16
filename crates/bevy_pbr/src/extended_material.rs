@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use alloc::borrow::Cow;
 
 use bevy_asset::{Asset, Handle};
 use bevy_ecs::system::SystemParamItem;
