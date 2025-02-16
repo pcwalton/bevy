@@ -16,7 +16,7 @@ use wgpu::{
     BindGroupEntry, BindGroupLayoutEntry, BindingResource, SamplerBindingType, TextureViewDimension,
 };
 
-use super::{BindlessDescriptor, BindlessSlotCount};
+use super::{BindlessDescriptor, BindlessSlabResourceLimit};
 
 define_atomic_id!(BindGroupId);
 
@@ -368,7 +368,7 @@ pub trait AsBindGroup {
     /// Note that the *actual* slot count may be different from this value, due
     /// to platform limitations. For example, if bindless resources aren't
     /// supported on this platform, the actual slot count will be 1.
-    fn bindless_slot_count() -> Option<BindlessSlotCount> {
+    fn bindless_slot_count() -> Option<BindlessSlabResourceLimit> {
         None
     }
 

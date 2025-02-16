@@ -743,18 +743,18 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                     BindlessCountAttr::Auto => {
                         quote! {
                             fn bindless_slot_count() -> Option<
-                                #render_path::render_resource::BindlessSlotCount
+                                #render_path::render_resource::BindlessSlabResourceLimit
                             > {
-                                Some(#render_path::render_resource::BindlessSlotCount::Auto)
+                                Some(#render_path::render_resource::BindlessSlabResourceLimit::Auto)
                             }
                         }
                     }
                     BindlessCountAttr::Limit(lit) => {
                         quote! {
                             fn bindless_slot_count() -> Option<
-                                #render_path::render_resource::BindlessSlotCount
+                                #render_path::render_resource::BindlessSlabResourceLimit
                             > {
-                                Some(#render_path::render_resource::BindlessSlotCount::Custom(#lit))
+                                Some(#render_path::render_resource::BindlessSlabResourceLimit::Custom(#lit))
                             }
                         }
                     }

@@ -7,7 +7,7 @@ use bevy_render::{
     alpha::AlphaMode,
     mesh::MeshVertexBufferLayoutRef,
     render_resource::{
-        AsBindGroup, AsBindGroupError, BindGroupLayout, BindlessDescriptor, BindlessSlotCount,
+        AsBindGroup, AsBindGroupError, BindGroupLayout, BindlessDescriptor, BindlessSlabResourceLimit,
         RenderPipelineDescriptor, Shader, ShaderRef, SpecializedMeshPipelineError,
         UnpreparedBindGroup,
     },
@@ -156,19 +156,19 @@ impl<B: Material, E: MaterialExtension> AsBindGroup for ExtendedMaterial<B, E> {
     type Data = (<B as AsBindGroup>::Data, <E as AsBindGroup>::Data);
     type Param = (<B as AsBindGroup>::Param, <E as AsBindGroup>::Param);
 
-    fn bindless_slot_count() -> Option<BindlessSlotCount> {
+    fn bindless_slot_count() -> Option<BindlessSlabResourceLimit> {
         match (B::bindless_slot_count(), E::bindless_slot_count()) {
-            (Some(BindlessSlotCount::Auto), Some(BindlessSlotCount::Auto)) => {
-                Some(BindlessSlotCount::Auto)
+            (Some(BindlessSlabResourceLimit::Auto), Some(BindlessSlabResourceLimit::Auto)) => {
+                Some(BindlessSlabResourceLimit::Auto)
             }
-            (Some(BindlessSlotCount::Auto), Some(BindlessSlotCount::Custom(limit)))
-            | (Some(BindlessSlotCount::Custom(limit)), Some(BindlessSlotCount::Auto)) => {
-                Some(BindlessSlotCount::Custom(limit))
+            (Some(BindlessSlabResourceLimit::Auto), Some(BindlessSlabResourceLimit::Custom(limit)))
+            | (Some(BindlessSlabResourceLimit::Custom(limit)), Some(BindlessSlabResourceLimit::Auto)) => {
+                Some(BindlessSlabResourceLimit::Custom(limit))
             }
             (
-                Some(BindlessSlotCount::Custom(base_limit)),
-                Some(BindlessSlotCount::Custom(extension_limit)),
-            ) => Some(BindlessSlotCount::Custom(base_limit.min(extension_limit))),
+                Some(BindlessSlabResourceLimit::Custom(base_limit)),
+                Some(BindlessSlabResourceLimit::Custom(extension_limit)),
+            ) => Some(BindlessSlabResourceLimit::Custom(base_limit.min(extension_limit))),
             _ => None,
         }
     }

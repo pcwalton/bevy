@@ -28,23 +28,43 @@ use crate::Material;
 
 /// A resource that places materials into bind groups and tracks their
 /// resources.
+///
+/// Internally, Bevy has separate allocators for bindless and non-bindless
+/// materials. This resource provides a common interface to the specific
+/// allocator in use.
 #[derive(Resource)]
 pub enum MaterialBindGroupAllocator<M>
 where
     M: Material,
 {
+    /// The allocator used when the material is bindless.
     Bindless(Box<MaterialBindGroupBindlessAllocator<M>>),
+    /// The allocator used when the material is non-bindless.
     NonBindless(Box<MaterialBindGroupNonBindlessAllocator<M>>),
 }
 
+/// The allocator that places bindless materials into bind groups and tracks
+/// their resources.
 pub struct MaterialBindGroupBindlessAllocator<M>
 where
     M: Material,
 {
+    /// The slabs, each of which contains a bind group.
     slabs: Vec<MaterialBindlessSlab<M>>,
     bind_group_layout: BindGroupLayout,
     bindless_descriptor: BindlessDescriptor,
+
+    /// Dummy buffers that we use to fill empty slots in buffer binding arrays.
+    ///
+    /// There's one fallback buffer for each buffer in the bind group, each
+    /// appropriately sized. Each buffer contains one uninitialized element of
+    /// the applicable type.
     fallback_buffers: HashMap<BindlessIndex, Buffer>,
+
+    /// The maximum number of resources that can be stored in a slab.
+    ///
+    /// This corresponds to `SLAB_CAPACITY` in the `#[bindless(SLAB_CAPACITY)]`
+    /// attribute, when deriving `AsBindGroup`.
     slab_capacity: u32,
 }
 
@@ -94,7 +114,9 @@ struct MaterialBindlessIndexTable<M>
 where
     M: Material,
 {
+    /// The contents of the buffer.
     buffer: RawBufferVec<u32>,
+    /// Whether the contents of the buffer have been uploaded to GPU.
     buffer_dirty: BufferDirtyState,
     phantom: PhantomData<M>,
 }
@@ -114,11 +136,19 @@ where
     len: u32,
 }
 
+/// A single resource (sampler, texture, or buffer) in a binding array.
+///
+/// Resources hold a reference count, which specifies the number of materials
+/// currently allocated within the slab that refer to this resource. When the
+/// reference count drops to zero, the resource is freed.
 struct MaterialBindlessBinding<R>
 where
     R: GetBindingResourceId,
 {
+    /// The sampler, texture, or buffer.
     resource: R,
+    /// The number of materials currently allocated within the containing slab
+    /// that use this resource.
     ref_count: u32,
 }
 
@@ -127,6 +157,10 @@ where
     M: Material,
 {
     bind_groups: Vec<Option<MaterialNonBindlessAllocatedBindGroup<M>>>,
+    /// The bind groups that are dirty and need to be prepared.
+    ///
+    /// To prepare the bind groups, call
+    /// [`MaterialBindGroupAllocator::prepare_bind_groups`].
     to_prepare: HashSet<MaterialBindGroupIndex>,
     free_list: Vec<MaterialBindGroupIndex>,
     phantom: PhantomData<M>,
@@ -325,7 +359,7 @@ where
     ///
     /// This method should generally be preferred over
     /// [`Self::allocate_prepared`], because this method supports both bindless
-    /// and non-bindless bind groups. Only use [`Self::allocate_preferred`] if
+    /// and non-bindless bind groups. Only use [`Self::allocate_prepared`] if
     /// you need to prepare the bind group yourself.
     pub fn allocate_unprepared(
         &mut self,
@@ -343,6 +377,15 @@ where
         }
     }
 
+    /// Places a pre-prepared bind group into a slab.
+    ///
+    /// For bindless materials, the allocator internally manages the bind
+    /// groups, so calling this method will panic if this is a bindless
+    /// allocator. Only non-bindless allocators support this method.
+    ///
+    /// It's generally preferred to use [`Self::allocate_unprepared`], because
+    /// that method supports both bindless and non-bindless allocators. Only use
+    /// this method if you need to prepare the bind group yourself.
     pub fn allocate_prepared(
         &mut self,
         prepared_bind_group: PreparedBindGroup<M::Data>,
@@ -374,6 +417,8 @@ where
         }
     }
 
+    /// Recreates any bind groups corresponding to slabs that have been modified
+    /// since last calling [`MaterialBindGroupAllocator::prepare_bind_groups`].
     pub fn prepare_bind_groups(
         &mut self,
         render_device: &RenderDevice,
@@ -394,6 +439,11 @@ where
         }
     }
 
+    /// Uploads the contents of all buffers that this
+    /// [`MaterialBindGroupAllocator`] manages to the GPU.
+    ///
+    /// Non-bindless allocators don't currently manage any buffers, so this
+    /// method only has an effect for bindless allocators.
     pub fn write_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
         match *self {
             MaterialBindGroupAllocator::Bindless(

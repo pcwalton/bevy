@@ -21,6 +21,14 @@ pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 64;
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 2048;
 
+/// The binding numbers for the built-in binding arrays of each bindless
+/// resource type.
+///
+/// In the case of materials, the material allocator manages these binding
+/// arrays.
+///
+/// `bindless.wgsl` contains declarations of these arrays for use in your
+/// shaders.
 pub static BINDING_NUMBERS: [(BindlessResourceType, BindingNumber); 9] = [
     (BindlessResourceType::SamplerFiltering, BindingNumber(1)),
     (BindlessResourceType::SamplerNonFiltering, BindingNumber(2)),
@@ -33,13 +41,34 @@ pub static BINDING_NUMBERS: [(BindlessResourceType, BindingNumber); 9] = [
     (BindlessResourceType::TextureCubeArray, BindingNumber(9)),
 ];
 
+/// The maximum number of resources that can be stored in a slab.
+///
+/// This limit primarily exists in order to work around `wgpu` performance
+/// problems involving large numbers of bindless resources. Also, some
+/// platforms, such as Metal, currently enforce limits on the number of
+/// resources in use.
+///
+/// This corresponds to `LIMIT` in the `#[bindless(LIMIT)]` attribute when
+/// deriving [`crate::render_resource::AsBindGroup`].
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum BindlessSlotCount {
+pub enum BindlessSlabResourceLimit {
     Auto,
     Custom(u32),
 }
 
+/// Information about the bindless resources in this object.
+///
+/// The material bind group allocator uses this descriptor in order to create
+/// and maintain bind groups. The fields within this bindless descriptor are
+/// [`Cow`]s in order to support both the common case in which the fields are
+/// simply `static` constants and the more unusual case in which the fields are
+/// dynamically generated efficiently. An example of the latter case is
+/// `ExtendedMaterial`, which needs to assemble a bindless descriptor from those
+/// of the base material and the material extension at runtime.
+///
+/// This structure will only be present if this object is bindless.
 pub struct BindlessDescriptor {
+    /// A list of 
     pub resources: Cow<'static, [BindlessResourceType]>,
     // TODO: Require that this be sorted so we can binary search it?
     pub buffers: Cow<'static, [BindlessBufferDescriptor]>,
@@ -118,11 +147,11 @@ pub fn create_bindless_bind_group_layout_entries(
     ]
 }
 
-impl BindlessSlotCount {
+impl BindlessSlabResourceLimit {
     pub fn resolve(&self) -> u32 {
         match *self {
-            BindlessSlotCount::Auto => AUTO_BINDLESS_SLOT_COUNT,
-            BindlessSlotCount::Custom(limit) => limit,
+            BindlessSlabResourceLimit::Auto => AUTO_BINDLESS_SLOT_COUNT,
+            BindlessSlabResourceLimit::Custom(limit) => limit,
         }
     }
 }
