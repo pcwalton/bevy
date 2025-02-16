@@ -2,7 +2,7 @@ mod prepass_bindings;
 
 use crate::{
     alpha_mode_pipeline_key, binding_arrays_are_usable, buffer_layout,
-    collect_meshes_for_gpu_building, material_bind_groups_2::MaterialBindGroupAllocator,
+    collect_meshes_for_gpu_building, material_bind_groups::MaterialBindGroupAllocator,
     queue_material_meshes, setup_morph_and_skinning_defs, skin, DrawMesh,
     EntitySpecializationTicks, Material, MaterialPipeline, MaterialPipelineKey, MeshLayouts,
     MeshPipeline, MeshPipelineKey, OpaqueRendererMethod, PreparedMaterial, RenderLightmaps,

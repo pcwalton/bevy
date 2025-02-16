@@ -1,4 +1,4 @@
-use crate::material_bind_groups_2::{
+use crate::material_bind_groups::{
     FallbackBindlessResources, MaterialBindGroupAllocator, MaterialBindingId,
 };
 #[cfg(feature = "meshlet")]
@@ -516,7 +516,7 @@ impl<M: Material> FromWorld for MaterialPipeline<M> {
                 ShaderRef::Handle(handle) => Some(handle),
                 ShaderRef::Path(path) => Some(asset_server.load(path)),
             },
-            bindless: material_bind_groups_2::material_uses_bindless_resources::<M>(render_device),
+            bindless: material_bind_groups::material_uses_bindless_resources::<M>(render_device),
             marker: PhantomData,
         }
     }

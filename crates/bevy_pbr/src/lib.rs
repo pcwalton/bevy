@@ -35,7 +35,7 @@ mod light;
 mod light_probe;
 mod lightmap;
 mod material;
-mod material_bind_groups_2;
+mod material_bind_groups;
 mod mesh_material;
 mod parallax;
 mod pbr_material;
@@ -45,7 +45,7 @@ mod ssao;
 mod ssr;
 mod volumetric_fog;
 
-use crate::material_bind_groups_2::FallbackBindlessResources;
+use crate::material_bind_groups::FallbackBindlessResources;
 
 use bevy_color::{Color, LinearRgba};
 

@@ -1,5 +1,5 @@
 use self::assign::ClusterableObjectType;
-use crate::material_bind_groups_2::MaterialBindGroupAllocator;
+use crate::material_bind_groups::MaterialBindGroupAllocator;
 use crate::*;
 use bevy_asset::UntypedAssetId;
 use bevy_color::ColorToComponents;

@@ -22,30 +22,15 @@ pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 64;
 pub const AUTO_BINDLESS_SLOT_COUNT: u32 = 2048;
 
 pub static BINDING_NUMBERS: [(BindlessResourceType, BindingNumber); 9] = [
-    (
-        BindlessResourceType::SamplerFiltering,
-        BindingNumber(1),
-    ),
-    (
-        BindlessResourceType::SamplerNonFiltering,
-        BindingNumber(2),
-    ),
-    (
-        BindlessResourceType::SamplerComparison,
-        BindingNumber(3),
-    ),
+    (BindlessResourceType::SamplerFiltering, BindingNumber(1)),
+    (BindlessResourceType::SamplerNonFiltering, BindingNumber(2)),
+    (BindlessResourceType::SamplerComparison, BindingNumber(3)),
     (BindlessResourceType::Texture1d, BindingNumber(4)),
     (BindlessResourceType::Texture2d, BindingNumber(5)),
-    (
-        BindlessResourceType::Texture2dArray,
-        BindingNumber(6),
-    ),
+    (BindlessResourceType::Texture2dArray, BindingNumber(6)),
     (BindlessResourceType::Texture3d, BindingNumber(7)),
     (BindlessResourceType::TextureCube, BindingNumber(8)),
-    (
-        BindlessResourceType::TextureCubeArray,
-        BindingNumber(9),
-    ),
+    (BindlessResourceType::TextureCubeArray, BindingNumber(9)),
 ];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
