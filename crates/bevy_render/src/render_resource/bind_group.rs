@@ -534,6 +534,13 @@ pub enum OwnedBindingResource {
     Buffer(Buffer),
     TextureView(TextureViewDimension, TextureView),
     Sampler(SamplerBindingType, Sampler),
+    Data(OwnedData),
+}
+
+#[derive(Debug)]
+pub struct OwnedData {
+    pub data: Vec<u8>,
+    pub aligned_size: usize,
 }
 
 impl OwnedBindingResource {
@@ -542,6 +549,7 @@ impl OwnedBindingResource {
             OwnedBindingResource::Buffer(buffer) => buffer.as_entire_binding(),
             OwnedBindingResource::TextureView(_, view) => BindingResource::TextureView(view),
             OwnedBindingResource::Sampler(_, sampler) => BindingResource::Sampler(sampler),
+            OwnedBindingResource::Data(_) => todo!("do something with `Data` here"),
         }
     }
 }

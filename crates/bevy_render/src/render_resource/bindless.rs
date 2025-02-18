@@ -138,6 +138,7 @@ pub enum BindlessResourceType {
     /// Note that this differs from a binding array. Cubemap texture arrays must
     /// all have the same size and format.
     TextureCubeArray,
+    DataBuffer,
 }
 
 /// Describes a bindless buffer.
