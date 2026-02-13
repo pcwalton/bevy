@@ -79,7 +79,10 @@ impl Plugin for Wireframe2dPlugin {
         embedded_asset!(app, "wireframe2d.wgsl");
 
         app.add_plugins((
-            BinnedRenderPhasePlugin::<Wireframe2dPhaseItem, Mesh2dPipeline>::new(self.debug_flags),
+            BinnedRenderPhasePlugin::<Wireframe2dPhaseItem, Mesh2dPipeline>::new(
+                self.debug_flags,
+                false,
+            ),
             RenderAssetPlugin::<RenderWireframeMaterial>::default(),
         ))
         .init_asset::<Wireframe2dMaterial>()

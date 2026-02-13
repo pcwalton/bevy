@@ -2149,6 +2149,7 @@ pub fn queue_shadows(
     >,
     spot_light_entities: Query<&RenderVisibleMeshEntities, With<ExtractedPointLight>>,
     specialized_material_pipeline_cache: Res<SpecializedShadowMaterialPipelineCache>,
+    entities_needing_specialization_this_frame: Res<EntitiesNeedingSpecializationThisFrame>,
 ) {
     for (entity, view_lights, camera_layers) in &view_lights {
         for view_light_entity in view_lights.lights.iter().copied() {
@@ -2193,8 +2194,12 @@ pub fn queue_shadows(
                     .expect("Failed to get spot light visible entities"),
             };
 
-            // TODO: Only process added/removed and specialization change
-            for (entity, main_entity) in visible_entities.entities.iter().copied() {
+            for main_entity in visible_entities
+                .added_entities
+                .iter()
+                .map(|(_, main_entity)| *main_entity)
+                .chain(entities_needing_specialization_this_frame.iter().copied())
+            {
                 let Some(&(current_change_tick, pipeline_id, draw_function)) =
                     view_specialized_material_pipeline_cache.get(&main_entity)
                 else {
@@ -2262,7 +2267,7 @@ pub fn queue_shadows(
                     ShadowBinKey {
                         asset_id: mesh_instance.mesh_asset_id.into(),
                     },
-                    (entity, main_entity),
+                    (Entity::PLACEHOLDER, main_entity),
                     mesh_instance.current_uniform_index,
                     BinnedRenderPhaseType::mesh(
                         mesh_instance.should_batch(),
@@ -2270,6 +2275,10 @@ pub fn queue_shadows(
                     ),
                     current_change_tick,
                 );
+            }
+
+            for (_, main_entity) in &visible_entities.removed_entities {
+                shadow_phase.remove(*main_entity);
             }
         }
     }

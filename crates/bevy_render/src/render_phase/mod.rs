@@ -937,6 +937,24 @@ where
             );
         }
     }
+
+    pub fn remove(&mut self, main_entity: MainEntity) {
+        let Some(cached_binned_entity) = self.cached_entity_bin_keys.swap_remove(&main_entity)
+        else {
+            return;
+        };
+
+        if let Some(ref cached_bin_key) = cached_binned_entity.cached_bin_key {
+            remove_entity_from_bin(
+                main_entity,
+                cached_bin_key,
+                &mut self.multidrawable_meshes,
+                &mut self.batchable_meshes,
+                &mut self.unbatchable_meshes,
+                &mut self.non_mesh_items,
+            );
+        }
+    }
 }
 
 /// Removes an entity from a bin.
@@ -1106,6 +1124,7 @@ where
 {
     /// Debugging flags that can optionally be set when constructing the renderer.
     pub debug_flags: RenderDebugFlags,
+    pub uses_entity_change_lists: bool,
     phantom: PhantomData<(BPI, GFBD)>,
 }
 
@@ -1114,9 +1133,10 @@ where
     BPI: BinnedPhaseItem,
     GFBD: GetFullBatchData,
 {
-    pub fn new(debug_flags: RenderDebugFlags) -> Self {
+    pub fn new(debug_flags: RenderDebugFlags, uses_entity_change_lists: bool) -> Self {
         Self {
             debug_flags,
+            uses_entity_change_lists,
             phantom: PhantomData,
         }
     }
@@ -1154,7 +1174,6 @@ where
                             ),
                     )
                         .in_set(RenderSystems::PrepareResources),
-                    sweep_old_entities::<BPI>.in_set(RenderSystems::QueueSweep),
                     gpu_preprocessing::collect_buffers_for_phase::<BPI, GFBD>
                         .run_if(
                             resource_exists::<
@@ -1164,6 +1183,13 @@ where
                         .in_set(RenderSystems::PrepareResourcesCollectPhaseBuffers),
                 ),
             );
+
+        if !self.uses_entity_change_lists {
+            render_app.add_systems(
+                Render,
+                sweep_old_entities::<BPI>.in_set(RenderSystems::QueueSweep),
+            );
+        }
     }
 }
 

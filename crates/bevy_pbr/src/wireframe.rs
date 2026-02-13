@@ -81,7 +81,7 @@ impl Plugin for WireframePlugin {
         embedded_asset!(app, "render/wireframe.wgsl");
 
         app.add_plugins((
-            BinnedRenderPhasePlugin::<Wireframe3d, MeshPipeline>::new(self.debug_flags),
+            BinnedRenderPhasePlugin::<Wireframe3d, MeshPipeline>::new(self.debug_flags, false),
             RenderAssetPlugin::<RenderWireframeMaterial>::default(),
         ))
         .init_asset::<WireframeMaterial>()

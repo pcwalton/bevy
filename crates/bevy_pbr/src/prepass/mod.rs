@@ -136,9 +136,13 @@ impl Plugin for PrepassPlugin {
                     ),
                 )
                 .add_plugins((
-                    BinnedRenderPhasePlugin::<Opaque3dPrepass, MeshPipeline>::new(self.debug_flags),
+                    BinnedRenderPhasePlugin::<Opaque3dPrepass, MeshPipeline>::new(
+                        self.debug_flags,
+                        false,
+                    ),
                     BinnedRenderPhasePlugin::<AlphaMask3dPrepass, MeshPipeline>::new(
                         self.debug_flags,
+                        false,
                     ),
                 ));
         }

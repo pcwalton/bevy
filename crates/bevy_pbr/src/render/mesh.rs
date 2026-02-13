@@ -163,11 +163,14 @@ impl Plugin for MeshRenderPlugin {
             (no_automatic_skin_batching, no_automatic_morph_batching),
         )
         .add_plugins((
-            BinnedRenderPhasePlugin::<Opaque3d, MeshPipeline>::new(self.debug_flags),
-            BinnedRenderPhasePlugin::<AlphaMask3d, MeshPipeline>::new(self.debug_flags),
-            BinnedRenderPhasePlugin::<Shadow, MeshPipeline>::new(self.debug_flags),
-            BinnedRenderPhasePlugin::<Opaque3dDeferred, MeshPipeline>::new(self.debug_flags),
-            BinnedRenderPhasePlugin::<AlphaMask3dDeferred, MeshPipeline>::new(self.debug_flags),
+            BinnedRenderPhasePlugin::<Opaque3d, MeshPipeline>::new(self.debug_flags, false),
+            BinnedRenderPhasePlugin::<AlphaMask3d, MeshPipeline>::new(self.debug_flags, false),
+            BinnedRenderPhasePlugin::<Shadow, MeshPipeline>::new(self.debug_flags, true),
+            BinnedRenderPhasePlugin::<Opaque3dDeferred, MeshPipeline>::new(self.debug_flags, false),
+            BinnedRenderPhasePlugin::<AlphaMask3dDeferred, MeshPipeline>::new(
+                self.debug_flags,
+                false,
+            ),
             SortedRenderPhasePlugin::<Transmissive3d, MeshPipeline>::new(self.debug_flags),
             SortedRenderPhasePlugin::<Transparent3d, MeshPipeline>::new(self.debug_flags),
         ));
