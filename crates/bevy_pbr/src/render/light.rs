@@ -688,6 +688,23 @@ fn create_render_visible_mesh_entities(
 ) -> RenderVisibleMeshEntities {
     RenderVisibleMeshEntities {
         entities: visible_entities
+            .entities
+            .iter()
+            .map(|e| {
+                let render_entity = mapper.get(*e).unwrap_or(Entity::PLACEHOLDER);
+                (render_entity, MainEntity::from(*e))
+            })
+            .collect(),
+        added_entities: visible_entities
+            .added_entities
+            .iter()
+            .map(|e| {
+                let render_entity = mapper.get(*e).unwrap_or(Entity::PLACEHOLDER);
+                (render_entity, MainEntity::from(*e))
+            })
+            .collect(),
+        removed_entities: visible_entities
+            .removed_entities
             .iter()
             .map(|e| {
                 let render_entity = mapper.get(*e).unwrap_or(Entity::PLACEHOLDER);
@@ -1988,7 +2005,8 @@ pub(crate) fn specialize_shadows(
                 let view_specialized_material_pipeline_cache = specialized_material_pipeline_cache
                     .get(&extracted_view_light.retained_view_entity);
 
-                for (_, visible_entity) in visible_entities.iter().copied() {
+                // FIXME: only process added and needing specialize
+                for (_, visible_entity) in visible_entities.entities.iter().copied() {
                     let Some(material_instance) =
                         render_material_instances.instances.get(&visible_entity)
                     else {
@@ -2180,7 +2198,8 @@ pub fn queue_shadows(
                     .expect("Failed to get spot light visible entities"),
             };
 
-            for (entity, main_entity) in visible_entities.iter().copied() {
+            // TODO: Only process added/removed and specialization change
+            for (entity, main_entity) in visible_entities.entities.iter().copied() {
                 let Some(&(current_change_tick, pipeline_id, draw_function)) =
                     view_specialized_material_pipeline_cache.get(&main_entity)
                 else {

@@ -3,7 +3,7 @@ mod render_layers;
 
 use core::any::TypeId;
 
-use bevy_ecs::entity::EntityHashMap;
+use bevy_ecs::entity::{EntityHashMap, EntityHashSet};
 use bevy_ecs::lifecycle::HookContext;
 use bevy_ecs::world::DeferredWorld;
 use bevy_mesh::skinning::{
@@ -347,11 +347,13 @@ impl VisibleEntities {
 ///
 /// This component contains all mesh entities visible from the current light view.
 /// The collection is updated automatically by `bevy_pbr::SimulationLightSystems`.
-#[derive(Component, Clone, Debug, Default, Reflect, Deref, DerefMut)]
+#[derive(Component, Clone, Debug, Default, Reflect)]
 #[reflect(Component, Debug, Default, Clone)]
 pub struct VisibleMeshEntities {
     #[reflect(ignore, clone)]
-    pub entities: Vec<Entity>,
+    pub entities: EntityHashSet,
+    pub added_entities: EntityHashSet,
+    pub removed_entities: EntityHashSet,
 }
 
 #[derive(Component, Clone, Debug, Default, Reflect)]
@@ -376,6 +378,10 @@ impl CubemapVisibleEntities {
 
     pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut VisibleMeshEntities> {
         self.data.iter_mut()
+    }
+
+    pub fn data_mut(&mut self) -> &mut [VisibleMeshEntities] {
+        &mut self.data[..]
     }
 }
 

@@ -23,7 +23,7 @@ use bevy_mesh::Mesh3d;
 use bevy_reflect::prelude::*;
 use bevy_transform::{components::GlobalTransform, TransformSystems};
 use bevy_utils::Parallel;
-use core::ops::DerefMut;
+use core::{mem, ops::DerefMut};
 
 pub mod cluster;
 pub use cluster::ClusteredDecal;
@@ -365,6 +365,7 @@ pub fn check_dir_light_mesh_visibility(
     visible_entity_ranges: Option<Res<VisibleEntityRanges>>,
     mut defer_visible_entities_queue: Local<Parallel<Vec<Entity>>>,
     mut view_visible_entities_queue: Local<Parallel<Vec<Vec<Entity>>>>,
+    mut temp_visible_entities: Local<EntityHashSet>,
 ) {
     let visible_entity_ranges = visible_entity_ranges.as_deref();
 
@@ -376,7 +377,6 @@ pub fn check_dir_light_mesh_visibility(
             match frusta.frusta.get(view) {
                 Some(view_frusta) => {
                     cascade_view_entities.resize(view_frusta.len(), Default::default());
-                    cascade_view_entities.iter_mut().for_each(|x| x.clear());
                 }
                 None => views_to_remove.push(*view),
             };
@@ -463,30 +463,29 @@ pub fn check_dir_light_mesh_visibility(
                 },
             );
             // collect entities from parallel queue
-            for entities in view_visible_entities_queue.iter_mut() {
-                visible_entities
-                    .entities
-                    .get_mut(view)
-                    .unwrap()
-                    .iter_mut()
-                    .zip(entities.iter_mut())
-                    .for_each(|(dst, source)| {
-                        dst.append(source);
-                    });
-            }
-        }
-
-        for (_, cascade_view_entities) in &mut visible_entities.entities {
-            cascade_view_entities
+            for (view_dest_index, view_dest) in visible_entities
+                .entities
+                .get_mut(view)
+                .unwrap()
                 .iter_mut()
-                .map(DerefMut::deref_mut)
-                .for_each(shrink_entities);
+                .enumerate()
+            {
+                init_visible_entity_collection(view_dest, &mut temp_visible_entities);
+                for thread_entity_queue in view_visible_entities_queue.iter_mut() {
+                    collect_visible_entities_from_parallel_queue(
+                        view_dest,
+                        &mut thread_entity_queue[view_dest_index],
+                        &mut temp_visible_entities,
+                    );
+                }
+                finish_visible_entity_collection(view_dest, &mut temp_visible_entities);
+            }
         }
     }
 
     // Defer marking view visibility so this system can run in parallel with check_point_light_mesh_visibility
     // TODO: use resource to avoid unnecessary memory alloc
-    let mut defer_queue = core::mem::take(defer_visible_entities_queue.deref_mut());
+    let mut defer_queue = mem::take(defer_visible_entities_queue.deref_mut());
     commands.queue(move |world: &mut World| {
         let mut query = world.query::<&mut ViewVisibility>();
         for entities in defer_queue.iter_mut() {
@@ -537,6 +536,7 @@ pub fn check_point_light_mesh_visibility(
     mut cubemap_visible_entities_queue: Local<Parallel<[Vec<Entity>; 6]>>,
     mut spot_visible_entities_queue: Local<Parallel<Vec<Entity>>>,
     mut checked_lights: Local<EntityHashSet>,
+    mut temp_visible_entities: Local<EntityHashSet>,
 ) {
     checked_lights.clear();
 
@@ -556,15 +556,6 @@ pub fn check_point_light_mesh_visibility(
                 maybe_view_mask,
             )) = point_lights.get_mut(light_entity)
             {
-                if cubemap_visible_entities
-                    .iter()
-                    .any(|visible_entities| !visible_entities.is_empty())
-                {
-                    for visible_entities in cubemap_visible_entities.iter_mut() {
-                        visible_entities.entities.clear();
-                    }
-                }
-
                 // NOTE: If shadow mapping is disabled for the light then it must have no visible entities
                 if !point_light.shadow_maps_enabled {
                     continue;
@@ -635,16 +626,18 @@ pub fn check_point_light_mesh_visibility(
                     },
                 );
 
-                for entities in cubemap_visible_entities_queue.iter_mut() {
-                    for (dst, source) in
-                        cubemap_visible_entities.iter_mut().zip(entities.iter_mut())
-                    {
-                        dst.entities.append(source);
+                // Collect entities from parallel queue.
+                for (view_dest_index, view_dest) in cubemap_visible_entities.iter_mut().enumerate()
+                {
+                    init_visible_entity_collection(view_dest, &mut temp_visible_entities);
+                    for thread_entity_queue in cubemap_visible_entities_queue.iter_mut() {
+                        collect_visible_entities_from_parallel_queue(
+                            view_dest,
+                            &mut thread_entity_queue[view_dest_index],
+                            &mut temp_visible_entities,
+                        );
                     }
-                }
-
-                for visible_entities in cubemap_visible_entities.iter_mut() {
-                    shrink_entities(visible_entities);
+                    finish_visible_entity_collection(view_dest, &mut temp_visible_entities);
                 }
             }
 
@@ -652,8 +645,6 @@ pub fn check_point_light_mesh_visibility(
             if let Ok((point_light, transform, frustum, mut visible_entities, maybe_view_mask)) =
                 spot_lights.get_mut(light_entity)
             {
-                visible_entities.clear();
-
                 // NOTE: If shadow mapping is disabled for the light then it must have no visible entities
                 if !point_light.shadow_maps_enabled {
                     continue;
@@ -717,12 +708,46 @@ pub fn check_point_light_mesh_visibility(
                     },
                 );
 
-                for entities in spot_visible_entities_queue.iter_mut() {
-                    visible_entities.append(entities);
+                init_visible_entity_collection(&mut visible_entities, &mut temp_visible_entities);
+                for thread_entity_queue in spot_visible_entities_queue.iter_mut() {
+                    collect_visible_entities_from_parallel_queue(
+                        &mut visible_entities,
+                        thread_entity_queue,
+                        &mut temp_visible_entities,
+                    );
                 }
-
-                shrink_entities(visible_entities.deref_mut());
+                finish_visible_entity_collection(&mut visible_entities, &mut temp_visible_entities);
             }
         }
     }
+}
+
+fn init_visible_entity_collection(
+    dest: &mut VisibleMeshEntities,
+    temp_visible_entities: &mut EntityHashSet,
+) {
+    temp_visible_entities.clear();
+    dest.added_entities.clear();
+    dest.removed_entities.clear();
+}
+
+fn collect_visible_entities_from_parallel_queue(
+    dest: &mut VisibleMeshEntities,
+    source: &mut Vec<Entity>,
+    temp_visible_entities: &mut EntityHashSet,
+) {
+    for visible_entity in source.drain(..) {
+        if !dest.entities.remove(&visible_entity) {
+            dest.added_entities.insert(visible_entity);
+        }
+        temp_visible_entities.insert(visible_entity);
+    }
+}
+
+fn finish_visible_entity_collection(
+    dest: &mut VisibleMeshEntities,
+    temp_visible_entities: &mut EntityHashSet,
+) {
+    mem::swap(&mut dest.entities, &mut dest.removed_entities);
+    mem::swap(&mut dest.entities, &mut *temp_visible_entities);
 }
