@@ -4,7 +4,8 @@ use crate::{
     resources::write_atmosphere_buffer,
     skin::skin_uniforms_from_world,
 };
-use bevy_asset::{embedded_asset, load_embedded_asset, AssetId};
+use bevy_asset::uuid::Uuid;
+use bevy_asset::{embedded_asset, load_embedded_asset, AssetId, AssetIndex};
 use bevy_camera::{
     primitives::Aabb,
     visibility::{NoFrustumCulling, RenderLayers, ViewVisibility, VisibilityRange},
@@ -67,6 +68,9 @@ use bevy_utils::{default, BufferedChannel, Parallel, TypeIdMap};
 use core::any::TypeId;
 use core::mem::size_of;
 use material_bind_groups::MaterialBindingId;
+use std::array;
+use std::mem::offset_of;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use tracing::{error, info_span, warn, Instrument};
 
@@ -569,6 +573,34 @@ pub struct MeshInputUniform {
     pub pad: u32,
 }
 
+pub const MESH_INPUT_UNIFORM_SIZE: usize = size_of::<MeshInputUniform>();
+pub const MESH_INPUT_UNIFORM_SIZE_IN_WORDS: usize = MESH_INPUT_UNIFORM_SIZE / 4;
+
+#[repr(transparent)]
+pub struct MeshInputUniformBlob([AtomicU32; MESH_INPUT_UNIFORM_SIZE_IN_WORDS]);
+
+impl AtomicPod for MeshInputUniform {
+    type Blob = MeshInputUniformBlob;
+
+    fn from_blob(blob: &Self::Blob) -> Self {
+        todo!()
+    }
+
+    fn to_blob(&self) -> Self::Blob {
+        todo!()
+    }
+}
+
+// SAFETY: `AtomicPodBlob` may only be implemented on transparent newtype
+// structs of `AtomicU32`, which is what we have here
+unsafe impl AtomicPodBlob for MeshInputUniformBlob {
+    fn copy_from(&self, other: &Self) {
+        for (dest, src) in self.0.iter().zip(other.0.iter()) {
+            dest.store(src.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+    }
+}
+
 /// Information about each mesh instance needed to cull it on GPU.
 ///
 /// This consists of its axis-aligned bounding box (AABB).
@@ -590,7 +622,32 @@ pub struct MeshCullingData {
 /// To avoid wasting CPU time in the CPU culling case, this buffer will be empty
 /// if GPU culling isn't in use.
 #[derive(Resource, Deref, DerefMut)]
-pub struct MeshCullingDataBuffer(RawBufferVec<MeshCullingData>);
+pub struct MeshCullingDataBuffer(AtomicRawBufferVec<MeshCullingData>);
+
+pub const MESH_CULLING_DATA_SIZE: usize = size_of::<MeshCullingData>();
+pub const MESH_CULLING_DATA_SIZE_IN_WORDS: usize = MESH_CULLING_DATA_SIZE / 4;
+
+pub struct MeshCullingDataBlob([AtomicU32; MESH_CULLING_DATA_SIZE_IN_WORDS]);
+
+impl AtomicPod for MeshCullingData {
+    type Blob = MeshCullingDataBlob;
+
+    fn from_blob(blob: &Self::Blob) -> Self {
+        todo!()
+    }
+
+    fn to_blob(&self) -> Self::Blob {
+        todo!()
+    }
+}
+
+unsafe impl AtomicPodBlob for MeshCullingDataBlob {
+    fn copy_from(&self, other: &Self) {
+        for (dest, src) in self.0.iter().zip(other.0.iter()) {
+            dest.store(src.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+    }
+}
 
 impl MeshUniform {
     pub fn new(
@@ -691,8 +748,9 @@ impl MeshFlags {
 
 bitflags::bitflags! {
     /// Various useful flags for [`RenderMeshInstance`]s.
-    #[derive(Clone, Copy)]
-    pub struct RenderMeshInstanceFlags: u8 {
+    #[derive(Clone, Copy, Pod, Zeroable)]
+    #[repr(C)]
+    pub struct RenderMeshInstanceFlags: u32 {
         /// The mesh casts shadows.
         const SHADOW_CASTER           = 1 << 0;
         /// The mesh can participate in automatic batching.
@@ -716,17 +774,23 @@ pub struct RenderMeshInstanceCpu {
     /// Data shared between both the CPU mesh uniform building and the GPU mesh
     /// uniform building paths.
     #[deref]
-    pub shared: RenderMeshInstanceShared,
+    pub shared: RenderMeshInstanceSharedThreadSafe,
     /// The transform of the mesh.
     ///
     /// This will be written into the [`MeshUniform`] at the appropriate time.
     pub transforms: MeshTransforms,
+    pub render_layers: Option<RenderLayers>,
 }
 
 /// CPU data that the render world needs to keep for each entity that contains a
 /// mesh when using GPU mesh uniform building.
-#[derive(Deref, DerefMut)]
+#[derive(Deref)]
 pub struct RenderMeshInstanceGpu {
+    #[deref]
+    pub shared: RenderMeshInstanceSharedThreadSafe,
+    pub thread_safe: RenderMeshInstanceGpuThreadSafe,
+    pub render_layers: Option<RenderLayers>,
+    /*
     /// Data shared between both the CPU mesh uniform building and the GPU mesh
     /// uniform building paths.
     #[deref]
@@ -738,11 +802,315 @@ pub struct RenderMeshInstanceGpu {
     pub center: Vec3,
     /// The index of the [`MeshInputUniform`] in the buffer.
     pub current_uniform_index: NonMaxU32,
+    */
+}
+
+#[derive(Default, Deref, DerefMut)]
+pub struct RenderMeshInstanceSharedThreadSafe(
+    [AtomicU32; RENDER_MESH_INSTANCE_SHARED_THREAD_SAFE_TYPED_SIZE_IN_WORDS],
+);
+
+/// This is only used for layout; we don't actually construct one of these.
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct RenderMeshInstanceSharedThreadSafeTyped {
+    asset_id: MeshAssetIdFlat,
+    material_bindings_index: MaterialBindingId,
+    lightmap_slab_index: LightmapSlabIndexFlat,
+    // FIXME: Remove this. This should be a field on `Mesh`.
+    model_space_center: Vec3,
+    tag: u32,
+    // FIXME: Remove this. This should be recomputed on demand, not cached here.
+    world_space_center: Vec3,
+    current_uniform_index: u32,
+    flags: RenderMeshInstanceFlags,
+}
+
+#[derive(Deref, DerefMut)]
+pub struct RenderMeshInstanceGpuThreadSafe(
+    [AtomicU32; RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_SIZE_IN_WORDS],
+);
+
+/// This is only used for layout; we don't actually construct one of these.
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct RenderMeshInstanceGpuThreadSafeTyped {
+    // FIXME: Remove this. This should be recomputed on demand, not cached here.
+    world_space_center: Vec3,
+    current_uniform_index: u32,
+}
+
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct MeshAssetIdFlat {
+    mode: u32,
+    words: [u32; 4],
+}
+
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct LightmapSlabIndexFlat(u32);
+
+const MESH_ASSET_ID_FLAT_MODE_INDEX: u32 = 0;
+const MESH_ASSET_ID_FLAT_MODE_UUID: u32 = 1;
+
+const RENDER_MESH_INSTANCE_SHARED_THREAD_SAFE_TYPED_SIZE: usize =
+    size_of::<RenderMeshInstanceSharedThreadSafeTyped>();
+const RENDER_MESH_INSTANCE_SHARED_THREAD_SAFE_TYPED_SIZE_IN_WORDS: usize =
+    RENDER_MESH_INSTANCE_SHARED_THREAD_SAFE_TYPED_SIZE / 4;
+
+const MESH_ASSET_ID_FLAT_SIZE: usize = size_of::<MeshAssetIdFlat>();
+const MATERIAL_BINDING_ID_SIZE: usize = size_of::<MaterialBindingId>();
+const LIGHTMAP_SLAB_INDEX_FLAT_SIZE: usize = size_of::<LightmapSlabIndexFlat>();
+const VEC3_SIZE: usize = size_of::<Vec3>();
+const U32_SIZE: usize = size_of::<u32>();
+const RENDER_MESH_INSTANCE_FLAGS_SIZE: usize = size_of::<RenderMeshInstanceFlags>();
+
+const RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_SIZE: usize =
+    size_of::<RenderMeshInstanceGpuThreadSafeTyped>();
+const RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_SIZE_IN_WORDS: usize =
+    RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_SIZE / 4;
+
+#[inline]
+fn extract_from_blob<T, const S: usize>(blob: &[AtomicU32], start: usize) -> T
+where
+    T: Pod,
+{
+    let words: [u32; S] = array::from_fn(|i| blob[start + i].load(Ordering::Relaxed));
+    *bytemuck::must_cast_ref(&words)
+}
+
+#[inline]
+fn insert_into_blob<T, const S: usize>(blob: &[AtomicU32], start: usize, value: T)
+where
+    T: Pod,
+{
+    let words: [u32; S] = bytemuck::must_cast(value);
+    for i in 0..S {
+        blob[start + i].store(words[i], Ordering::Relaxed);
+    }
+}
+
+impl RenderMeshInstanceSharedThreadSafe {
+    #[inline]
+    pub fn mesh_asset_id(&self) -> AssetId<Mesh> {
+        extract_from_blob::<MeshAssetIdFlat, MESH_ASSET_ID_FLAT_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceSharedThreadSafeTyped, asset_id),
+        )
+        .into()
+    }
+
+    #[inline]
+    pub fn set_mesh_asset_id(&self, value: AssetId<Mesh>) {
+        insert_into_blob::<MeshAssetIdFlat, MESH_ASSET_ID_FLAT_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceSharedThreadSafeTyped, asset_id),
+            value.into(),
+        );
+    }
+
+    #[inline]
+    pub fn material_bindings_index(&self) -> MaterialBindingId {
+        extract_from_blob::<_, MATERIAL_BINDING_ID_SIZE>(
+            &self.0,
+            offset_of!(
+                RenderMeshInstanceSharedThreadSafeTyped,
+                material_bindings_index
+            ),
+        )
+    }
+
+    #[inline]
+    pub fn set_material_bindings_index(&self, value: MaterialBindingId) {
+        insert_into_blob::<_, MATERIAL_BINDING_ID_SIZE>(
+            &self.0,
+            offset_of!(
+                RenderMeshInstanceSharedThreadSafeTyped,
+                material_bindings_index
+            ),
+            value,
+        );
+    }
+
+    #[inline]
+    pub fn lightmap_slab_index(&self) -> Option<LightmapSlabIndex> {
+        extract_from_blob::<LightmapSlabIndexFlat, LIGHTMAP_SLAB_INDEX_FLAT_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceSharedThreadSafeTyped, lightmap_slab_index),
+        )
+        .into()
+    }
+
+    #[inline]
+    pub fn set_lightmap_slab_index(&self, value: Option<LightmapSlabIndex>) {
+        insert_into_blob::<LightmapSlabIndexFlat, LIGHTMAP_SLAB_INDEX_FLAT_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceSharedThreadSafeTyped, lightmap_slab_index),
+            value.into(),
+        );
+    }
+
+    #[inline]
+    pub fn model_space_center(&self) -> Vec3 {
+        extract_from_blob::<_, VEC3_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceSharedThreadSafeTyped, model_space_center),
+        )
+    }
+
+    #[inline]
+    pub fn set_model_space_center(&self, value: Vec3) {
+        insert_into_blob::<_, VEC3_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceSharedThreadSafeTyped, model_space_center),
+            value,
+        );
+    }
+
+    #[inline]
+    pub fn tag(&self) -> u32 {
+        extract_from_blob::<_, U32_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceSharedThreadSafeTyped, tag),
+        )
+    }
+
+    #[inline]
+    pub fn set_tag(&self, value: u32) {
+        insert_into_blob::<_, U32_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceSharedThreadSafeTyped, tag),
+            value,
+        );
+    }
+
+    #[inline]
+    pub fn flags(&self) -> RenderMeshInstanceFlags {
+        extract_from_blob::<_, RENDER_MESH_INSTANCE_FLAGS_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceSharedThreadSafeTyped, flags),
+        )
+    }
+
+    #[inline]
+    pub fn set_flags(&self, value: RenderMeshInstanceFlags) {
+        insert_into_blob::<_, RENDER_MESH_INSTANCE_FLAGS_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceSharedThreadSafeTyped, flags),
+            value,
+        )
+    }
+
+    /// Returns true if this entity is eligible to participate in automatic
+    /// batching.
+    #[inline]
+    pub fn should_batch(&self) -> bool {
+        self.flags()
+            .contains(RenderMeshInstanceFlags::AUTOMATIC_BATCHING)
+    }
+}
+
+impl RenderMeshInstanceGpuThreadSafe {
+    #[inline]
+    pub fn world_space_center(&self) -> Vec3 {
+        extract_from_blob::<_, VEC3_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceGpuThreadSafeTyped, world_space_center),
+        )
+    }
+
+    #[inline]
+    pub fn set_world_space_center(&self, value: Vec3) {
+        insert_into_blob::<_, VEC3_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceGpuThreadSafeTyped, world_space_center),
+            value,
+        );
+    }
+
+    #[inline]
+    pub fn current_uniform_index(&self) -> u32 {
+        extract_from_blob::<_, U32_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceGpuThreadSafeTyped, current_uniform_index),
+        )
+    }
+
+    #[inline]
+    pub fn set_current_uniform_index(&self, value: u32) {
+        insert_into_blob::<_, U32_SIZE>(
+            &self.0,
+            offset_of!(RenderMeshInstanceGpuThreadSafeTyped, current_uniform_index),
+            value,
+        );
+    }
+}
+
+impl From<AssetId<Mesh>> for MeshAssetIdFlat {
+    #[inline]
+    fn from(value: AssetId<Mesh>) -> Self {
+        match value {
+            AssetId::Index { index, .. } => {
+                let bits = index.to_bits();
+                MeshAssetIdFlat {
+                    mode: MESH_ASSET_ID_FLAT_MODE_INDEX,
+                    words: [(bits & 0xffff_ffff) as u32, (bits >> 32) as u32, 0, 0],
+                }
+            }
+            AssetId::Uuid { uuid } => {
+                let (hi, lo) = uuid.as_u64_pair();
+                MeshAssetIdFlat {
+                    mode: MESH_ASSET_ID_FLAT_MODE_UUID,
+                    words: [
+                        (lo & 0xffff_ffff) as u32,
+                        (lo >> 32) as u32,
+                        (hi & 0xffff_ffff) as u32,
+                        (hi >> 32) as u32,
+                    ],
+                }
+            }
+        }
+    }
+}
+
+impl From<MeshAssetIdFlat> for AssetId<Mesh> {
+    #[inline]
+    fn from(value: MeshAssetIdFlat) -> AssetId<Mesh> {
+        if value.mode == MESH_ASSET_ID_FLAT_MODE_INDEX {
+            AssetId::from(AssetIndex::from_bits(
+                (value.words[0] as u64) | ((value.words[1] as u64) << 32),
+            ))
+        } else {
+            let lo = (value.words[0] as u64) | ((value.words[1] as u64) << 32);
+            let hi = (value.words[2] as u64) | ((value.words[3] as u64) << 32);
+            AssetId::Uuid {
+                uuid: Uuid::from_u64_pair(hi, lo),
+            }
+        }
+    }
+}
+
+impl From<Option<LightmapSlabIndex>> for LightmapSlabIndexFlat {
+    #[inline]
+    fn from(value: Option<LightmapSlabIndex>) -> Self {
+        match value {
+            Some(slab_index) => LightmapSlabIndexFlat((*slab_index).into()),
+            None => LightmapSlabIndexFlat(!0),
+        }
+    }
+}
+
+impl From<LightmapSlabIndexFlat> for Option<LightmapSlabIndex> {
+    #[inline]
+    fn from(value: LightmapSlabIndexFlat) -> Self {
+        NonMaxU32::new(value.0).map(LightmapSlabIndex)
+    }
 }
 
 /// CPU data that the render world needs to keep about each entity that contains
 /// a mesh.
-pub struct RenderMeshInstanceShared {
+/*pub struct RenderMeshInstanceShared {
     /// The [`AssetId`] of the mesh.
     pub mesh_asset_id: AssetId<Mesh>,
     /// A slot for the material bind group index.
@@ -762,6 +1130,25 @@ pub struct RenderMeshInstanceShared {
     /// This value is typically used as a spatial proxy for operations such as
     /// view-dependent sorting (e.g., transparent object ordering).
     pub center: Vec3,
+}*/
+pub struct RenderMeshInstanceShared {
+    /// The [`AssetId`] of the mesh.
+    pub mesh_asset_id: AssetId<Mesh>,
+    /// A slot for the material bind group index.
+    pub material_bindings_index: MaterialBindingId,
+    /// Index of the slab that the lightmap resides in, if a lightmap is
+    /// present.
+    pub lightmap_slab_index: Option<LightmapSlabIndex>,
+    /// A representative position of the mesh instance in local space,
+    /// derived from its axis-aligned bounding box.
+    ///
+    /// This value is typically used as a spatial proxy for operations such as
+    /// view-dependent sorting (e.g., transparent object ordering).
+    pub center: Vec3,
+    /// User supplied tag to identify this mesh instance.
+    pub tag: u32,
+    /// Various flags.
+    pub flags: RenderMeshInstanceFlags,
 }
 
 /// Information that is gathered during the parallel portion of mesh extraction
@@ -771,7 +1158,7 @@ pub struct RenderMeshInstanceShared {
 /// prepared.
 pub struct RenderMeshInstanceGpuBuilder {
     /// Data that will be placed on the [`RenderMeshInstanceGpu`].
-    pub shared: RenderMeshInstanceShared,
+    pub shared: RenderMeshInstanceSharedThreadSafe,
     /// The current transform.
     pub world_from_local: Affine3,
     /// Four 16-bit unsigned normalized UV values packed into a [`UVec2`]:
@@ -788,6 +1175,7 @@ pub struct RenderMeshInstanceGpuBuilder {
     pub lightmap_uv_rect: UVec2,
     /// The index of the previous mesh input.
     pub previous_input_index: Option<NonMaxU32>,
+    pub render_layers: Option<RenderLayers>,
     /// Various flags.
     pub mesh_flags: MeshFlags,
 }
@@ -844,7 +1232,7 @@ pub struct RenderMeshInstanceGpuQueues(Parallel<RenderMeshInstanceGpuQueue>);
 #[derive(Resource, Default, Deref, DerefMut)]
 pub struct MeshesToReextractNextFrame(MainEntityHashSet);
 
-impl RenderMeshInstanceShared {
+impl RenderMeshInstanceSharedThreadSafe {
     /// A gpu builder will provide the mesh instance id
     /// during [`RenderMeshInstanceGpuPrepared::update`].
     fn for_gpu_building(
@@ -863,7 +1251,6 @@ impl RenderMeshInstanceShared {
             default(),
             not_shadow_caster,
             no_automatic_batching,
-            render_layers,
             aabb,
         )
     }
@@ -876,7 +1263,6 @@ impl RenderMeshInstanceShared {
         material_bindings_index: MaterialBindingId,
         not_shadow_caster: bool,
         no_automatic_batching: bool,
-        render_layers: Option<&RenderLayers>,
         aabb: Option<&Aabb>,
     ) -> Self {
         let mut mesh_instance_flags = RenderMeshInstanceFlags::empty();
@@ -890,23 +1276,15 @@ impl RenderMeshInstanceShared {
             previous_transform.is_some(),
         );
 
-        RenderMeshInstanceShared {
-            mesh_asset_id: mesh.id(),
-            flags: mesh_instance_flags,
-            material_bindings_index,
-            lightmap_slab_index: None,
-            tag: tag.map_or(0, |i| **i),
-            render_layers: render_layers.cloned(),
-            center: aabb.map_or(Vec3::ZERO, |aabb| aabb.center.into()),
-        }
-    }
-
-    /// Returns true if this entity is eligible to participate in automatic
-    /// batching.
-    #[inline]
-    pub fn should_batch(&self) -> bool {
-        self.flags
-            .contains(RenderMeshInstanceFlags::AUTOMATIC_BATCHING)
+        let mut render_mesh_instance_shared = RenderMeshInstanceSharedThreadSafe::default();
+        render_mesh_instance_shared.set_mesh_asset_id(mesh.id());
+        render_mesh_instance_shared.set_flags(mesh_instance_flags);
+        render_mesh_instance_shared.set_material_bindings_index(material_bindings_index);
+        render_mesh_instance_shared.set_lightmap_slab_index(None);
+        render_mesh_instance_shared.set_tag(tag.map_or(0, |i| **i));
+        render_mesh_instance_shared
+            .set_model_space_center(aabb.map_or(Vec3::ZERO, |aabb| aabb.center.into()));
+        render_mesh_instance_shared
     }
 }
 
@@ -981,7 +1359,7 @@ impl RenderMeshInstances {
 impl RenderMeshInstancesCpu {
     fn mesh_asset_id(&self, entity: MainEntity) -> Option<AssetId<Mesh>> {
         self.get(&entity)
-            .map(|render_mesh_instance| render_mesh_instance.mesh_asset_id)
+            .map(|render_mesh_instance| render_mesh_instance.mesh_asset_id())
     }
 
     fn render_mesh_queue_data(&self, entity: MainEntity) -> Option<RenderMeshQueueData<'_>> {
@@ -989,11 +1367,12 @@ impl RenderMeshInstancesCpu {
             let world_from_local = &render_mesh_instance.transforms.world_from_local;
             let center = world_from_local
                 .matrix3
-                .mul_vec3(render_mesh_instance.shared.center)
+                .mul_vec3(render_mesh_instance.shared.model_space_center())
                 + world_from_local.translation;
 
             RenderMeshQueueData {
                 shared: &render_mesh_instance.shared,
+                render_layers: render_mesh_instance.render_layers.clone(),
                 center,
                 current_uniform_index: InputUniformIndex::default(),
             }
@@ -1004,7 +1383,7 @@ impl RenderMeshInstancesCpu {
     /// mesh.
     fn insert_mesh_instance_flags(&mut self, entity: MainEntity, flags: RenderMeshInstanceFlags) {
         if let Some(instance) = self.get_mut(&entity) {
-            instance.flags.insert(flags);
+            instance.set_flags(instance.flags() | flags);
         }
     }
 }
@@ -1012,16 +1391,20 @@ impl RenderMeshInstancesCpu {
 impl RenderMeshInstancesGpu {
     fn mesh_asset_id(&self, entity: MainEntity) -> Option<AssetId<Mesh>> {
         self.get(&entity)
-            .map(|render_mesh_instance| render_mesh_instance.mesh_asset_id)
+            .map(|render_mesh_instance| render_mesh_instance.mesh_asset_id())
     }
 
     fn render_mesh_queue_data(&self, entity: MainEntity) -> Option<RenderMeshQueueData<'_>> {
         self.get(&entity)
             .map(|render_mesh_instance| RenderMeshQueueData {
                 shared: &render_mesh_instance.shared,
-                center: render_mesh_instance.center,
+                render_layers: render_mesh_instance.render_layers.clone(),
+                center: render_mesh_instance.thread_safe.world_space_center(),
                 current_uniform_index: InputUniformIndex(
-                    render_mesh_instance.current_uniform_index.into(),
+                    render_mesh_instance
+                        .thread_safe
+                        .current_uniform_index()
+                        .into(),
                 ),
             })
     }
@@ -1030,7 +1413,7 @@ impl RenderMeshInstancesGpu {
     /// mesh.
     fn insert_mesh_instance_flags(&mut self, entity: MainEntity, flags: RenderMeshInstanceFlags) {
         if let Some(instance) = self.get_mut(&entity) {
-            instance.flags.insert(flags);
+            instance.set_flags(instance.flags() | flags);
         }
     }
 }
@@ -1158,10 +1541,11 @@ impl RenderMeshInstanceGpuBuilder {
             // Use a dummy material binding ID.
             MaterialBindingId::default()
         };
-        self.shared.material_bindings_index = mesh_material_binding_id;
+        self.shared
+            .set_material_bindings_index(mesh_material_binding_id);
 
         let (first_vertex_index, vertex_count) =
-            match mesh_allocator.mesh_vertex_slice(&self.shared.mesh_asset_id) {
+            match mesh_allocator.mesh_vertex_slice(&self.shared.mesh_asset_id()) {
                 Some(mesh_vertex_slice) => (
                     mesh_vertex_slice.range.start,
                     mesh_vertex_slice.range.end - mesh_vertex_slice.range.start,
@@ -1169,7 +1553,7 @@ impl RenderMeshInstanceGpuBuilder {
                 None => (0, 0),
             };
         let (mesh_is_indexed, first_index_index, index_count) =
-            match mesh_allocator.mesh_index_slice(&self.shared.mesh_asset_id) {
+            match mesh_allocator.mesh_index_slice(&self.shared.mesh_asset_id()) {
                 Some(mesh_index_slice) => (
                     true,
                     mesh_index_slice.range.start,
@@ -1190,7 +1574,7 @@ impl RenderMeshInstanceGpuBuilder {
             .render_lightmaps
             .get(&entity)
             .map(|lightmap| lightmap.slab_index);
-        self.shared.lightmap_slab_index = lightmap_slab_index;
+        self.shared.set_lightmap_slab_index(lightmap_slab_index);
 
         // Create the mesh input uniform.
         let mesh_input_uniform = MeshInputUniform {
@@ -1208,31 +1592,35 @@ impl RenderMeshInstanceGpuBuilder {
             },
             current_skin_index,
             material_and_lightmap_bind_group_slot: u32::from(
-                self.shared.material_bindings_index.slot,
+                self.shared.material_bindings_index().slot,
             ) | ((lightmap_slot as u32) << 16),
-            tag: self.shared.tag,
+            tag: self.shared.tag(),
             pad: 0,
         };
 
         let world_from_local = &self.world_from_local;
-        let center =
-            world_from_local.matrix3.mul_vec3(self.shared.center) + world_from_local.translation;
+        let center = world_from_local
+            .matrix3
+            .mul_vec3(self.shared.model_space_center())
+            + world_from_local.translation;
 
         Some(RenderMeshInstanceGpuPrepared {
             shared: self.shared,
             mesh_input_uniform,
             center,
+            render_layers: self.render_layers,
         })
     }
 }
 
 pub struct RenderMeshInstanceGpuPrepared {
     /// Data shared between the CPU and GPU versions of this mesh instance.
-    shared: RenderMeshInstanceShared,
+    shared: RenderMeshInstanceSharedThreadSafe,
     /// The data that will be uploaded to the GPU as a [`MeshInputUniform`].
     mesh_input_uniform: MeshInputUniform,
     /// The world-space center of the mesh instance, used for culling and sorting.
     center: Vec3,
+    render_layers: Option<RenderLayers>,
 }
 
 impl RenderMeshInstanceGpuPrepared {
@@ -1252,7 +1640,8 @@ impl RenderMeshInstanceGpuPrepared {
                 // Yes, it did. Replace its entry with the new one.
 
                 // Reserve a slot.
-                current_uniform_index = u32::from(occupied_entry.get_mut().current_uniform_index);
+                current_uniform_index =
+                    u32::from(occupied_entry.get_mut().thread_safe.current_uniform_index());
 
                 // Save the old mesh input uniform. The mesh preprocessing
                 // shader will need it to compute motion vectors.
@@ -1264,14 +1653,16 @@ impl RenderMeshInstanceGpuPrepared {
                 // Write in the new mesh input uniform.
                 current_input_buffer.set(current_uniform_index, self.mesh_input_uniform);
 
-                occupied_entry.replace_entry_with(|_, _| {
-                    Some(RenderMeshInstanceGpu {
-                        shared: self.shared,
-                        center: self.center,
-                        current_uniform_index: NonMaxU32::new(current_uniform_index)
-                            .unwrap_or_default(),
-                    })
-                });
+                occupied_entry.get_mut().shared.copy_from(&self.shared);
+                occupied_entry
+                    .get_mut()
+                    .thread_safe
+                    .set_world_space_center(self.center);
+                occupied_entry
+                    .get_mut()
+                    .thread_safe
+                    .set_current_uniform_index(current_uniform_index);
+                occupied_entry.get_mut().render_layers = self.render_layers.clone();
             }
 
             Entry::Vacant(vacant_entry) => {
@@ -1280,9 +1671,11 @@ impl RenderMeshInstanceGpuPrepared {
 
                 vacant_entry.insert(RenderMeshInstanceGpu {
                     shared: self.shared,
-                    center: self.center,
-                    current_uniform_index: NonMaxU32::new(current_uniform_index)
-                        .unwrap_or_default(),
+                    thread_safe: RenderMeshInstanceGpuThreadSafe::new(
+                        self.center,
+                        NonMaxU32::new(current_uniform_index).unwrap_or_default(),
+                    ),
+                    render_layers: self.render_layers.clone(),
                 });
             }
         }
@@ -1301,7 +1694,10 @@ fn remove_mesh_input_uniform(
     // Remove the uniform data.
     let removed_render_mesh_instance = render_mesh_instances.remove(&entity)?;
 
-    let removed_uniform_index = removed_render_mesh_instance.current_uniform_index.get();
+    let removed_uniform_index = removed_render_mesh_instance
+        .thread_safe
+        .current_uniform_index()
+        .get();
     current_input_buffer.remove(removed_uniform_index);
     Some(removed_uniform_index)
 }
@@ -1331,17 +1727,17 @@ impl MeshCullingData {
         mesh_culling_data_buffer: &mut MeshCullingDataBuffer,
         instance_data_index: usize,
     ) {
-        while mesh_culling_data_buffer.len() < instance_data_index + 1 {
+        while (mesh_culling_data_buffer.len() as usize) < instance_data_index + 1 {
             mesh_culling_data_buffer.push(MeshCullingData::default());
         }
-        mesh_culling_data_buffer.values_mut()[instance_data_index] = *self;
+        mesh_culling_data_buffer.set(instance_data_index, *self);
     }
 }
 
 impl Default for MeshCullingDataBuffer {
     #[inline]
     fn default() -> Self {
-        Self(RawBufferVec::new(BufferUsages::STORAGE))
+        Self(AtomicRawBufferVec::new(BufferUsages::STORAGE))
     }
 }
 
@@ -1351,7 +1747,8 @@ impl Default for MeshCullingDataBuffer {
 pub struct RenderMeshQueueData<'a> {
     /// General information about the mesh instance.
     #[deref]
-    pub shared: &'a RenderMeshInstanceShared,
+    pub shared: &'a RenderMeshInstanceSharedThreadSafe,
+    pub render_layers: Option<RenderLayers>,
     /// The representative position of the mesh instance in world-space.
     ///
     /// This world-space center is used as a spatial proxy for view-dependent
@@ -1440,14 +1837,13 @@ pub fn extract_meshes_for_cpu_building(
                 .copied()
                 .unwrap_or_default();
 
-            let shared = RenderMeshInstanceShared::for_cpu_building(
+            let shared = RenderMeshInstanceSharedThreadSafe::for_cpu_building(
                 previous_transform,
                 mesh,
                 tag,
                 material_bindings_index,
                 not_shadow_caster,
                 no_automatic_batching,
-                render_layers,
                 aabb,
             );
 
@@ -1464,6 +1860,7 @@ pub fn extract_meshes_for_cpu_building(
                         flags: mesh_flags.bits(),
                     },
                     shared,
+                    render_layers,
                 },
             ));
         },
@@ -2156,14 +2553,14 @@ impl GetBatchData for MeshPipeline {
         };
         let mesh_instance = mesh_instances.get(&main_entity)?;
         let first_vertex_index =
-            match mesh_allocator.mesh_vertex_slice(&mesh_instance.mesh_asset_id) {
+            match mesh_allocator.mesh_vertex_slice(&mesh_instance.mesh_asset_id()) {
                 Some(mesh_vertex_slice) => mesh_vertex_slice.range.start,
                 None => 0,
             };
         let maybe_lightmap = lightmaps.render_lightmaps.get(&main_entity);
 
         let current_skin_index = skin_uniforms.skin_index(main_entity);
-        let material_bind_group_index = mesh_instance.material_bindings_index;
+        let material_bind_group_index = mesh_instance.material_bindings_index();
 
         Some((
             MeshUniform::new(
@@ -2172,11 +2569,11 @@ impl GetBatchData for MeshPipeline {
                 material_bind_group_index.slot,
                 maybe_lightmap.map(|lightmap| (lightmap.slot_index, lightmap.uv_rect)),
                 current_skin_index,
-                Some(mesh_instance.tag),
+                Some(mesh_instance.tag()),
             ),
             mesh_instance.should_batch().then_some((
                 material_bind_group_index.group,
-                mesh_instance.mesh_asset_id,
+                mesh_instance.mesh_asset_id(),
                 maybe_lightmap.map(|lightmap| lightmap.slab_index),
             )),
         ))
@@ -2203,10 +2600,10 @@ impl GetFullBatchData for MeshPipeline {
         let maybe_lightmap = lightmaps.render_lightmaps.get(&main_entity);
 
         Some((
-            mesh_instance.current_uniform_index,
+            mesh_instance.thread_safe.current_uniform_index(),
             mesh_instance.should_batch().then_some((
-                mesh_instance.material_bindings_index.group,
-                mesh_instance.mesh_asset_id,
+                mesh_instance.material_bindings_index().group,
+                mesh_instance.mesh_asset_id(),
                 maybe_lightmap.map(|lightmap| lightmap.slab_index),
             )),
         ))
@@ -2237,10 +2634,10 @@ impl GetFullBatchData for MeshPipeline {
         Some(MeshUniform::new(
             &mesh_instance.transforms,
             first_vertex_index,
-            mesh_instance.material_bindings_index.slot,
+            mesh_instance.material_bindings_index().slot,
             maybe_lightmap.map(|lightmap| (lightmap.slot_index, lightmap.uv_rect)),
             current_skin_index,
-            Some(mesh_instance.tag),
+            Some(mesh_instance.tag()),
         ))
     }
 
@@ -2259,7 +2656,7 @@ impl GetFullBatchData for MeshPipeline {
 
         mesh_instances
             .get(&main_entity)
-            .map(|entity| entity.current_uniform_index)
+            .map(|entity| entity.thread_safe.current_uniform_index())
     }
 
     fn write_batch_indirect_parameters_metadata(

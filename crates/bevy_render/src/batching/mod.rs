@@ -14,7 +14,7 @@ use crate::{
         BinnedPhaseItem, CachedRenderPipelinePhaseItem, PhaseItemExtraIndex, SortedPhaseItem,
         SortedRenderPhase, ViewBinnedRenderPhases,
     },
-    render_resource::GpuArrayBufferable,
+    render_resource::{AtomicPod, GpuArrayBufferable},
     sync_world::MainEntity,
 };
 
@@ -108,7 +108,7 @@ pub trait GetBatchData {
 pub trait GetFullBatchData: GetBatchData {
     /// The per-instance data that was inserted into the
     /// [`crate::render_resource::BufferVec`] during extraction.
-    type BufferInputData: Pod + Default + Sync + Send;
+    type BufferInputData: AtomicPod;
 
     /// Get the per-instance data to be inserted into the
     /// [`crate::render_resource::GpuArrayBuffer`].

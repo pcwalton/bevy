@@ -1,4 +1,5 @@
-use core::{iter, marker::PhantomData};
+use core::{iter, marker::PhantomData, slice};
+use std::sync::atomic::AtomicU32;
 
 use crate::{
     render_resource::Buffer,
@@ -256,6 +257,134 @@ impl<T: NoUninit> Extend<T> for RawBufferVec<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         self.values.extend(iter);
     }
+}
+
+pub trait AtomicPod: Default + Send + Sync + 'static {
+    type Blob: AtomicPodBlob;
+    fn from_blob(blob: &Self::Blob) -> Self;
+    fn to_blob(&self) -> Self::Blob;
+}
+
+/// This is an unsafe trait because it may only be implemented by types that are
+/// either `()` or a transparent newtype wrapper around `[AtomicU32; S]` for
+/// some size S.
+pub unsafe trait AtomicPodBlob: Send + Sync + 'static {
+    fn copy_from(&self, other: &Self);
+}
+
+pub struct AtomicRawBufferVec<T>
+where
+    T: AtomicPod,
+{
+    values: Vec<T::Blob>,
+    buffer: Option<Buffer>,
+    capacity: usize,
+    buffer_usage: BufferUsages,
+    label: Option<String>,
+    changed: bool,
+    phantom: PhantomData<T>,
+}
+
+impl<T> AtomicRawBufferVec<T>
+where
+    T: AtomicPod,
+{
+    pub const fn new(buffer_usage: BufferUsages) -> Self {
+        Self {
+            values: Vec::new(),
+            buffer: None,
+            capacity: 0,
+            buffer_usage,
+            label: None,
+            changed: false,
+            phantom: PhantomData,
+        }
+    }
+
+    /// Removes all elements from the buffer.
+    pub fn clear(&mut self) {
+        self.values.clear();
+    }
+
+    pub fn len(&self) -> u32 {
+        self.values.len() as u32
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn push(&mut self, value: T) -> u32 {
+        let index = self.values.len() as u32;
+        self.values.push(value.to_blob());
+        index
+    }
+
+    pub fn get(&self, index: u32) -> T {
+        T::from_blob(&self.values[index as usize])
+    }
+
+    pub fn set(&mut self, index: u32, value: T) {
+        self.values[index as usize].copy_from(&value.to_blob());
+    }
+
+    pub fn reserve(&mut self, capacity: usize, device: &RenderDevice) {
+        let size = size_of::<T::Blob>() * capacity;
+        if capacity > self.capacity || (self.changed && size > 0) {
+            self.capacity = capacity;
+            self.buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: make_buffer_label::<Self>(&self.label),
+                size: size as BufferAddress,
+                usage: BufferUsages::COPY_DST | self.buffer_usage,
+                mapped_at_creation: false,
+            }));
+            self.changed = false;
+        }
+    }
+
+    pub fn write_buffer(&mut self, device: &RenderDevice, queue: &RenderQueue) {
+        if self.values.is_empty() {
+            return;
+        }
+        self.reserve(self.values.len(), device);
+        if let Some(buffer) = &self.buffer {
+            // SAFETY: We have `&mut self`, so there are no other references to
+            // our buffer, and the `Blob` type must be an array of `AtomicU32`s
+            // (i.e. POD except that they're atomic).
+            unsafe {
+                let bytes: &[u8] = slice::from_raw_parts(
+                    self.values.as_ptr().cast::<u8>(),
+                    self.values.len() * size_of::<T::Blob>(),
+                );
+                queue.write_buffer(buffer, 0, bytes);
+            }
+        }
+    }
+
+    /// Returns a handle to the buffer, if the data has been uploaded.
+    #[inline]
+    pub fn buffer(&self) -> Option<&Buffer> {
+        self.buffer.as_ref()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct AtomicPodUnitBlob;
+
+impl AtomicPod for () {
+    type Blob = AtomicPodUnitBlob;
+
+    fn from_blob(_: &Self::Blob) -> Self {
+        ()
+    }
+
+    fn to_blob(&self) -> Self::Blob {
+        AtomicPodUnitBlob
+    }
+}
+
+unsafe impl AtomicPodBlob for AtomicPodUnitBlob {
+    fn copy_from(&self, _: &Self) {}
 }
 
 /// Like [`RawBufferVec`], but doesn't require that the data type `T` be

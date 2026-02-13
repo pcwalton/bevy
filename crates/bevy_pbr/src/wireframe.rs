@@ -777,7 +777,7 @@ pub fn specialize_wireframes(
             if !needs_specialization {
                 continue;
             }
-            let Some(mesh) = render_meshes.get(mesh_instance.mesh_asset_id) else {
+            let Some(mesh) = render_meshes.get(mesh_instance.mesh_asset_id()) else {
                 continue;
             };
 
@@ -791,13 +791,13 @@ pub fn specialize_wireframes(
             if view_key.contains(MeshPipelineKey::MOTION_VECTOR_PREPASS) {
                 // If the previous frame have skins or morph targets, note that.
                 if mesh_instance
-                    .flags
+                    .flags()
                     .contains(RenderMeshInstanceFlags::HAS_PREVIOUS_SKIN)
                 {
                     mesh_key |= MeshPipelineKey::HAS_PREVIOUS_SKIN;
                 }
                 if mesh_instance
-                    .flags
+                    .flags()
                     .contains(RenderMeshInstanceFlags::HAS_PREVIOUS_MORPH)
                 {
                     mesh_key |= MeshPipelineKey::HAS_PREVIOUS_MORPH;
@@ -877,9 +877,10 @@ fn queue_wireframes(
             else {
                 continue;
             };
-            let (vertex_slab, index_slab) = mesh_allocator.mesh_slabs(&mesh_instance.mesh_asset_id);
+            let (vertex_slab, index_slab) =
+                mesh_allocator.mesh_slabs(&mesh_instance.mesh_asset_id());
             let bin_key = Wireframe3dBinKey {
-                asset_id: mesh_instance.mesh_asset_id.untyped(),
+                asset_id: mesh_instance.mesh_asset_id().untyped(),
             };
             let batch_set_key = Wireframe3dBatchSetKey {
                 pipeline: pipeline_id,
