@@ -67,6 +67,7 @@ use bevy_utils::{default, BufferedChannel, Parallel, TypeIdMap};
 use core::any::TypeId;
 use core::mem::size_of;
 use material_bind_groups::MaterialBindingId;
+use std::sync::mpsc;
 use tracing::{error, info_span, warn, Instrument};
 
 use self::irradiance_volume::IRRADIANCE_VOLUMES_ARE_USABLE;
@@ -1806,86 +1807,54 @@ pub fn collect_meshes_for_gpu_building(
     } = batched_instance_buffers.into_inner();
     previous_input_buffer.clear();
 
-    // Channels used by parallel workers to send data to the single consumer.
-    let (prepared_rx, prepared_tx) = chunks.prepared.unbounded();
-    let (reextract_rx, reextract_tx) = chunks.reextract.unbounded();
-    let (removed_rx, removed_tx) = chunks.removed.unbounded();
-
-    // Reference data shared between tasks
-    let mesh_allocator = &mesh_allocator;
-    let mesh_material_ids = &mesh_material_ids;
-    let render_material_bindings = &render_material_bindings;
-    let render_lightmaps = &render_lightmaps;
-    let skin_uniforms = &skin_uniforms;
-    let frame_count = *frame_count;
-
-    // Spawn workers on the taskpool to prepare and update meshes in parallel.
-    ComputeTaskPool::get().scope(|scope| {
-        // This worker is the bottleneck of mesh preparation and can only run serially, so we want
-        // it to start working immediately. As soon as the parallel workers produce chunks of
-        // prepared meshes, this worker will consume them and update the GPU buffers.
-        scope.spawn(
-            async move {
-                while let Ok(mut batch) = prepared_rx.recv().await {
-                    for (entity, prepared, mesh_culling_builder) in batch.drain() {
-                        let Some(instance_data_index) = prepared.update(
-                            entity,
-                            &mut *render_mesh_instances,
-                            current_input_buffer,
-                            previous_input_buffer,
-                        ) else {
-                            continue;
-                        };
-                        if let Some(mesh_culling_data) = mesh_culling_builder {
-                            mesh_culling_data.update(
-                                &mut mesh_culling_data_buffer,
-                                instance_data_index as usize,
-                            );
-                        }
-                    }
-                }
-                while let Ok(mut batch) = removed_rx.recv().await {
-                    for entity in batch.drain() {
-                        remove_mesh_input_uniform(
-                            entity,
-                            &mut *render_mesh_instances,
-                            current_input_buffer,
-                        );
-                    }
-                }
-                while let Ok(mut batch) = reextract_rx.recv().await {
-                    for entity in batch.drain() {
-                        meshes_to_reextract_next_frame.insert(entity);
-                    }
-                }
-                // Buffers can't be empty. Make sure there's something in the previous input buffer.
-                previous_input_buffer.ensure_nonempty();
-            }
-            .instrument(info_span!("collect_meshes_consumer")),
+    if !current_input_buffer.is_empty() {
+        mesh_culling_data_buffer.grow_set(
+            current_input_buffer.len() as u32 - 1,
+            MeshCullingData::default(),
         );
+    }
 
-        // Iterate through each queue, spawning a task for each queue. This loop completes quickly
-        // as it does very little work, it is just spawning and moving data into tasks in a loop.
-        for queue in render_mesh_instance_queues.iter_mut() {
-            match *queue {
-                RenderMeshInstanceGpuQueue::None => {
-                    // This can only happen if the queue is empty.
-                }
+    // Channels used by parallel workers to send data to the single consumer.
+    let (prepared_tx, prepared_rx) = mpsc::channel();
+    let (reextract_tx, reextract_rx) = mpsc::channel();
+    let (removed_tx, removed_rx) = mpsc::channel();
 
-                RenderMeshInstanceGpuQueue::CpuCulling {
-                    ref mut changed,
-                    ref mut removed,
-                } => {
-                    let mut prepared_tx = prepared_tx.clone();
-                    let mut reextract_tx = reextract_tx.clone();
-                    let mut removed_tx = removed_tx.clone();
-                    scope.spawn(async move {
-                        let _span = info_span!("prepared_mesh_producer").entered();
-                        changed
-                            .drain(..)
-                            .for_each(
-                                |(entity, mesh_instance_builder)| match mesh_instance_builder
-                                    .prepare(
+    {
+        // Reference data shared between tasks
+        let mesh_allocator = &mesh_allocator;
+        let mesh_material_ids = &mesh_material_ids;
+        let render_material_bindings = &render_material_bindings;
+        let render_lightmaps = &render_lightmaps;
+        let skin_uniforms = &skin_uniforms;
+        let frame_count = *frame_count;
+        let render_mesh_instances = &*render_mesh_instances;
+        let current_input_buffer = &*current_input_buffer;
+        let mesh_culling_data_buffer = &*mesh_culling_data_buffer;
+
+        // Spawn workers on the taskpool to prepare and update meshes in parallel.
+        ComputeTaskPool::get().scope(|scope| {
+            // Iterate through each queue, spawning a task for each queue. This loop completes quickly
+            // as it does very little work, it is just spawning and moving data into tasks in a loop.
+            for queue in render_mesh_instance_queues.iter_mut() {
+                match *queue {
+                    RenderMeshInstanceGpuQueue::None => {
+                        // This can only happen if the queue is empty.
+                    }
+
+                    RenderMeshInstanceGpuQueue::CpuCulling {
+                        ref mut changed,
+                        ref mut removed,
+                    } => {
+                        /*
+                        let mut prepared_tx = prepared_tx.clone();
+                        let mut reextract_tx = reextract_tx.clone();
+                        let mut removed_tx = removed_tx.clone();
+                        scope.spawn(async move {
+                            let _span = info_span!("prepared_mesh_producer").entered();
+                            changed
+                                .drain(..)
+                                .for_each(|(entity, mesh_instance_builder)| {
+                                    match mesh_instance_builder.prepare(
                                         entity,
                                         mesh_allocator,
                                         mesh_material_ids,
@@ -1894,67 +1863,133 @@ pub fn collect_meshes_for_gpu_building(
                                         skin_uniforms,
                                         frame_count,
                                     ) {
-                                    Some(prepared) => {
-                                        prepared_tx.send_blocking((entity, prepared, None)).ok();
+                                        Some(prepared) => {
+                                            prepared_tx
+                                                .send((entity, prepared, None))
+                                                .ok();
+                                        }
+                                        None => {
+                                            reextract_tx.send(entity).ok();
+                                        }
                                     }
-                                    None => {
-                                        reextract_tx.send_blocking(entity).ok();
+                                });
+
+                            for entity in removed.drain(..) {
+                                removed_tx.send(entity).unwrap();
+                            }
+                        });
+                        */
+                    }
+
+                    RenderMeshInstanceGpuQueue::GpuCulling {
+                        ref mut changed,
+                        ref mut removed,
+                    } => {
+                        let mut prepared_tx = prepared_tx.clone();
+                        let mut reextract_tx = reextract_tx.clone();
+                        let mut removed_tx = removed_tx.clone();
+                        scope.spawn(async move {
+                            let _span = info_span!("prepared_mesh_producer").entered();
+                            changed.drain(..).for_each(
+                                |(entity, mesh_instance_builder, mesh_culling_builder)| {
+                                    match mesh_instance_builder.prepare(
+                                        entity,
+                                        mesh_allocator,
+                                        mesh_material_ids,
+                                        render_material_bindings,
+                                        render_lightmaps,
+                                        skin_uniforms,
+                                        frame_count,
+                                    ) {
+                                        Some(prepared) => {
+                                            if let Some(render_mesh_instance) =
+                                                render_mesh_instances.get(&entity)
+                                            {
+                                                unsafe {
+                                                    let render_mesh_instance_ptr =
+                                                        render_mesh_instance
+                                                            as *const RenderMeshInstanceGpu
+                                                            as *mut RenderMeshInstanceGpu;
+                                                    (*render_mesh_instance_ptr).shared =
+                                                        prepared.shared;
+                                                    (*render_mesh_instance_ptr).center =
+                                                        prepared.center;
+
+                                                    let current_uniform_index =
+                                                        (*render_mesh_instance_ptr)
+                                                            .current_uniform_index
+                                                            .get();
+                                                    let mesh_input_uniform_ptr =
+                                                        current_input_buffer.get_unchecked_ref(
+                                                            current_uniform_index,
+                                                        )
+                                                            as *const MeshInputUniform
+                                                            as *mut MeshInputUniform;
+                                                    *mesh_input_uniform_ptr =
+                                                        prepared.mesh_input_uniform;
+
+                                                    let mesh_culling_data_ptr =
+                                                        mesh_culling_data_buffer
+                                                            .get(current_uniform_index)
+                                                            .unwrap()
+                                                            as *const MeshCullingData
+                                                            as *mut MeshCullingData;
+                                                    *mesh_culling_data_ptr = mesh_culling_builder;
+                                                }
+                                            } else {
+                                                let data =
+                                                    (entity, prepared, Some(mesh_culling_builder));
+                                                prepared_tx.send(data).ok();
+                                            }
+                                        }
+                                        None => {
+                                            reextract_tx.send(entity).ok();
+                                        }
                                     }
                                 },
                             );
 
-                        for entity in removed.drain(..) {
-                            removed_tx.send_blocking(entity).unwrap();
-                        }
-                    });
-                }
-
-                RenderMeshInstanceGpuQueue::GpuCulling {
-                    ref mut changed,
-                    ref mut removed,
-                } => {
-                    let mut prepared_tx = prepared_tx.clone();
-                    let mut reextract_tx = reextract_tx.clone();
-                    let mut removed_tx = removed_tx.clone();
-                    scope.spawn(async move {
-                        let _span = info_span!("prepared_mesh_producer").entered();
-                        changed.drain(..).for_each(
-                            |(entity, mesh_instance_builder, mesh_culling_builder)| {
-                                match mesh_instance_builder.prepare(
-                                    entity,
-                                    mesh_allocator,
-                                    mesh_material_ids,
-                                    render_material_bindings,
-                                    render_lightmaps,
-                                    skin_uniforms,
-                                    frame_count,
-                                ) {
-                                    Some(prepared) => {
-                                        let data = (entity, prepared, Some(mesh_culling_builder));
-                                        prepared_tx.send_blocking(data).ok();
-                                    }
-                                    None => {
-                                        reextract_tx.send_blocking(entity).ok();
-                                    }
-                                }
-                            },
-                        );
-
-                        for entity in removed.drain(..) {
-                            removed_tx.send_blocking(entity).unwrap();
-                        }
-                    });
+                            for entity in removed.drain(..) {
+                                removed_tx.send(entity).unwrap();
+                            }
+                        });
+                    }
                 }
             }
-        }
 
-        // Drop the senders owned by the scope, so the only senders left are those captured by the
-        // spawned tasks. When the tasks are complete, the channels will close, and the consumer
-        // will finish. Without this, the scope would deadlock on the blocked consumer.
-        drop(prepared_tx);
-        drop(reextract_tx);
-        drop(removed_tx);
-    });
+            // Drop the senders owned by the scope, so the only senders left are those captured by the
+            // spawned tasks. When the tasks are complete, the channels will close, and the consumer
+            // will finish. Without this, the scope would deadlock on the blocked consumer.
+            drop(prepared_tx);
+            drop(reextract_tx);
+            drop(removed_tx);
+        });
+    }
+
+    while let Ok(mut batch) = prepared_rx.recv() {
+        let (entity, prepared, mesh_culling_builder) = batch;
+        let Some(instance_data_index) = prepared.update(
+            entity,
+            &mut *render_mesh_instances,
+            current_input_buffer,
+            previous_input_buffer,
+        ) else {
+            continue;
+        };
+        if let Some(mesh_culling_data) = mesh_culling_builder {
+            mesh_culling_data.update(&mut mesh_culling_data_buffer, instance_data_index as usize);
+        }
+    }
+    while let Ok(mut batch) = removed_rx.recv() {
+        let entity = batch;
+        remove_mesh_input_uniform(entity, &mut *render_mesh_instances, current_input_buffer);
+    }
+    while let Ok(mut batch) = reextract_rx.recv() {
+        let entity = batch;
+        meshes_to_reextract_next_frame.insert(entity);
+    }
+    // Buffers can't be empty. Make sure there's something in the previous input buffer.
+    previous_input_buffer.ensure_nonempty();
 }
 
 /// All data needed to construct a pipeline for rendering 3D meshes.

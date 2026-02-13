@@ -349,6 +349,10 @@ where
         self.buffer.values()[uniform_index as usize]
     }
 
+    pub fn get_unchecked_ref(&self, uniform_index: u32) -> &BDI {
+        &self.buffer.values()[uniform_index as usize]
+    }
+
     /// Stores a piece of buffered data at the given index.
     ///
     /// # Panics
