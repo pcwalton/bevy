@@ -1917,6 +1917,7 @@ pub(crate) struct SpecializeShadowsSystemParam<'w, 's> {
     specialized_material_pipeline_cache: Res<'w, SpecializedShadowMaterialPipelineCache>,
     light_specialization_ticks: Res<'w, LightSpecializationTicks>,
     entity_specialization_ticks: Res<'w, EntitySpecializationTicks>,
+    entities_needing_specialization_this_frame: Res<'w, EntitiesNeedingSpecializationThisFrame>,
     this_run: SystemChangeTick,
 }
 
@@ -1948,6 +1949,7 @@ pub(crate) fn specialize_shadows(
             specialized_material_pipeline_cache,
             light_specialization_ticks,
             entity_specialization_ticks,
+            entities_needing_specialization_this_frame,
             this_run: system_change_tick,
         } = state.get(world);
 
@@ -2005,8 +2007,12 @@ pub(crate) fn specialize_shadows(
                 let view_specialized_material_pipeline_cache = specialized_material_pipeline_cache
                     .get(&extracted_view_light.retained_view_entity);
 
-                // FIXME: only process added and needing specialize
-                for (_, visible_entity) in visible_entities.entities.iter().copied() {
+                for visible_entity in visible_entities
+                    .added_entities
+                    .iter()
+                    .map(|(_, main_entity)| *main_entity)
+                    .chain(entities_needing_specialization_this_frame.iter().copied())
+                {
                     let Some(material_instance) =
                         render_material_instances.instances.get(&visible_entity)
                     else {
@@ -2018,17 +2024,6 @@ pub(crate) fn specialize_shadows(
                     else {
                         continue;
                     };
-                    let entity_tick = entity_specialization_ticks.get(&visible_entity).unwrap();
-                    let last_specialized_tick = view_specialized_material_pipeline_cache
-                        .and_then(|cache| cache.get(&visible_entity))
-                        .map(|(tick, _, _)| *tick);
-                    let needs_specialization = last_specialized_tick.is_none_or(|tick| {
-                        view_tick.is_newer_than(tick, this_run)
-                            || entity_tick.system_tick.is_newer_than(tick, this_run)
-                    });
-                    if !needs_specialization {
-                        continue;
-                    }
                     let Some(material) = render_materials.get(material_instance.asset_id) else {
                         continue;
                     };

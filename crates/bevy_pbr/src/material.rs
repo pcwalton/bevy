@@ -42,6 +42,7 @@ use bevy_render::erased_render_asset::{
 };
 use bevy_render::render_asset::{prepare_assets, RenderAssets};
 use bevy_render::renderer::RenderQueue;
+use bevy_render::sync_world::MainEntityHashSet;
 use bevy_render::RenderStartup;
 use bevy_render::{
     batching::gpu_preprocessing::GpuPreprocessingSupport,
@@ -285,6 +286,7 @@ pub struct MaterialsPlugin {
 impl Plugin for MaterialsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((PrepassPipelinePlugin, PrepassPlugin::new(self.debug_flags)));
+
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .init_resource::<EntitySpecializationTicks>()
@@ -296,11 +298,16 @@ impl Plugin for MaterialsPlugin {
                 .init_resource::<DrawFunctions<Shadow>>()
                 .init_resource::<RenderMaterialInstances>()
                 .init_resource::<MaterialBindGroupAllocators>()
+                .init_resource::<EntitiesNeedingSpecializationThisFrame>()
                 .add_render_command::<Shadow, DrawPrepass>()
                 .add_render_command::<Shadow, DrawDepthOnlyPrepass>()
                 .add_render_command::<Transparent3d, DrawMaterial>()
                 .add_render_command::<Opaque3d, DrawMaterial>()
                 .add_render_command::<AlphaMask3d, DrawMaterial>()
+                .add_systems(
+                    ExtractSchedule,
+                    clear_entities_needing_specialization_this_frame,
+                )
                 .add_systems(RenderStartup, init_material_pipeline)
                 .add_systems(
                     Render,
@@ -395,7 +402,8 @@ where
                         // `sweep_entities_needing_specialization` for an
                         // explanation of why the systems are ordered this way.
                         extract_entities_needs_specialization::<M>
-                            .in_set(MaterialExtractEntitiesNeedingSpecializationSystems),
+                            .in_set(MaterialExtractEntitiesNeedingSpecializationSystems)
+                            .after(clear_entities_needing_specialization_this_frame),
                         sweep_entities_needing_specialization::<M>
                             .after(MaterialExtractEntitiesNeedingSpecializationSystems)
                             .after(MaterialExtractionSystems)
@@ -766,6 +774,7 @@ pub fn late_sweep_material_instances(
 pub fn extract_entities_needs_specialization<M>(
     entities_needing_specialization: Extract<Res<EntitiesNeedingSpecialization<M>>>,
     mut entity_specialization_ticks: ResMut<EntitySpecializationTicks>,
+    mut entities_needing_specialization_this_frame: ResMut<EntitiesNeedingSpecializationThisFrame>,
     render_material_instances: Res<RenderMaterialInstances>,
     ticks: SystemChangeTick,
 ) where
@@ -780,6 +789,8 @@ pub fn extract_entities_needs_specialization<M>(
                 material_instances_tick: render_material_instances.current_change_tick,
             },
         );
+
+        entities_needing_specialization_this_frame.insert(MainEntity::from(*entity));
     }
 }
 
@@ -890,6 +901,9 @@ pub struct EntitySpecializationTicks {
     #[deref]
     pub entities: MainEntityHashMap<EntitySpecializationTickPair>,
 }
+
+#[derive(Clone, Resource, Deref, DerefMut, Default)]
+pub struct EntitiesNeedingSpecializationThisFrame(pub MainEntityHashSet);
 
 /// Ticks that specify the last time an entity's pipeline was specialized.
 ///
@@ -1795,4 +1809,10 @@ pub fn write_material_bind_group_buffers(
     for (_, allocator) in allocators.iter_mut() {
         allocator.write_buffers(&render_device, &render_queue);
     }
+}
+
+pub fn clear_entities_needing_specialization_this_frame(
+    mut entities_needing_specialization_this_frame: ResMut<EntitiesNeedingSpecializationThisFrame>,
+) {
+    entities_needing_specialization_this_frame.clear();
 }
