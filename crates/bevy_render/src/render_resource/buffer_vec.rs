@@ -268,7 +268,7 @@ pub trait AtomicPod: Default + Send + Sync + 'static {
 /// This is an unsafe trait because it may only be implemented by types that are
 /// either `()` or a transparent newtype wrapper around `[AtomicU32; S]` for
 /// some size S.
-pub unsafe trait AtomicPodBlob: Send + Sync + 'static {
+pub unsafe trait AtomicPodBlob: Default + Send + Sync + 'static {
     fn copy_from(&self, other: &Self);
 }
 
@@ -324,7 +324,7 @@ where
         T::from_blob(&self.values[index as usize])
     }
 
-    pub fn set(&mut self, index: u32, value: T) {
+    pub fn set(&self, index: u32, value: T) {
         self.values[index as usize].copy_from(&value.to_blob());
     }
 
@@ -366,9 +366,17 @@ where
     pub fn buffer(&self) -> Option<&Buffer> {
         self.buffer.as_ref()
     }
+
+    pub fn grow_set(&mut self, index: u32, value: T) {
+        self.values.reserve(index as usize + 1);
+        while index + 1 > self.len() {
+            self.values.push(T::Blob::default());
+        }
+        self.values[index as usize] = value.to_blob();
+    }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct AtomicPodUnitBlob;
 
 impl AtomicPod for () {

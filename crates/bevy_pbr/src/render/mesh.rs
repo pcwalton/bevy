@@ -576,6 +576,7 @@ pub struct MeshInputUniform {
 pub const MESH_INPUT_UNIFORM_SIZE: usize = size_of::<MeshInputUniform>();
 pub const MESH_INPUT_UNIFORM_SIZE_IN_WORDS: usize = MESH_INPUT_UNIFORM_SIZE / 4;
 
+#[derive(Default)]
 #[repr(transparent)]
 pub struct MeshInputUniformBlob([AtomicU32; MESH_INPUT_UNIFORM_SIZE_IN_WORDS]);
 
@@ -627,6 +628,7 @@ pub struct MeshCullingDataBuffer(AtomicRawBufferVec<MeshCullingData>);
 pub const MESH_CULLING_DATA_SIZE: usize = size_of::<MeshCullingData>();
 pub const MESH_CULLING_DATA_SIZE_IN_WORDS: usize = MESH_CULLING_DATA_SIZE / 4;
 
+#[derive(Default)]
 pub struct MeshCullingDataBlob([AtomicU32; MESH_CULLING_DATA_SIZE_IN_WORDS]);
 
 impl AtomicPod for MeshCullingData {
@@ -826,7 +828,7 @@ struct RenderMeshInstanceSharedThreadSafeTyped {
     flags: RenderMeshInstanceFlags,
 }
 
-#[derive(Deref, DerefMut)]
+#[derive(Default, Deref, DerefMut)]
 pub struct RenderMeshInstanceGpuThreadSafe(
     [AtomicU32; RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_SIZE_IN_WORDS],
 );
@@ -892,6 +894,12 @@ where
 }
 
 impl RenderMeshInstanceSharedThreadSafe {
+    pub fn copy_from(&self, other: &RenderMeshInstanceSharedThreadSafe) {
+        for (dest, src) in self.0.iter().zip(other.0.iter()) {
+            dest.store(src.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+    }
+
     #[inline]
     pub fn mesh_asset_id(&self) -> AssetId<Mesh> {
         extract_from_blob::<MeshAssetIdFlat, MESH_ASSET_ID_FLAT_SIZE>(
@@ -1012,6 +1020,16 @@ impl RenderMeshInstanceSharedThreadSafe {
 }
 
 impl RenderMeshInstanceGpuThreadSafe {
+    fn new(
+        world_space_center: Vec3,
+        current_uniform_index: NonMaxU32,
+    ) -> RenderMeshInstanceGpuThreadSafe {
+        let mut render_mesh_instance_gpu = RenderMeshInstanceGpuThreadSafe::default();
+        render_mesh_instance_gpu.set_world_space_center(world_space_center);
+        render_mesh_instance_gpu.set_current_uniform_index(current_uniform_index.into());
+        render_mesh_instance_gpu
+    }
+
     #[inline]
     pub fn world_space_center(&self) -> Vec3 {
         extract_from_blob::<_, VEC3_SIZE>(
@@ -1696,8 +1714,7 @@ fn remove_mesh_input_uniform(
 
     let removed_uniform_index = removed_render_mesh_instance
         .thread_safe
-        .current_uniform_index()
-        .get();
+        .current_uniform_index();
     current_input_buffer.remove(removed_uniform_index);
     Some(removed_uniform_index)
 }
@@ -1725,9 +1742,9 @@ impl MeshCullingData {
     fn update(
         &self,
         mesh_culling_data_buffer: &mut MeshCullingDataBuffer,
-        instance_data_index: usize,
+        instance_data_index: u32,
     ) {
-        while (mesh_culling_data_buffer.len() as usize) < instance_data_index + 1 {
+        while mesh_culling_data_buffer.len() < instance_data_index + 1 {
             mesh_culling_data_buffer.push(MeshCullingData::default());
         }
         mesh_culling_data_buffer.set(instance_data_index, *self);
@@ -1860,7 +1877,7 @@ pub fn extract_meshes_for_cpu_building(
                         flags: mesh_flags.bits(),
                     },
                     shared,
-                    render_layers,
+                    render_layers: render_layers.cloned(),
                 },
             ));
         },
@@ -2090,7 +2107,7 @@ fn extract_mesh_for_gpu_building(
         transmitted_receiver,
     );
 
-    let shared = RenderMeshInstanceShared::for_gpu_building(
+    let shared = RenderMeshInstanceSharedThreadSafe::for_gpu_building(
         previous_transform,
         mesh,
         tag,
@@ -2105,12 +2122,14 @@ fn extract_mesh_for_gpu_building(
     let gpu_mesh_culling_data = any_gpu_culling.then(|| MeshCullingData::new(aabb));
 
     let previous_input_index = if shared
-        .flags
+        .flags()
         .contains(RenderMeshInstanceFlags::HAS_PREVIOUS_TRANSFORM)
     {
         render_mesh_instances
             .get(&MainEntity::from(entity))
-            .map(|render_mesh_instance| render_mesh_instance.current_uniform_index)
+            .and_then(|render_mesh_instance| {
+                NonMaxU32::new(render_mesh_instance.thread_safe.current_uniform_index())
+            })
     } else {
         None
     };
@@ -2121,6 +2140,7 @@ fn extract_mesh_for_gpu_building(
         lightmap_uv_rect,
         mesh_flags,
         previous_input_index,
+        render_layers: render_layers.cloned(),
     };
 
     queue.push(
@@ -2301,38 +2321,29 @@ pub fn collect_meshes_for_gpu_building(
                                         Some(prepared) => {
                                             if let Some(render_mesh_instance) =
                                                 render_mesh_instances.get(&entity)
+                                                && prepared.render_layers
+                                                    == render_mesh_instance.render_layers
                                             {
-                                                unsafe {
-                                                    let render_mesh_instance_ptr =
-                                                        render_mesh_instance
-                                                            as *const RenderMeshInstanceGpu
-                                                            as *mut RenderMeshInstanceGpu;
-                                                    (*render_mesh_instance_ptr).shared =
-                                                        prepared.shared;
-                                                    (*render_mesh_instance_ptr).center =
-                                                        prepared.center;
+                                                // Fast path.
 
-                                                    let current_uniform_index =
-                                                        (*render_mesh_instance_ptr)
-                                                            .current_uniform_index
-                                                            .get();
-                                                    let mesh_input_uniform_ptr =
-                                                        current_input_buffer.get_unchecked_ref(
-                                                            current_uniform_index,
-                                                        )
-                                                            as *const MeshInputUniform
-                                                            as *mut MeshInputUniform;
-                                                    *mesh_input_uniform_ptr =
-                                                        prepared.mesh_input_uniform;
+                                                render_mesh_instance
+                                                    .shared
+                                                    .copy_from(&prepared.shared);
+                                                render_mesh_instance
+                                                    .thread_safe
+                                                    .set_world_space_center(prepared.center);
 
-                                                    let mesh_culling_data_ptr =
-                                                        mesh_culling_data_buffer
-                                                            .get(current_uniform_index)
-                                                            .unwrap()
-                                                            as *const MeshCullingData
-                                                            as *mut MeshCullingData;
-                                                    *mesh_culling_data_ptr = mesh_culling_builder;
-                                                }
+                                                let current_uniform_index = render_mesh_instance
+                                                    .thread_safe
+                                                    .current_uniform_index();
+                                                current_input_buffer.set(
+                                                    current_uniform_index,
+                                                    prepared.mesh_input_uniform,
+                                                );
+                                                mesh_culling_data_buffer.set(
+                                                    current_uniform_index,
+                                                    mesh_culling_builder,
+                                                );
                                             } else {
                                                 let data =
                                                     (entity, prepared, Some(mesh_culling_builder));
@@ -2374,7 +2385,7 @@ pub fn collect_meshes_for_gpu_building(
             continue;
         };
         if let Some(mesh_culling_data) = mesh_culling_builder {
-            mesh_culling_data.update(&mut mesh_culling_data_buffer, instance_data_index as usize);
+            mesh_culling_data.update(&mut mesh_culling_data_buffer, instance_data_index);
         }
     }
     while let Ok(mut batch) = removed_rx.recv() {
@@ -2600,7 +2611,7 @@ impl GetFullBatchData for MeshPipeline {
         let maybe_lightmap = lightmaps.render_lightmaps.get(&main_entity);
 
         Some((
-            mesh_instance.thread_safe.current_uniform_index(),
+            NonMaxU32::new(mesh_instance.thread_safe.current_uniform_index())?,
             mesh_instance.should_batch().then_some((
                 mesh_instance.material_bindings_index().group,
                 mesh_instance.mesh_asset_id(),
@@ -2623,7 +2634,7 @@ impl GetFullBatchData for MeshPipeline {
         };
         let mesh_instance = mesh_instances.get(&main_entity)?;
         let first_vertex_index =
-            match mesh_allocator.mesh_vertex_slice(&mesh_instance.mesh_asset_id) {
+            match mesh_allocator.mesh_vertex_slice(&mesh_instance.mesh_asset_id()) {
                 Some(mesh_vertex_slice) => mesh_vertex_slice.range.start,
                 None => 0,
             };
@@ -2656,7 +2667,7 @@ impl GetFullBatchData for MeshPipeline {
 
         mesh_instances
             .get(&main_entity)
-            .map(|entity| entity.thread_safe.current_uniform_index())
+            .and_then(|entity| NonMaxU32::new(entity.thread_safe.current_uniform_index()))
     }
 
     fn write_batch_indirect_parameters_metadata(

@@ -360,7 +360,7 @@ where
     ///
     /// # Panics
     /// if `uniform_index` is not in bounds of [`Self::buffer`].
-    pub fn set(&mut self, uniform_index: u32, element: BDI) {
+    pub fn set(&self, uniform_index: u32, element: BDI) {
         self.buffer.set(uniform_index, element);
     }
 
@@ -2181,6 +2181,7 @@ mod tests {
     #[derive(Clone, Copy, Default, PartialEq, Debug)]
     struct TestData(u32);
 
+    #[derive(Default)]
     #[repr(transparent)]
     struct TestDataBlob([AtomicU32; 1]);
 
