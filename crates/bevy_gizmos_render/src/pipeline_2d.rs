@@ -339,16 +339,19 @@ fn queue_line_and_joint_gizmos_2d(
                         line_style: config.line_style,
                     },
                 );
-                transparent_phase.add(Transparent2d {
-                    entity: (entity, *main_entity),
-                    draw_function,
-                    pipeline,
-                    sort_key: FloatOrd(f32::INFINITY),
-                    batch_range: 0..1,
-                    extra_index: PhaseItemExtraIndex::None,
-                    extracted_index: usize::MAX,
-                    indexed: false,
-                });
+                transparent_phase.add(
+                    *main_entity,
+                    Transparent2d {
+                        entity: (entity, *main_entity),
+                        draw_function,
+                        pipeline,
+                        sort_key: FloatOrd(f32::INFINITY),
+                        batch_range: 0..1,
+                        extra_index: PhaseItemExtraIndex::None,
+                        extracted_index: usize::MAX,
+                        indexed: false,
+                    },
+                );
             }
 
             if line_gizmo.strip_vertex_count >= 2 {
@@ -361,16 +364,19 @@ fn queue_line_and_joint_gizmos_2d(
                         line_style: config.line_style,
                     },
                 );
-                transparent_phase.add(Transparent2d {
-                    entity: (entity, *main_entity),
-                    draw_function: draw_line_function_strip,
-                    pipeline,
-                    sort_key: FloatOrd(f32::INFINITY),
-                    batch_range: 0..1,
-                    extra_index: PhaseItemExtraIndex::None,
-                    extracted_index: usize::MAX,
-                    indexed: false,
-                });
+                transparent_phase.add(
+                    *main_entity,
+                    Transparent2d {
+                        entity: (entity, *main_entity),
+                        draw_function: draw_line_function_strip,
+                        pipeline,
+                        sort_key: FloatOrd(f32::INFINITY),
+                        batch_range: 0..1,
+                        extra_index: PhaseItemExtraIndex::None,
+                        extracted_index: usize::MAX,
+                        indexed: false,
+                    },
+                );
             }
 
             // Draw line joints
@@ -386,16 +392,19 @@ fn queue_line_and_joint_gizmos_2d(
                     joints: config.line_joints,
                 },
             );
-            transparent_phase.add(Transparent2d {
-                entity: (entity, *main_entity),
-                draw_function: draw_line_joint_function,
-                pipeline,
-                sort_key: FloatOrd(f32::INFINITY),
-                batch_range: 0..1,
-                extra_index: PhaseItemExtraIndex::None,
-                extracted_index: usize::MAX,
-                indexed: false,
-            });
+            transparent_phase.add(
+                *main_entity,
+                Transparent2d {
+                    entity: (entity, *main_entity),
+                    draw_function: draw_line_joint_function,
+                    pipeline,
+                    sort_key: FloatOrd(f32::INFINITY),
+                    batch_range: 0..1,
+                    extra_index: PhaseItemExtraIndex::None,
+                    extracted_index: usize::MAX,
+                    indexed: false,
+                },
+            );
         }
     }
 }

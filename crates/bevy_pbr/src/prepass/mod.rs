@@ -136,13 +136,9 @@ impl Plugin for PrepassPlugin {
                     ),
                 )
                 .add_plugins((
-                    BinnedRenderPhasePlugin::<Opaque3dPrepass, MeshPipeline>::new(
-                        self.debug_flags,
-                        false,
-                    ),
+                    BinnedRenderPhasePlugin::<Opaque3dPrepass, MeshPipeline>::new(self.debug_flags),
                     BinnedRenderPhasePlugin::<AlphaMask3dPrepass, MeshPipeline>::new(
                         self.debug_flags,
-                        false,
                     ),
                 ));
         }
@@ -1199,15 +1195,19 @@ pub fn queue_prepass_material_meshes(
             };
 
             // Skip the entity if it's cached in a bin and up to date.
-            if opaque_phase.as_mut().is_some_and(|phase| {
-                phase.validate_cached_entity(visible_entity, current_change_tick)
-            }) || alpha_mask_phase.as_mut().is_some_and(|phase| {
-                phase.validate_cached_entity(visible_entity, current_change_tick)
-            }) || opaque_deferred_phase.as_mut().is_some_and(|phase| {
-                phase.validate_cached_entity(visible_entity, current_change_tick)
-            }) || alpha_mask_deferred_phase.as_mut().is_some_and(|phase| {
-                phase.validate_cached_entity(visible_entity, current_change_tick)
-            }) {
+            if opaque_phase
+                .as_mut()
+                .is_some_and(|phase| phase.validate_cached_entity(visible_entity))
+                || alpha_mask_phase
+                    .as_mut()
+                    .is_some_and(|phase| phase.validate_cached_entity(visible_entity))
+                || opaque_deferred_phase
+                    .as_mut()
+                    .is_some_and(|phase| phase.validate_cached_entity(visible_entity))
+                || alpha_mask_deferred_phase
+                    .as_mut()
+                    .is_some_and(|phase| phase.validate_cached_entity(visible_entity))
+            {
                 continue;
             }
 
@@ -1250,7 +1250,6 @@ pub fn queue_prepass_material_meshes(
                                 mesh_instance.should_batch(),
                                 &gpu_preprocessing_support,
                             ),
-                            current_change_tick,
                         );
                     } else if let Some(opaque_phase) = opaque_phase.as_mut() {
                         let depth_only_draw_function = material
@@ -1279,7 +1278,6 @@ pub fn queue_prepass_material_meshes(
                                 mesh_instance.should_batch(),
                                 &gpu_preprocessing_support,
                             ),
-                            current_change_tick,
                         );
                     }
                 }
@@ -1302,7 +1300,6 @@ pub fn queue_prepass_material_meshes(
                                 mesh_instance.should_batch(),
                                 &gpu_preprocessing_support,
                             ),
-                            current_change_tick,
                         );
                     } else if let Some(alpha_mask_phase) = alpha_mask_phase.as_mut() {
                         alpha_mask_phase.add(
@@ -1322,7 +1319,6 @@ pub fn queue_prepass_material_meshes(
                                 mesh_instance.should_batch(),
                                 &gpu_preprocessing_support,
                             ),
-                            current_change_tick,
                         );
                     }
                 }

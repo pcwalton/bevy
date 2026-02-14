@@ -339,16 +339,19 @@ pub fn queue_ui_slices(
             UiTextureSlicePipelineKey { hdr: view.hdr },
         );
 
-        transparent_phase.add(TransparentUi {
-            draw_function,
-            pipeline,
-            entity: (extracted_slicer.render_entity, extracted_slicer.main_entity),
-            sort_key: FloatOrd(extracted_slicer.stack_index as f32 + stack_z_offsets::IMAGE),
-            batch_range: 0..0,
-            extra_index: PhaseItemExtraIndex::None,
-            index,
-            indexed: true,
-        });
+        transparent_phase.add(
+            extracted_slicer.main_entity,
+            TransparentUi {
+                draw_function,
+                pipeline,
+                entity: (extracted_slicer.render_entity, extracted_slicer.main_entity),
+                sort_key: FloatOrd(extracted_slicer.stack_index as f32 + stack_z_offsets::IMAGE),
+                batch_range: 0..0,
+                extra_index: PhaseItemExtraIndex::None,
+                index,
+                indexed: true,
+            },
+        );
     }
 }
 

@@ -81,7 +81,7 @@ impl Plugin for WireframePlugin {
         embedded_asset!(app, "render/wireframe.wgsl");
 
         app.add_plugins((
-            BinnedRenderPhasePlugin::<Wireframe3d, MeshPipeline>::new(self.debug_flags, false),
+            BinnedRenderPhasePlugin::<Wireframe3d, MeshPipeline>::new(self.debug_flags),
             RenderAssetPlugin::<RenderWireframeMaterial>::default(),
         ))
         .init_asset::<WireframeMaterial>()
@@ -892,7 +892,7 @@ fn queue_wireframes(
             };
 
             // Skip the entity if it's cached in a bin and up to date.
-            if wireframe_phase.validate_cached_entity(visible_entity, current_change_tick) {
+            if wireframe_phase.validate_cached_entity(visible_entity) {
                 continue;
             }
             let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(visible_entity)
@@ -919,7 +919,6 @@ fn queue_wireframes(
                     mesh_instance.should_batch(),
                     &gpu_preprocessing_support,
                 ),
-                current_change_tick,
             );
         }
     }

@@ -2224,7 +2224,7 @@ pub fn queue_shadows(
                 }
 
                 // Skip the entity if it's cached in a bin and up to date.
-                if shadow_phase.validate_cached_entity(main_entity, current_change_tick) {
+                if shadow_phase.validate_cached_entity(main_entity) {
                     continue;
                 }
 
@@ -2267,7 +2267,6 @@ pub fn queue_shadows(
                         mesh_instance.should_batch(),
                         &gpu_preprocessing_support,
                     ),
-                    current_change_tick,
                 );
             }
 

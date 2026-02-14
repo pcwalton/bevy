@@ -1230,6 +1230,26 @@ pub fn queue_material_meshes(
         };
 
         let rangefinder = view.rangefinder3d();
+
+        // First, remove meshes that need to be respecialized, and those that were removed, from the bins.
+        for main_entity in visible_entities
+            .get::<Mesh3d>()
+            .iter()
+            .flat_map(|visible_entities| {
+                visible_entities
+                    .removed_entities
+                    .iter()
+                    .map(|(_, main_entity)| *main_entity)
+            })
+            .chain(entities_needing_specialization_this_frame.iter().copied())
+        {
+            opaque_phase.remove(main_entity);
+            alpha_mask_phase.remove(main_entity);
+            transmissive_phase.remove(main_entity);
+            transparent_phase.remove(main_entity);
+        }
+
+        // Now iterate through all newly-visible entities and those needing respecialization.
         for visible_entity in visible_entities
             .get::<Mesh3d>()
             .iter()
@@ -1249,8 +1269,8 @@ pub fn queue_material_meshes(
             };
 
             // Skip the entity if it's cached in a bin and up to date.
-            if opaque_phase.validate_cached_entity(visible_entity, current_change_tick)
-                || alpha_mask_phase.validate_cached_entity(visible_entity, current_change_tick)
+            if opaque_phase.validate_cached_entity(visible_entity)
+                || alpha_mask_phase.validate_cached_entity(visible_entity)
             {
                 continue;
             }
@@ -1280,15 +1300,18 @@ pub fn queue_material_meshes(
                     else {
                         continue;
                     };
-                    transmissive_phase.add(Transmissive3d {
-                        entity: (Entity::PLACEHOLDER, visible_entity),
-                        draw_function,
-                        pipeline: pipeline_id,
-                        distance,
-                        batch_range: 0..1,
-                        extra_index: PhaseItemExtraIndex::None,
-                        indexed: index_slab.is_some(),
-                    });
+                    transmissive_phase.add(
+                        visible_entity,
+                        Transmissive3d {
+                            entity: (Entity::PLACEHOLDER, visible_entity),
+                            draw_function,
+                            pipeline: pipeline_id,
+                            distance,
+                            batch_range: 0..1,
+                            extra_index: PhaseItemExtraIndex::None,
+                            indexed: index_slab.is_some(),
+                        },
+                    );
                 }
                 RenderPhaseType::Opaque => {
                     if material.properties.render_method == OpaqueRendererMethod::Deferred {
@@ -1296,7 +1319,7 @@ pub fn queue_material_meshes(
                         // a bin, we still want to update its cache entry. That
                         // way, we know we don't need to re-examine it in future
                         // frames.
-                        opaque_phase.update_cache(visible_entity, None, current_change_tick);
+                        opaque_phase.update_cache(visible_entity, None);
                         continue;
                     }
                     let Some(draw_function) = material
@@ -1325,7 +1348,6 @@ pub fn queue_material_meshes(
                             mesh_instance.should_batch(),
                             &gpu_preprocessing_support,
                         ),
-                        current_change_tick,
                     );
                 }
                 // Alpha mask
@@ -1355,7 +1377,6 @@ pub fn queue_material_meshes(
                             mesh_instance.should_batch(),
                             &gpu_preprocessing_support,
                         ),
-                        current_change_tick,
                     );
                 }
                 RenderPhaseType::Transparent => {
@@ -1367,15 +1388,18 @@ pub fn queue_material_meshes(
                     else {
                         continue;
                     };
-                    transparent_phase.add(Transparent3d {
-                        entity: (Entity::PLACEHOLDER, visible_entity),
-                        draw_function,
-                        pipeline: pipeline_id,
-                        distance,
-                        batch_range: 0..1,
-                        extra_index: PhaseItemExtraIndex::None,
-                        indexed: index_slab.is_some(),
-                    });
+                    transparent_phase.add(
+                        visible_entity,
+                        Transparent3d {
+                            entity: (Entity::PLACEHOLDER, visible_entity),
+                            draw_function,
+                            pipeline: pipeline_id,
+                            distance,
+                            batch_range: 0..1,
+                            extra_index: PhaseItemExtraIndex::None,
+                            indexed: index_slab.is_some(),
+                        },
+                    );
                 }
             }
         }

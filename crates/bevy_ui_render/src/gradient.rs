@@ -616,22 +616,25 @@ pub fn queue_gradient(
             },
         );
 
-        transparent_phase.add(TransparentUi {
-            draw_function,
-            pipeline,
-            entity: (gradient.render_entity, gradient.main_entity),
-            sort_key: FloatOrd(
-                gradient.stack_index as f32
-                    + match gradient.node_type {
-                        NodeType::Rect => stack_z_offsets::GRADIENT,
-                        NodeType::Border(_) => stack_z_offsets::BORDER_GRADIENT,
-                    },
-            ),
-            batch_range: 0..0,
-            extra_index: PhaseItemExtraIndex::None,
-            index,
-            indexed: true,
-        });
+        transparent_phase.add(
+            gradient.main_entity,
+            TransparentUi {
+                draw_function,
+                pipeline,
+                entity: (gradient.render_entity, gradient.main_entity),
+                sort_key: FloatOrd(
+                    gradient.stack_index as f32
+                        + match gradient.node_type {
+                            NodeType::Rect => stack_z_offsets::GRADIENT,
+                            NodeType::Border(_) => stack_z_offsets::BORDER_GRADIENT,
+                        },
+                ),
+                batch_range: 0..0,
+                extra_index: PhaseItemExtraIndex::None,
+                index,
+                indexed: true,
+            },
+        );
     }
 }
 

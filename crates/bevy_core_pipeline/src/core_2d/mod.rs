@@ -5,6 +5,7 @@ use core::ops::Range;
 
 use bevy_asset::UntypedAssetId;
 use bevy_camera::{Camera, Camera2d};
+use bevy_ecs::entity::EntityHash;
 use bevy_image::ToExtents;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
@@ -13,6 +14,7 @@ use bevy_render::{
     render_phase::PhaseItemBatchSetKey,
     view::{ExtractedView, RetainedViewEntity},
 };
+use indexmap::IndexMap;
 pub use main_opaque_pass_2d_node::*;
 pub use main_transparent_pass_2d_node::*;
 
@@ -362,9 +364,8 @@ impl SortedPhaseItem for Transparent2d {
     }
 
     #[inline]
-    fn sort(items: &mut [Self]) {
-        // radsort is a stable radix sort that performed better than `slice::sort_by_key` or `slice::sort_unstable_by_key`.
-        radsort::sort_by_key(items, |item| item.sort_key().0);
+    fn sort(items: &mut IndexMap<MainEntity, Transparent2d, EntityHash>) {
+        items.sort_by_key(|_, item| item.sort_key());
     }
 
     fn indexed(&self) -> bool {

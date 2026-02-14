@@ -632,15 +632,18 @@ pub fn queue_ui_material_nodes<M: UiMaterial>(
                 extracted_uinodes.uinodes.len() - transparent_phase.items.capacity(),
             );
         }
-        transparent_phase.add(TransparentUi {
-            draw_function,
-            pipeline,
-            entity: (extracted_uinode.render_entity, extracted_uinode.main_entity),
-            sort_key: FloatOrd(extracted_uinode.stack_index as f32 + M::stack_z_offset()),
-            batch_range: 0..0,
-            extra_index: PhaseItemExtraIndex::None,
-            index,
-            indexed: false,
-        });
+        transparent_phase.add(
+            extracted_uinode.main_entity,
+            TransparentUi {
+                draw_function,
+                pipeline,
+                entity: (extracted_uinode.render_entity, extracted_uinode.main_entity),
+                sort_key: FloatOrd(extracted_uinode.stack_index as f32 + M::stack_z_offset()),
+                batch_range: 0..0,
+                extra_index: PhaseItemExtraIndex::None,
+                index,
+                indexed: false,
+            },
+        );
     }
 }

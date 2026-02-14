@@ -79,10 +79,7 @@ impl Plugin for Wireframe2dPlugin {
         embedded_asset!(app, "wireframe2d.wgsl");
 
         app.add_plugins((
-            BinnedRenderPhasePlugin::<Wireframe2dPhaseItem, Mesh2dPipeline>::new(
-                self.debug_flags,
-                false,
-            ),
+            BinnedRenderPhasePlugin::<Wireframe2dPhaseItem, Mesh2dPipeline>::new(self.debug_flags),
             RenderAssetPlugin::<RenderWireframeMaterial>::default(),
         ))
         .init_asset::<Wireframe2dMaterial>()
@@ -809,20 +806,22 @@ fn queue_wireframes(
             continue;
         };
 
-        let Some(visible_entities) = visible_entities.get::<Mesh2d>() else { continue };
+        let Some(visible_entities) = visible_entities.get::<Mesh2d>() else {
+            continue;
+        };
         for (render_entity, visible_entity) in visible_entities.entities.iter() {
             let Some(wireframe_instance) = render_wireframe_instances.get(visible_entity) else {
                 continue;
             };
-            let Some((current_change_tick, pipeline_id)) = view_specialized_material_pipeline_cache
+            let Some(pipeline_id) = view_specialized_material_pipeline_cache
                 .get(visible_entity)
-                .map(|(current_change_tick, pipeline_id)| (*current_change_tick, *pipeline_id))
+                .map(|(_, pipeline_id)| *pipeline_id)
             else {
                 continue;
             };
 
             // Skip the entity if it's cached in a bin and up to date.
-            if wireframe_phase.validate_cached_entity(*visible_entity, current_change_tick) {
+            if wireframe_phase.validate_cached_entity(*visible_entity) {
                 continue;
             }
             let Some(mesh_instance) = render_mesh_instances.get(visible_entity) else {
@@ -849,7 +848,6 @@ fn queue_wireframes(
                 } else {
                     BinnedRenderPhaseType::UnbatchableMesh
                 },
-                current_change_tick,
             );
         }
     }

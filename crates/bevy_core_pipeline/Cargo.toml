@@ -42,6 +42,7 @@ bitflags = "2.3"
 radsort = "0.1"
 nonmax = "0.5"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+indexmap = "2"
 
 [lints]
 workspace = true

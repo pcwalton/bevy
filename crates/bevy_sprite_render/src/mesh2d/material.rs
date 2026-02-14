@@ -839,8 +839,8 @@ pub fn queue_material2d_meshes<M: Material2d>(
             };
 
             // Skip the entity if it's cached in a bin and up to date.
-            if opaque_phase.validate_cached_entity(*visible_entity, current_change_tick)
-                || alpha_mask_phase.validate_cached_entity(*visible_entity, current_change_tick)
+            if opaque_phase.validate_cached_entity(*visible_entity)
+                || alpha_mask_phase.validate_cached_entity(*visible_entity)
             {
                 continue;
             }
@@ -888,7 +888,6 @@ pub fn queue_material2d_meshes<M: Material2d>(
                         (*render_entity, *visible_entity),
                         InputUniformIndex::default(),
                         binned_render_phase_type,
-                        current_change_tick,
                     );
                 }
                 AlphaMode2d::Mask(_) => {
@@ -906,25 +905,27 @@ pub fn queue_material2d_meshes<M: Material2d>(
                         (*render_entity, *visible_entity),
                         InputUniformIndex::default(),
                         binned_render_phase_type,
-                        current_change_tick,
                     );
                 }
                 AlphaMode2d::Blend => {
-                    transparent_phase.add(Transparent2d {
-                        entity: (*render_entity, *visible_entity),
-                        draw_function: material_2d.properties.draw_function_id,
-                        pipeline: pipeline_id,
-                        // NOTE: Back-to-front ordering for transparent with ascending sort means far should have the
-                        // lowest sort key and getting closer should increase. As we have
-                        // -z in front of the camera, the largest distance is -far with values increasing toward the
-                        // camera. As such we can just use mesh_z as the distance
-                        sort_key: FloatOrd(mesh_z + material_2d.properties.depth_bias),
-                        // Batching is done in batch_and_prepare_render_phase
-                        batch_range: 0..1,
-                        extra_index: PhaseItemExtraIndex::None,
-                        extracted_index: usize::MAX,
-                        indexed: mesh.indexed(),
-                    });
+                    transparent_phase.add(
+                        *visible_entity,
+                        Transparent2d {
+                            entity: (*render_entity, *visible_entity),
+                            draw_function: material_2d.properties.draw_function_id,
+                            pipeline: pipeline_id,
+                            // NOTE: Back-to-front ordering for transparent with ascending sort means far should have the
+                            // lowest sort key and getting closer should increase. As we have
+                            // -z in front of the camera, the largest distance is -far with values increasing toward the
+                            // camera. As such we can just use mesh_z as the distance
+                            sort_key: FloatOrd(mesh_z + material_2d.properties.depth_bias),
+                            // Batching is done in batch_and_prepare_render_phase
+                            batch_range: 0..1,
+                            extra_index: PhaseItemExtraIndex::None,
+                            extracted_index: usize::MAX,
+                            indexed: mesh.indexed(),
+                        },
+                    );
                 }
             }
         }

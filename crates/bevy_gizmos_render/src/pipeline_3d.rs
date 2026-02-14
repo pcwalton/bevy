@@ -330,15 +330,18 @@ fn queue_line_gizmos_3d(
                         line_style: config.line_style,
                     },
                 )?;
-                transparent_phase.add(Transparent3d {
-                    entity: (entity, *main_entity),
-                    draw_function,
-                    pipeline,
-                    distance: 0.,
-                    batch_range: 0..1,
-                    extra_index: PhaseItemExtraIndex::None,
-                    indexed: true,
-                });
+                transparent_phase.add(
+                    *main_entity,
+                    Transparent3d {
+                        entity: (entity, *main_entity),
+                        draw_function,
+                        pipeline,
+                        distance: 0.,
+                        batch_range: 0..1,
+                        extra_index: PhaseItemExtraIndex::None,
+                        indexed: true,
+                    },
+                );
             }
 
             if line_gizmo.strip_vertex_count >= 2 {
@@ -351,15 +354,18 @@ fn queue_line_gizmos_3d(
                         line_style: config.line_style,
                     },
                 )?;
-                transparent_phase.add(Transparent3d {
-                    entity: (entity, *main_entity),
-                    draw_function: draw_function_strip,
-                    pipeline,
-                    distance: 0.,
-                    batch_range: 0..1,
-                    extra_index: PhaseItemExtraIndex::None,
-                    indexed: true,
-                });
+                transparent_phase.add(
+                    *main_entity,
+                    Transparent3d {
+                        entity: (entity, *main_entity),
+                        draw_function: draw_function_strip,
+                        pipeline,
+                        distance: 0.,
+                        batch_range: 0..1,
+                        extra_index: PhaseItemExtraIndex::None,
+                        indexed: true,
+                    },
+                );
             }
         }
     }
@@ -418,15 +424,18 @@ fn queue_line_joint_gizmos_3d(
                 },
             );
 
-            transparent_phase.add(Transparent3d {
-                entity: (entity, *main_entity),
-                draw_function,
-                pipeline,
-                distance: 0.,
-                batch_range: 0..1,
-                extra_index: PhaseItemExtraIndex::None,
-                indexed: true,
-            });
+            transparent_phase.add(
+                *main_entity,
+                Transparent3d {
+                    entity: (entity, *main_entity),
+                    draw_function,
+                    pipeline,
+                    distance: 0.,
+                    batch_range: 0..1,
+                    extra_index: PhaseItemExtraIndex::None,
+                    indexed: true,
+                },
+            );
         }
     }
 }

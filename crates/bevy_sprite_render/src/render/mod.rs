@@ -545,20 +545,23 @@ pub fn queue_sprites(
             let sort_key = FloatOrd(extracted_sprite.transform.translation().z);
 
             // Add the item to the render phase
-            transparent_phase.add(Transparent2d {
-                draw_function: draw_sprite_function,
-                pipeline,
-                entity: (
-                    extracted_sprite.render_entity,
-                    extracted_sprite.main_entity.into(),
-                ),
-                sort_key,
-                // `batch_range` is calculated in `prepare_sprite_image_bind_groups`
-                batch_range: 0..0,
-                extra_index: PhaseItemExtraIndex::None,
-                extracted_index: index,
-                indexed: true,
-            });
+            transparent_phase.add(
+                extracted_sprite.main_entity.into(),
+                Transparent2d {
+                    draw_function: draw_sprite_function,
+                    pipeline,
+                    entity: (
+                        extracted_sprite.render_entity,
+                        extracted_sprite.main_entity.into(),
+                    ),
+                    sort_key,
+                    // `batch_range` is calculated in `prepare_sprite_image_bind_groups`
+                    batch_range: 0..0,
+                    extra_index: PhaseItemExtraIndex::None,
+                    extracted_index: index,
+                    indexed: true,
+                },
+            );
         }
     }
 }

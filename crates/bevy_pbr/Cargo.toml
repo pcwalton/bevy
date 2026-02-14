@@ -88,6 +88,7 @@ nonmax = "0.5"
 static_assertions = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 offset-allocator = "0.2"
+indexmap = { version = "2" }
 
 [lints]
 workspace = true

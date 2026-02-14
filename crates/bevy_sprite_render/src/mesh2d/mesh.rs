@@ -38,8 +38,7 @@ use bevy_render::{
     mesh::{allocator::MeshAllocator, RenderMesh, RenderMeshBufferInfo},
     render_asset::RenderAssets,
     render_phase::{
-        sweep_old_entities, PhaseItem, PhaseItemExtraIndex, RenderCommand, RenderCommandResult,
-        TrackedRenderPass,
+        PhaseItem, PhaseItemExtraIndex, RenderCommand, RenderCommandResult, TrackedRenderPass,
     },
     render_resource::{binding_types::uniform_buffer, *},
     renderer::RenderDevice,
@@ -89,11 +88,6 @@ impl Plugin for Mesh2dRenderPlugin {
                     Render,
                     (
                         check_views_need_specialization.in_set(PrepareAssets),
-                        (
-                            sweep_old_entities::<Opaque2d>,
-                            sweep_old_entities::<AlphaMask2d>,
-                        )
-                            .in_set(RenderSystems::QueueSweep),
                         batch_and_prepare_binned_render_phase::<Opaque2d, Mesh2dPipeline>
                             .in_set(RenderSystems::PrepareResources),
                         batch_and_prepare_binned_render_phase::<AlphaMask2d, Mesh2dPipeline>
