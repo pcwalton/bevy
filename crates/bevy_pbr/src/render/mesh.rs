@@ -815,7 +815,7 @@ pub struct RenderMeshInstanceGpu {
 
 #[derive(Default, Deref, DerefMut)]
 pub struct RenderMeshInstanceSharedThreadSafe(
-    [AtomicU32; RENDER_MESH_INSTANCE_SHARED_THREAD_SAFE_TYPED_SIZE_IN_WORDS],
+    [AtomicU32; RENDER_MESH_INSTANCE_SHARED_THREAD_SAFE_TYPED_WORD_SIZE],
 );
 
 /// This is only used for layout; we don't actually construct one of these.
@@ -836,7 +836,7 @@ struct RenderMeshInstanceSharedThreadSafeTyped {
 
 #[derive(Default, Deref, DerefMut)]
 pub struct RenderMeshInstanceGpuThreadSafe(
-    [AtomicU32; RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_SIZE_IN_WORDS],
+    [AtomicU32; RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_WORD_SIZE],
 );
 
 /// This is only used for layout; we don't actually construct one of these.
@@ -864,19 +864,19 @@ const MESH_ASSET_ID_FLAT_MODE_UUID: u32 = 1;
 
 const RENDER_MESH_INSTANCE_SHARED_THREAD_SAFE_TYPED_SIZE: usize =
     size_of::<RenderMeshInstanceSharedThreadSafeTyped>();
-const RENDER_MESH_INSTANCE_SHARED_THREAD_SAFE_TYPED_SIZE_IN_WORDS: usize =
+const RENDER_MESH_INSTANCE_SHARED_THREAD_SAFE_TYPED_WORD_SIZE: usize =
     RENDER_MESH_INSTANCE_SHARED_THREAD_SAFE_TYPED_SIZE / 4;
 
-const MESH_ASSET_ID_FLAT_SIZE: usize = size_of::<MeshAssetIdFlat>();
-const MATERIAL_BINDING_ID_SIZE: usize = size_of::<MaterialBindingId>();
-const LIGHTMAP_SLAB_INDEX_FLAT_SIZE: usize = size_of::<LightmapSlabIndexFlat>();
-const VEC3_SIZE: usize = size_of::<Vec3>();
-const U32_SIZE: usize = size_of::<u32>();
-const RENDER_MESH_INSTANCE_FLAGS_SIZE: usize = size_of::<RenderMeshInstanceFlags>();
+const MESH_ASSET_ID_FLAT_WORD_SIZE: usize = size_of::<MeshAssetIdFlat>() / 4;
+const MATERIAL_BINDING_ID_WORD_SIZE: usize = size_of::<MaterialBindingId>() / 4;
+const LIGHTMAP_SLAB_INDEX_FLAT_WORD_SIZE: usize = size_of::<LightmapSlabIndexFlat>() / 4;
+const VEC3_WORD_SIZE: usize = size_of::<Vec3>() / 4;
+const U32_WORD_SIZE: usize = size_of::<u32>() / 4;
+const RENDER_MESH_INSTANCE_FLAGS_WORD_SIZE: usize = size_of::<RenderMeshInstanceFlags>() / 4;
 
 const RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_SIZE: usize =
     size_of::<RenderMeshInstanceGpuThreadSafeTyped>();
-const RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_SIZE_IN_WORDS: usize =
+const RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_WORD_SIZE: usize =
     RENDER_MESH_INSTANCE_GPU_THREAD_SAFE_TYPED_SIZE / 4;
 
 #[inline]
@@ -884,7 +884,7 @@ fn extract_from_blob<T, const S: usize>(blob: &[AtomicU32], start: usize) -> T
 where
     T: Pod,
 {
-    let words: [u32; S] = array::from_fn(|i| blob[start + i].load(Ordering::Relaxed));
+    let words: [u32; S] = array::from_fn(|i| blob[start / 4 + i].load(Ordering::Relaxed));
     *bytemuck::must_cast_ref(&words)
 }
 
@@ -895,7 +895,7 @@ where
 {
     let words: [u32; S] = bytemuck::must_cast(value);
     for i in 0..S {
-        blob[start + i].store(words[i], Ordering::Relaxed);
+        blob[start / 4 + i].store(words[i], Ordering::Relaxed);
     }
 }
 
@@ -908,7 +908,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn mesh_asset_id(&self) -> AssetId<Mesh> {
-        extract_from_blob::<MeshAssetIdFlat, MESH_ASSET_ID_FLAT_SIZE>(
+        extract_from_blob::<MeshAssetIdFlat, MESH_ASSET_ID_FLAT_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceSharedThreadSafeTyped, asset_id),
         )
@@ -917,7 +917,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn set_mesh_asset_id(&self, value: AssetId<Mesh>) {
-        insert_into_blob::<MeshAssetIdFlat, MESH_ASSET_ID_FLAT_SIZE>(
+        insert_into_blob::<MeshAssetIdFlat, MESH_ASSET_ID_FLAT_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceSharedThreadSafeTyped, asset_id),
             value.into(),
@@ -926,7 +926,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn material_bindings_index(&self) -> MaterialBindingId {
-        extract_from_blob::<_, MATERIAL_BINDING_ID_SIZE>(
+        extract_from_blob::<_, MATERIAL_BINDING_ID_WORD_SIZE>(
             &self.0,
             offset_of!(
                 RenderMeshInstanceSharedThreadSafeTyped,
@@ -937,7 +937,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn set_material_bindings_index(&self, value: MaterialBindingId) {
-        insert_into_blob::<_, MATERIAL_BINDING_ID_SIZE>(
+        insert_into_blob::<_, MATERIAL_BINDING_ID_WORD_SIZE>(
             &self.0,
             offset_of!(
                 RenderMeshInstanceSharedThreadSafeTyped,
@@ -949,7 +949,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn lightmap_slab_index(&self) -> Option<LightmapSlabIndex> {
-        extract_from_blob::<LightmapSlabIndexFlat, LIGHTMAP_SLAB_INDEX_FLAT_SIZE>(
+        extract_from_blob::<LightmapSlabIndexFlat, LIGHTMAP_SLAB_INDEX_FLAT_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceSharedThreadSafeTyped, lightmap_slab_index),
         )
@@ -958,7 +958,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn set_lightmap_slab_index(&self, value: Option<LightmapSlabIndex>) {
-        insert_into_blob::<LightmapSlabIndexFlat, LIGHTMAP_SLAB_INDEX_FLAT_SIZE>(
+        insert_into_blob::<LightmapSlabIndexFlat, LIGHTMAP_SLAB_INDEX_FLAT_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceSharedThreadSafeTyped, lightmap_slab_index),
             value.into(),
@@ -967,7 +967,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn model_space_center(&self) -> Vec3 {
-        extract_from_blob::<_, VEC3_SIZE>(
+        extract_from_blob::<_, VEC3_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceSharedThreadSafeTyped, model_space_center),
         )
@@ -975,7 +975,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn set_model_space_center(&self, value: Vec3) {
-        insert_into_blob::<_, VEC3_SIZE>(
+        insert_into_blob::<_, VEC3_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceSharedThreadSafeTyped, model_space_center),
             value,
@@ -984,7 +984,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn tag(&self) -> u32 {
-        extract_from_blob::<_, U32_SIZE>(
+        extract_from_blob::<_, U32_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceSharedThreadSafeTyped, tag),
         )
@@ -992,7 +992,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn set_tag(&self, value: u32) {
-        insert_into_blob::<_, U32_SIZE>(
+        insert_into_blob::<_, U32_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceSharedThreadSafeTyped, tag),
             value,
@@ -1001,7 +1001,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn flags(&self) -> RenderMeshInstanceFlags {
-        extract_from_blob::<_, RENDER_MESH_INSTANCE_FLAGS_SIZE>(
+        extract_from_blob::<_, RENDER_MESH_INSTANCE_FLAGS_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceSharedThreadSafeTyped, flags),
         )
@@ -1009,7 +1009,7 @@ impl RenderMeshInstanceSharedThreadSafe {
 
     #[inline]
     pub fn set_flags(&self, value: RenderMeshInstanceFlags) {
-        insert_into_blob::<_, RENDER_MESH_INSTANCE_FLAGS_SIZE>(
+        insert_into_blob::<_, RENDER_MESH_INSTANCE_FLAGS_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceSharedThreadSafeTyped, flags),
             value,
@@ -1038,7 +1038,7 @@ impl RenderMeshInstanceGpuThreadSafe {
 
     #[inline]
     pub fn world_space_center(&self) -> Vec3 {
-        extract_from_blob::<_, VEC3_SIZE>(
+        extract_from_blob::<_, VEC3_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceGpuThreadSafeTyped, world_space_center),
         )
@@ -1046,7 +1046,7 @@ impl RenderMeshInstanceGpuThreadSafe {
 
     #[inline]
     pub fn set_world_space_center(&self, value: Vec3) {
-        insert_into_blob::<_, VEC3_SIZE>(
+        insert_into_blob::<_, VEC3_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceGpuThreadSafeTyped, world_space_center),
             value,
@@ -1055,7 +1055,7 @@ impl RenderMeshInstanceGpuThreadSafe {
 
     #[inline]
     pub fn current_uniform_index(&self) -> u32 {
-        extract_from_blob::<_, U32_SIZE>(
+        extract_from_blob::<_, U32_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceGpuThreadSafeTyped, current_uniform_index),
         )
@@ -1063,7 +1063,7 @@ impl RenderMeshInstanceGpuThreadSafe {
 
     #[inline]
     pub fn set_current_uniform_index(&self, value: u32) {
-        insert_into_blob::<_, U32_SIZE>(
+        insert_into_blob::<_, U32_WORD_SIZE>(
             &self.0,
             offset_of!(RenderMeshInstanceGpuThreadSafeTyped, current_uniform_index),
             value,
