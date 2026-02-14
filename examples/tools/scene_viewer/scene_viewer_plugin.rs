@@ -6,8 +6,10 @@
 use bevy::{
     camera_controller::free_camera::FreeCamera,
     gizmos::skinned_mesh_bounds::SkinnedMeshBoundsGizmoConfigGroup, gltf::Gltf,
-    input::common_conditions::input_just_pressed, prelude::*, scene::InstanceId,
+    input::common_conditions::input_just_pressed, platform::collections::HashMap, prelude::*,
+    scene::InstanceId,
 };
+use rand::seq::{IndexedRandom as _, SliceRandom};
 
 use std::{f32::consts::*, fmt};
 
@@ -52,6 +54,7 @@ Scene Controls:
     F           - toggle camera frusta
     J           - toggle skinned mesh joint bounding boxes
     C           - cycle through the camera controller and any cameras loaded from the scene
+    M           - shuffle materials
 
     Space       - Play/Pause animation
     Enter       - Cycle through animations
@@ -78,6 +81,7 @@ impl Plugin for SceneViewerPlugin {
                         toggle_bounding_boxes.run_if(input_just_pressed(KeyCode::KeyB)),
                         toggle_camera_frusta.run_if(input_just_pressed(KeyCode::KeyF)),
                         toggle_skinned_mesh_bounds.run_if(input_just_pressed(KeyCode::KeyJ)),
+                        shuffle_materials.run_if(input_just_pressed(KeyCode::KeyM)),
                     )
                         .chain(),
                 ),
@@ -98,6 +102,40 @@ fn toggle_skinned_mesh_bounds(mut config: ResMut<GizmoConfigStore>) {
         .config_mut::<SkinnedMeshBoundsGizmoConfigGroup>()
         .1
         .draw_all ^= true;
+}
+
+fn shuffle_materials(mut q_materials: Query<(Entity, &mut MeshMaterial3d<StandardMaterial>)>) {
+    let mut rng = rand::rng();
+    let mut all_assets: HashMap<AssetId<StandardMaterial>, MeshMaterial3d<StandardMaterial>> =
+        q_materials
+            .iter()
+            .map(|(_, mesh_material)| (mesh_material.id(), mesh_material.clone()))
+            .collect();
+
+    let mut entities: Vec<_> = q_materials.iter().map(|(entity, _)| entity).collect();
+    let mut all_asset_ids: Vec<_> = all_assets.keys().cloned().collect();
+    entities.shuffle(&mut rng);
+    let mut all_asset_ids_shuffled = all_asset_ids.clone();
+    all_asset_ids_shuffled.shuffle(&mut rng);
+
+    while let Some(asset_id) = all_asset_ids_shuffled.pop() {
+        if let Some(entity) = entities.pop() {
+            if let Ok((_, ref mut material_slot)) = q_materials.get_mut(entity) {
+                if let Some(material) = all_assets.get(&asset_id) {
+                    **material_slot = (*material).clone();
+                }
+            }
+        }
+    }
+    while let Some(entity) = entities.pop() {
+        if let Some(asset_id) = all_asset_ids.choose(&mut rng) {
+            if let Ok((_, ref mut material_slot)) = q_materials.get_mut(entity) {
+                if let Some(material) = all_assets.get(asset_id) {
+                    **material_slot = (*material).clone();
+                }
+            }
+        }
+    }
 }
 
 fn scene_load_check(

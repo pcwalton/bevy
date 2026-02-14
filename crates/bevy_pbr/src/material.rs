@@ -940,6 +940,10 @@ impl DirtySpecializations {
                             .entities
                             .binary_search_by_key(*main_entity, |(_, main_entity)| *main_entity)
                             .is_ok()
+                            && render_visible_mesh_entities
+                                .added_entities
+                                .binary_search_by_key(*main_entity, |(_, main_entity)| *main_entity)
+                                .is_err()
                     })),
             )
         }
@@ -1272,6 +1276,21 @@ pub fn queue_material_meshes(
             transmissive_phase.remove(main_entity);
             transparent_phase.remove(main_entity);
         }
+
+        /*
+        if !render_visible_mesh_entities.added_entities.is_empty() {
+            println!("added={:?}", render_visible_mesh_entities.added_entities);
+        }
+        if !render_visible_mesh_entities.removed_entities.is_empty() {
+            println!(
+                "removed={:?}",
+                render_visible_mesh_entities.removed_entities
+            );
+        }
+        if !dirty_specializations.entities.is_empty() {
+            println!("respecialized={:?}", dirty_specializations.entities);
+        }
+        */
 
         // Now iterate through all newly-visible entities and those needing respecialization.
         for &visible_entity in dirty_specializations
