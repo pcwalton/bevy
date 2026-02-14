@@ -1012,6 +1012,7 @@ pub(crate) struct SpecializeMaterialMeshesSystemParam<'w, 's> {
     view_key_cache: Res<'w, ViewKeyCache>,
     entity_specialization_ticks: Res<'w, EntitySpecializationTicks>,
     view_specialization_ticks: Res<'w, ViewSpecializationTicks>,
+    entities_needing_specialization_this_frame: Res<'w, EntitiesNeedingSpecializationThisFrame>,
     specialized_material_pipeline_cache: Res<'w, SpecializedMaterialPipelineCache>,
     this_run: SystemChangeTick,
 }
@@ -1043,6 +1044,7 @@ pub(crate) fn specialize_material_meshes(
             view_key_cache,
             entity_specialization_ticks,
             view_specialization_ticks,
+            entities_needing_specialization_this_frame,
             specialized_material_pipeline_cache,
             this_run: system_change_tick,
         } = state.get(world);
@@ -1070,23 +1072,33 @@ pub(crate) fn specialize_material_meshes(
             let view_specialized_material_pipeline_cache =
                 specialized_material_pipeline_cache.get(&view.retained_view_entity);
 
-            for (_, visible_entity) in visible_entities.iter::<Mesh3d>() {
+            for visible_entity in visible_entities
+                .get::<Mesh3d>()
+                .iter()
+                .flat_map(|visible_entities| {
+                    visible_entities
+                        .added_entities
+                        .iter()
+                        .map(|(_, main_entity)| *main_entity)
+                })
+                .chain(entities_needing_specialization_this_frame.iter().copied())
+            {
                 let Some(material_instance) =
-                    render_material_instances.instances.get(visible_entity)
+                    render_material_instances.instances.get(&visible_entity)
                 else {
                     continue;
                 };
                 let Some(mesh_instance) =
-                    render_mesh_instances.render_mesh_queue_data(*visible_entity)
+                    render_mesh_instances.render_mesh_queue_data(visible_entity)
                 else {
                     continue;
                 };
                 let entity_tick = entity_specialization_ticks
-                    .get(visible_entity)
+                    .get(&visible_entity)
                     .unwrap()
                     .system_tick;
                 let last_specialized_tick = view_specialized_material_pipeline_cache
-                    .and_then(|cache| cache.get(visible_entity))
+                    .and_then(|cache| cache.get(&visible_entity))
                     .map(|(tick, _)| *tick);
                 let needs_specialization = last_specialized_tick.is_none_or(|tick| {
                     view_tick.is_newer_than(tick, this_run)
@@ -1112,7 +1124,7 @@ pub(crate) fn specialize_material_meshes(
                     | MeshPipelineKey::from_bits_retain(mesh.key_bits.bits())
                     | mesh_pipeline_key_bits;
 
-                if let Some(lightmap) = render_lightmaps.render_lightmaps.get(visible_entity) {
+                if let Some(lightmap) = render_lightmaps.render_lightmaps.get(&visible_entity) {
                     mesh_key |= MeshPipelineKey::LIGHTMAPPED;
 
                     if lightmap.bicubic_sampling {
@@ -1120,8 +1132,7 @@ pub(crate) fn specialize_material_meshes(
                     }
                 }
 
-                if render_visibility_ranges
-                    .entity_has_crossfading_visibility_ranges(*visible_entity)
+                if render_visibility_ranges.entity_has_crossfading_visibility_ranges(visible_entity)
                 {
                     mesh_key |= MeshPipelineKey::VISIBILITY_RANGE_DITHER;
                 }
@@ -1142,7 +1153,7 @@ pub(crate) fn specialize_material_meshes(
                 }
 
                 work_items.push(SpecializationWorkItem {
-                    visible_entity: *visible_entity,
+                    visible_entity,
                     retained_view_entity: view.retained_view_entity,
                     mesh_key,
                     layout: mesh.layout.clone(),
@@ -1194,6 +1205,7 @@ pub fn queue_material_meshes(
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
     views: Query<(&ExtractedView, &RenderVisibleEntities)>,
     specialized_material_pipeline_cache: ResMut<SpecializedMaterialPipelineCache>,
+    entities_needing_specialization_this_frame: Res<EntitiesNeedingSpecializationThisFrame>,
 ) {
     for (view, visible_entities) in &views {
         let (
@@ -1218,26 +1230,36 @@ pub fn queue_material_meshes(
         };
 
         let rangefinder = view.rangefinder3d();
-        for (render_entity, visible_entity) in visible_entities.iter::<Mesh3d>() {
+        for visible_entity in visible_entities
+            .get::<Mesh3d>()
+            .iter()
+            .flat_map(|visible_entities| {
+                visible_entities
+                    .added_entities
+                    .iter()
+                    .map(|(_, main_entity)| *main_entity)
+            })
+            .chain(entities_needing_specialization_this_frame.iter().copied())
+        {
             let Some((current_change_tick, pipeline_id)) = view_specialized_material_pipeline_cache
-                .get(visible_entity)
+                .get(&visible_entity)
                 .map(|(current_change_tick, pipeline_id)| (*current_change_tick, *pipeline_id))
             else {
                 continue;
             };
 
             // Skip the entity if it's cached in a bin and up to date.
-            if opaque_phase.validate_cached_entity(*visible_entity, current_change_tick)
-                || alpha_mask_phase.validate_cached_entity(*visible_entity, current_change_tick)
+            if opaque_phase.validate_cached_entity(visible_entity, current_change_tick)
+                || alpha_mask_phase.validate_cached_entity(visible_entity, current_change_tick)
             {
                 continue;
             }
 
-            let Some(material_instance) = render_material_instances.instances.get(visible_entity)
+            let Some(material_instance) = render_material_instances.instances.get(&visible_entity)
             else {
                 continue;
             };
-            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*visible_entity)
+            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(visible_entity)
             else {
                 continue;
             };
@@ -1259,7 +1281,7 @@ pub fn queue_material_meshes(
                         continue;
                     };
                     transmissive_phase.add(Transmissive3d {
-                        entity: (*render_entity, *visible_entity),
+                        entity: (Entity::PLACEHOLDER, visible_entity),
                         draw_function,
                         pipeline: pipeline_id,
                         distance,
@@ -1274,7 +1296,7 @@ pub fn queue_material_meshes(
                         // a bin, we still want to update its cache entry. That
                         // way, we know we don't need to re-examine it in future
                         // frames.
-                        opaque_phase.update_cache(*visible_entity, None, current_change_tick);
+                        opaque_phase.update_cache(visible_entity, None, current_change_tick);
                         continue;
                     }
                     let Some(draw_function) = material
@@ -1297,7 +1319,7 @@ pub fn queue_material_meshes(
                     opaque_phase.add(
                         batch_set_key,
                         bin_key,
-                        (*render_entity, *visible_entity),
+                        (Entity::PLACEHOLDER, visible_entity),
                         mesh_instance.current_uniform_index,
                         BinnedRenderPhaseType::mesh(
                             mesh_instance.should_batch(),
@@ -1327,7 +1349,7 @@ pub fn queue_material_meshes(
                     alpha_mask_phase.add(
                         batch_set_key,
                         bin_key,
-                        (*render_entity, *visible_entity),
+                        (Entity::PLACEHOLDER, visible_entity),
                         mesh_instance.current_uniform_index,
                         BinnedRenderPhaseType::mesh(
                             mesh_instance.should_batch(),
@@ -1346,7 +1368,7 @@ pub fn queue_material_meshes(
                         continue;
                     };
                     transparent_phase.add(Transparent3d {
-                        entity: (*render_entity, *visible_entity),
+                        entity: (Entity::PLACEHOLDER, visible_entity),
                         draw_function,
                         pipeline: pipeline_id,
                         distance,

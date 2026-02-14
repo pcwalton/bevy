@@ -731,7 +731,10 @@ pub fn specialize_material2d_meshes<M: Material2d>(
             .entry(*view_entity)
             .or_default();
 
-        for (_, visible_entity) in visible_entities.iter::<Mesh2d>() {
+        let Some(visible_entities) = visible_entities.get::<Mesh2d>() else {
+            continue;
+        };
+        for (_, visible_entity) in visible_entities.entities.iter() {
             let Some(material_asset_id) = render_material_instances.get(visible_entity) else {
                 continue;
             };
@@ -824,7 +827,10 @@ pub fn queue_material2d_meshes<M: Material2d>(
             continue;
         };
 
-        for (render_entity, visible_entity) in visible_entities.iter::<Mesh2d>() {
+        let Some(visible_entities) = visible_entities.get::<Mesh2d>() else {
+            continue;
+        };
+        for (render_entity, visible_entity) in visible_entities.entities.iter() {
             let Some((current_change_tick, pipeline_id)) = view_specialized_material_pipeline_cache
                 .get(visible_entity)
                 .map(|(current_change_tick, pipeline_id)| (*current_change_tick, *pipeline_id))

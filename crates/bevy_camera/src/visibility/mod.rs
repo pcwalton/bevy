@@ -764,6 +764,10 @@ pub fn check_visibility(
                 visible_entities.get_mut(*class).append(entities);
             }
         }
+
+        for visible_entities in visible_entities.entities.values_mut() {
+            visible_entities.sort_unstable();
+        }
     }
 }
 

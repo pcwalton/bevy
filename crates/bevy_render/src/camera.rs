@@ -1,3 +1,5 @@
+use core::mem;
+
 use crate::{
     batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport},
     extract_component::{ExtractComponent, ExtractComponentPlugin},
@@ -451,8 +453,9 @@ pub fn extract_cameras(
         )>,
     >,
     primary_window: Extract<Query<Entity, With<PrimaryWindow>>>,
+    mut existing_render_visible_entities: Query<&mut RenderVisibleEntities>,
     gpu_preprocessing_support: Res<GpuPreprocessingSupport>,
-    mapper: Extract<Query<&RenderEntity>>,
+    mapper: Extract<Query<RenderEntity>>,
 ) {
     let primary_window = primary_window.iter().next();
     type ExtractedCameraComponents = (
@@ -515,26 +518,21 @@ pub fn extract_cameras(
                 continue;
             }
 
-            let render_visible_entities = RenderVisibleEntities {
-                entities: visible_entities
+            let mut render_visible_entities =
+                match existing_render_visible_entities.get_mut(render_entity) {
+                    Ok(ref mut existing_render_visible_entities) => {
+                        mem::take(&mut **existing_render_visible_entities)
+                    }
+                    Err(_) => RenderVisibleEntities::default(),
+                };
+
+            for (visibility_class, visible_mesh_entities) in visible_entities.entities.iter() {
+                render_visible_entities
                     .entities
-                    .iter()
-                    .map(|(type_id, entities)| {
-                        let entities = entities
-                            .iter()
-                            .map(|entity| {
-                                let render_entity = mapper
-                                    .get(*entity)
-                                    .cloned()
-                                    .map(|entity| entity.id())
-                                    .unwrap_or(Entity::PLACEHOLDER);
-                                (render_entity, (*entity).into())
-                            })
-                            .collect();
-                        (*type_id, entities)
-                    })
-                    .collect(),
-            };
+                    .entry(*visibility_class)
+                    .or_default()
+                    .update_from(&mapper, visible_mesh_entities);
+            }
 
             let mut commands = commands.entity(render_entity);
             commands.insert((

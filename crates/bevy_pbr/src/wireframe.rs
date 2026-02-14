@@ -1,7 +1,7 @@
 use crate::{
-    DrawMesh, MeshPipeline, MeshPipelineKey, RenderLightmaps, RenderMeshInstanceFlags,
-    RenderMeshInstances, SetMeshBindGroup, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup,
-    ViewKeyCache, ViewSpecializationTicks,
+    DrawMesh, EntitiesNeedingSpecializationThisFrame, MeshPipeline, MeshPipelineKey,
+    RenderLightmaps, RenderMeshInstanceFlags, RenderMeshInstances, SetMeshBindGroup,
+    SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup, ViewKeyCache, ViewSpecializationTicks,
 };
 use bevy_app::{App, Plugin, PostUpdate, Startup, Update};
 use bevy_asset::{
@@ -729,6 +729,7 @@ pub fn specialize_wireframes(
     view_key_cache: Res<ViewKeyCache>,
     entity_specialization_ticks: Res<WireframeEntitySpecializationTicks>,
     view_specialization_ticks: Res<ViewSpecializationTicks>,
+    entities_needing_specialization_this_frame: Res<EntitiesNeedingSpecializationThisFrame>,
     mut specialized_material_pipeline_cache: ResMut<SpecializedWireframePipelineCache>,
     mut pipelines: ResMut<SpecializedMeshPipelines<Wireframe3dPipeline>>,
     pipeline: Res<Wireframe3dPipeline>,
@@ -758,17 +759,27 @@ pub fn specialize_wireframes(
             .entry(view.retained_view_entity)
             .or_default();
 
-        for (_, visible_entity) in visible_entities.iter::<Mesh3d>() {
-            if !render_wireframe_instances.contains_key(visible_entity) {
+        for visible_entity in visible_entities
+            .get::<Mesh3d>()
+            .iter()
+            .flat_map(|visible_entities| {
+                visible_entities
+                    .added_entities
+                    .iter()
+                    .map(|(_, main_entity)| *main_entity)
+            })
+            .chain(entities_needing_specialization_this_frame.iter().copied())
+        {
+            if !render_wireframe_instances.contains_key(&visible_entity) {
                 continue;
             };
-            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*visible_entity)
+            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(visible_entity)
             else {
                 continue;
             };
-            let entity_tick = entity_specialization_ticks.get(visible_entity).unwrap();
+            let entity_tick = entity_specialization_ticks.get(&visible_entity).unwrap();
             let last_specialized_tick = view_specialized_material_pipeline_cache
-                .get(visible_entity)
+                .get(&visible_entity)
                 .map(|(tick, _)| *tick);
             let needs_specialization = last_specialized_tick.is_none_or(|tick| {
                 view_tick.is_newer_than(tick, ticks.this_run())
@@ -784,7 +795,7 @@ pub fn specialize_wireframes(
             let mut mesh_key = *view_key;
             mesh_key |= MeshPipelineKey::from_primitive_topology(mesh.primitive_topology());
 
-            if render_visibility_ranges.entity_has_crossfading_visibility_ranges(*visible_entity) {
+            if render_visibility_ranges.entity_has_crossfading_visibility_ranges(visible_entity) {
                 mesh_key |= MeshPipelineKey::VISIBILITY_RANGE_DITHER;
             }
 
@@ -811,7 +822,7 @@ pub fn specialize_wireframes(
             // present.
             if render_lightmaps
                 .render_lightmaps
-                .contains_key(visible_entity)
+                .contains_key(&visible_entity)
             {
                 mesh_key |= MeshPipelineKey::LIGHTMAPPED;
             }
@@ -827,7 +838,7 @@ pub fn specialize_wireframes(
             };
 
             view_specialized_material_pipeline_cache
-                .insert(*visible_entity, (ticks.this_run(), pipeline_id));
+                .insert(visible_entity, (ticks.this_run(), pipeline_id));
         }
     }
 
@@ -843,6 +854,7 @@ fn queue_wireframes(
     mesh_allocator: Res<MeshAllocator>,
     specialized_wireframe_pipeline_cache: Res<SpecializedWireframePipelineCache>,
     render_wireframe_instances: Res<RenderWireframeInstances>,
+    entities_needing_specialization_this_frame: Res<EntitiesNeedingSpecializationThisFrame>,
     mut wireframe_3d_phases: ResMut<ViewBinnedRenderPhases<Wireframe3d>>,
     mut views: Query<(&ExtractedView, &RenderVisibleEntities)>,
 ) {
@@ -858,22 +870,32 @@ fn queue_wireframes(
             continue;
         };
 
-        for (render_entity, visible_entity) in visible_entities.iter::<Mesh3d>() {
-            let Some(wireframe_instance) = render_wireframe_instances.get(visible_entity) else {
+        for visible_entity in visible_entities
+            .get::<Mesh3d>()
+            .iter()
+            .flat_map(|visible_entities| {
+                visible_entities
+                    .added_entities
+                    .iter()
+                    .map(|(_, main_entity)| *main_entity)
+            })
+            .chain(entities_needing_specialization_this_frame.iter().copied())
+        {
+            let Some(wireframe_instance) = render_wireframe_instances.get(&visible_entity) else {
                 continue;
             };
             let Some((current_change_tick, pipeline_id)) = view_specialized_material_pipeline_cache
-                .get(visible_entity)
+                .get(&visible_entity)
                 .map(|(current_change_tick, pipeline_id)| (*current_change_tick, *pipeline_id))
             else {
                 continue;
             };
 
             // Skip the entity if it's cached in a bin and up to date.
-            if wireframe_phase.validate_cached_entity(*visible_entity, current_change_tick) {
+            if wireframe_phase.validate_cached_entity(visible_entity, current_change_tick) {
                 continue;
             }
-            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*visible_entity)
+            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(visible_entity)
             else {
                 continue;
             };
@@ -891,7 +913,7 @@ fn queue_wireframes(
             wireframe_phase.add(
                 batch_set_key,
                 bin_key,
-                (*render_entity, *visible_entity),
+                (Entity::PLACEHOLDER, visible_entity),
                 mesh_instance.current_uniform_index,
                 BinnedRenderPhaseType::mesh(
                     mesh_instance.should_batch(),

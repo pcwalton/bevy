@@ -44,6 +44,7 @@ use bevy_render::occlusion_culling::{
     OcclusionCulling, OcclusionCullingSubview, OcclusionCullingSubviewEntities,
 };
 use bevy_render::sync_world::{MainEntityHashMap, MainEntityHashSet};
+use bevy_render::view::RenderVisibleMeshEntities;
 use bevy_render::{
     batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport},
     camera::SortedCameras,
@@ -442,7 +443,7 @@ pub fn extract_lights(
             .iter_mut()
             .zip(cubemap_visible_entities.iter())
         {
-            render_visible_mesh_entities.update_from(&mapper, visible_mesh_entities);
+            render_visible_mesh_entities.update_from(&mapper, &visible_mesh_entities.entities);
         }
 
         let extracted_point_light = ExtractedPointLight {
@@ -510,7 +511,7 @@ pub fn extract_lights(
                 }
                 Err(_) => RenderVisibleMeshEntities::default(),
             };
-        render_visible_entities.update_from(&mapper, visible_entities);
+        render_visible_entities.update_from(&mapper, &visible_entities.entities);
 
         let texel_size =
             2.0 * ops::tan(spot_light.outer_angle) / directional_light_shadow_map.size as f32;
@@ -622,7 +623,7 @@ pub fn extract_lights(
                     .iter_mut()
                     .zip(visible_mesh_entities_list.iter())
             {
-                render_visible_mesh_entities.update_from(&mapper, visible_mesh_entities);
+                render_visible_mesh_entities.update_from(&mapper, &visible_mesh_entities.entities);
             }
         }
 
@@ -710,53 +711,6 @@ pub fn extract_lights(
                 entity_commands.remove::<RWC>();
             }
         }
-    }
-}
-
-impl RenderVisibleMeshEntities {
-    fn update_from(
-        &mut self,
-        mapper: &Extract<Query<RenderEntity>>,
-        visible_mesh_entities: &VisibleMeshEntities,
-    ) {
-        let old_entities = mem::take(&mut self.entities);
-        self.added_entities.clear();
-        self.removed_entities.clear();
-
-        // March over the old and new visible entity lists in lockstep, diffing
-        // as we go to determine the added and removed entities. The lists must
-        // be sorted.
-        let mut old_entity_iter = old_entities.iter().peekable();
-        for &visible_main_entity in &visible_mesh_entities.entities {
-            let visible_main_entity = MainEntity::from(visible_main_entity);
-
-            // Mark entities as removed until we see the one we're looking at.
-            while old_entity_iter
-                .peek()
-                .is_some_and(|(_, main_entity)| *main_entity < visible_main_entity)
-            {
-                self.removed_entities.push(*old_entity_iter.next().unwrap());
-            }
-
-            // Add the visible entity to the list.
-            let render_entity = mapper
-                .get(*visible_main_entity)
-                .unwrap_or(Entity::PLACEHOLDER);
-            self.entities.push((render_entity, visible_main_entity));
-
-            if old_entity_iter
-                .peek()
-                .is_some_and(|&&(_, main_entity)| main_entity == visible_main_entity)
-            {
-                old_entity_iter.next();
-            } else {
-                self.added_entities
-                    .push((render_entity, visible_main_entity));
-            }
-        }
-
-        // Any entities we didn't see yet are removed, so drain them.
-        self.removed_entities.extend(old_entity_iter.copied());
     }
 }
 

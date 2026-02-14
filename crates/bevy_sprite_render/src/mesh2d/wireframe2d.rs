@@ -740,7 +740,10 @@ pub fn specialize_wireframes(
             .entry(view.retained_view_entity)
             .or_default();
 
-        for (_, visible_entity) in visible_entities.iter::<Mesh2d>() {
+        let Some(visible_entities) = visible_entities.get::<Mesh2d>() else {
+            continue;
+        };
+        for (_, visible_entity) in visible_entities.entities.iter() {
             if !render_wireframe_instances.contains_key(visible_entity) {
                 continue;
             };
@@ -806,7 +809,8 @@ fn queue_wireframes(
             continue;
         };
 
-        for (render_entity, visible_entity) in visible_entities.iter::<Mesh2d>() {
+        let Some(visible_entities) = visible_entities.get::<Mesh2d>() else { continue };
+        for (render_entity, visible_entity) in visible_entities.entities.iter() {
             let Some(wireframe_instance) = render_wireframe_instances.get(visible_entity) else {
                 continue;
             };
