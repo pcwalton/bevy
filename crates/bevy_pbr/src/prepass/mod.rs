@@ -4,12 +4,12 @@ use crate::{
     alpha_mode_pipeline_key, binding_arrays_are_usable, buffer_layout,
     collect_meshes_for_gpu_building, init_material_pipeline, set_mesh_motion_vector_flags,
     setup_morph_and_skinning_defs, skin, DeferredAlphaMaskDrawFunction, DeferredFragmentShader,
-    DeferredOpaqueDrawFunction, DeferredVertexShader, DrawMesh,
-    EntitiesNeedingSpecializationThisFrame, EntitySpecializationTicks, MaterialPipeline,
-    MeshLayouts, MeshPipeline, MeshPipelineKey, PreparedMaterial, PrepassAlphaMaskDrawFunction,
-    PrepassFragmentShader, PrepassOpaqueDepthOnlyDrawFunction, PrepassOpaqueDrawFunction,
-    PrepassVertexShader, RenderLightmaps, RenderMaterialInstances, RenderMeshInstanceFlags,
-    RenderMeshInstances, SetMaterialBindGroup, SetMeshBindGroup, ShadowView,
+    DeferredOpaqueDrawFunction, DeferredVertexShader, DirtySpecializations, DrawMesh,
+    MaterialPipeline, MeshLayouts, MeshPipeline, MeshPipelineKey, PreparedMaterial,
+    PrepassAlphaMaskDrawFunction, PrepassFragmentShader, PrepassOpaqueDepthOnlyDrawFunction,
+    PrepassOpaqueDrawFunction, PrepassVertexShader, RenderLightmaps, RenderMaterialInstances,
+    RenderMeshInstanceFlags, RenderMeshInstances, SetMaterialBindGroup, SetMeshBindGroup,
+    ShadowView,
 };
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetServer, Handle};
@@ -862,10 +862,7 @@ pub(crate) struct SpecializePrepassSystemParam<'w, 's> {
     alpha_mask_prepass_render_phases: Res<'w, ViewBinnedRenderPhases<AlphaMask3dPrepass>>,
     opaque_deferred_render_phases: Res<'w, ViewBinnedRenderPhases<Opaque3dDeferred>>,
     alpha_mask_deferred_render_phases: Res<'w, ViewBinnedRenderPhases<AlphaMask3dDeferred>>,
-    specialized_material_pipeline_cache: Res<'w, SpecializedPrepassMaterialPipelineCache>,
-    view_specialization_ticks: Res<'w, ViewPrepassSpecializationTicks>,
-    entity_specialization_ticks: Res<'w, EntitySpecializationTicks>,
-    entities_needing_specialization_this_frame: Res<'w, EntitiesNeedingSpecializationThisFrame>,
+    dirty_specializations: Res<'w, DirtySpecializations>,
     this_run: SystemChangeTick,
 }
 
@@ -896,10 +893,7 @@ pub(crate) fn specialize_prepass_material_meshes(
             alpha_mask_prepass_render_phases,
             opaque_deferred_render_phases,
             alpha_mask_deferred_render_phases,
-            specialized_material_pipeline_cache,
-            view_specialization_ticks,
-            entity_specialization_ticks,
-            entities_needing_specialization_this_frame,
+            dirty_specializations,
             this_run: system_change_tick,
         } = state.get(world);
 
@@ -924,23 +918,14 @@ pub(crate) fn specialize_prepass_material_meshes(
 
             all_views.insert(extracted_view.retained_view_entity);
 
-            let view_tick = view_specialization_ticks
-                .get(&extracted_view.retained_view_entity)
-                .unwrap();
-            let view_specialized_material_pipeline_cache =
-                specialized_material_pipeline_cache.get(&extracted_view.retained_view_entity);
+            let Some(render_visible_mesh_entities) = visible_entities.get::<Mesh3d>() else {
+                continue;
+            };
 
-            for visible_entity in visible_entities
-                .get::<Mesh3d>()
-                .iter()
-                .flat_map(|visible_entities| {
-                    visible_entities
-                        .added_entities
-                        .iter()
-                        .map(|(_, main_entity)| *main_entity)
-                })
-                .chain(entities_needing_specialization_this_frame.iter().copied())
-            {
+            for &visible_entity in dirty_specializations.iter_to_respecialize(
+                extracted_view.retained_view_entity,
+                render_visible_mesh_entities,
+            ) {
                 let Some(material_instance) =
                     render_material_instances.instances.get(&visible_entity)
                 else {
@@ -951,20 +936,6 @@ pub(crate) fn specialize_prepass_material_meshes(
                 else {
                     continue;
                 };
-                let entity_tick = entity_specialization_ticks
-                    .get(&visible_entity)
-                    .unwrap()
-                    .system_tick;
-                let last_specialized_tick = view_specialized_material_pipeline_cache
-                    .and_then(|cache| cache.get(&visible_entity))
-                    .map(|(tick, _, _)| *tick);
-                let needs_specialization = last_specialized_tick.is_none_or(|tick| {
-                    view_tick.is_newer_than(tick, this_run)
-                        || entity_tick.is_newer_than(tick, this_run)
-                });
-                if !needs_specialization {
-                    continue;
-                }
                 let Some(material) = render_materials.get(material_instance.asset_id) else {
                     continue;
                 };
@@ -1147,7 +1118,7 @@ pub fn queue_prepass_material_meshes(
     mut alpha_mask_deferred_render_phases: ResMut<ViewBinnedRenderPhases<AlphaMask3dDeferred>>,
     views: Query<(&ExtractedView, &RenderVisibleEntities)>,
     specialized_material_pipeline_cache: Res<SpecializedPrepassMaterialPipelineCache>,
-    entities_needing_specialization_this_frame: Res<EntitiesNeedingSpecializationThisFrame>,
+    dirty_specializations: Res<DirtySpecializations>,
 ) {
     for (extracted_view, visible_entities) in &views {
         let (
@@ -1177,39 +1148,39 @@ pub fn queue_prepass_material_meshes(
             continue;
         }
 
-        for visible_entity in visible_entities
-            .get::<Mesh3d>()
-            .iter()
-            .flat_map(|visible_entities| {
-                visible_entities
-                    .added_entities
-                    .iter()
-                    .map(|(_, main_entity)| *main_entity)
-            })
-            .chain(entities_needing_specialization_this_frame.iter().copied())
-        {
-            let Some(&(current_change_tick, pipeline_id, draw_function)) =
+        let Some(render_visible_mesh_entities) = visible_entities.get::<Mesh3d>() else {
+            continue;
+        };
+
+        // First, remove meshes that need to be respecialized, and those that were removed, from the bins.
+        for &main_entity in dirty_specializations.iter_to_remove(
+            extracted_view.retained_view_entity,
+            render_visible_mesh_entities,
+        ) {
+            if let Some(ref mut opaque_phase) = opaque_phase {
+                opaque_phase.remove(main_entity);
+            }
+            if let Some(ref mut alpha_mask_phase) = alpha_mask_phase {
+                alpha_mask_phase.remove(main_entity);
+            }
+            if let Some(ref mut opaque_deferred_phase) = opaque_deferred_phase {
+                opaque_deferred_phase.remove(main_entity);
+            }
+            if let Some(ref mut alpha_mask_deferred_phase) = alpha_mask_deferred_phase {
+                alpha_mask_deferred_phase.remove(main_entity);
+            }
+        }
+
+        // Now iterate through all newly-visible entities and those needing respecialization.
+        for &visible_entity in dirty_specializations.iter_to_respecialize(
+            extracted_view.retained_view_entity,
+            render_visible_mesh_entities,
+        ) {
+            let Some(&(_, pipeline_id, draw_function)) =
                 view_specialized_material_pipeline_cache.get(&visible_entity)
             else {
                 continue;
             };
-
-            // Skip the entity if it's cached in a bin and up to date.
-            if opaque_phase
-                .as_mut()
-                .is_some_and(|phase| phase.validate_cached_entity(visible_entity))
-                || alpha_mask_phase
-                    .as_mut()
-                    .is_some_and(|phase| phase.validate_cached_entity(visible_entity))
-                || opaque_deferred_phase
-                    .as_mut()
-                    .is_some_and(|phase| phase.validate_cached_entity(visible_entity))
-                || alpha_mask_deferred_phase
-                    .as_mut()
-                    .is_some_and(|phase| phase.validate_cached_entity(visible_entity))
-            {
-                continue;
-            }
 
             let Some(material_instance) = render_material_instances.instances.get(&visible_entity)
             else {

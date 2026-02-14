@@ -14,7 +14,7 @@ use std::ops::Range;
 
 use bevy::camera::Viewport;
 use bevy::math::Affine3Ext;
-use bevy::pbr::{SetMeshViewEmptyBindGroup, ViewKeyCache};
+use bevy::pbr::{DirtySpecializations, SetMeshViewEmptyBindGroup, ViewKeyCache};
 use bevy::{
     camera::MainPassResolutionOverride,
     core_pipeline::{core_3d::main_opaque_pass_3d, schedule::Core3d, Core3dSystems},
@@ -56,6 +56,8 @@ use bevy::{
         Extract, Render, RenderApp, RenderDebugFlags, RenderStartup, RenderSystems,
     },
 };
+use bevy_ecs::entity::EntityHash;
+use indexmap::IndexMap;
 use nonmax::NonMaxU32;
 
 const SHADER_ASSET_PATH: &str = "shaders/custom_stencil.wgsl";
@@ -300,13 +302,15 @@ impl PhaseItem for Stencil3d {
 impl SortedPhaseItem for Stencil3d {
     type SortKey = FloatOrd;
 
+    const IS_RETAINED: bool = true;
+
     #[inline]
     fn sort_key(&self) -> Self::SortKey {
         self.sort_key
     }
 
     #[inline]
-    fn sort(items: &mut [Self]) {
+    fn sort(items: &mut IndexMap<MainEntity, Stencil3d, EntityHash>) {
         // bevy normally uses radsort instead of the std slice::sort_by_key
         // radsort is a stable radix sort that performed better than `slice::sort_by_key` or `slice::sort_unstable_by_key`.
         // Since it is not re-exported by bevy, we just use the std sort for the purpose of the example
@@ -499,6 +503,7 @@ fn queue_custom_meshes(
     mut custom_render_phases: ResMut<ViewSortedRenderPhases<Stencil3d>>,
     mut views: Query<(&ExtractedView, &RenderVisibleEntities)>,
     view_key_cache: Res<ViewKeyCache>,
+    dirty_specializations: Res<DirtySpecializations>,
     has_marker: Query<(), With<DrawStencil>>,
 ) {
     for (view, visible_entities) in &mut views {
@@ -511,14 +516,23 @@ fn queue_custom_meshes(
             continue;
         };
 
+        // First, remove meshes that need to be respecialized, and those that were removed, from the bins.
+        for &main_entity in dirty_specializations
+            .iter_to_remove(view.retained_view_entity, render_visible_mesh_entities)
+        {
+            custom_phase.remove(main_entity);
+        }
+
         let rangefinder = view.rangefinder3d();
         // Since our phase can work on any 3d mesh we can reuse the default mesh 3d filter
-        for (render_entity, visible_entity) in visible_entities.iter::<Mesh3d>() {
+        for &visible_entity in dirty_specializations
+            .iter_to_respecialize(view.retained_view_entity, render_visible_mesh_entities)
+        {
             // We only want meshes with the marker component to be queued to our phase.
             if has_marker.get(*render_entity).is_err() {
                 continue;
             }
-            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*visible_entity)
+            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(visible_entity)
             else {
                 continue;
             };
@@ -548,17 +562,20 @@ fn queue_custom_meshes(
             let distance = rangefinder.distance(&mesh_instance.center);
             // At this point we have all the data we need to create a phase item and add it to our
             // phase
-            custom_phase.add(Stencil3d {
-                // Sort the data based on the distance to the view
-                sort_key: FloatOrd(distance),
-                entity: (*render_entity, *visible_entity),
-                pipeline: pipeline_id,
-                draw_function: draw_custom,
-                // Sorted phase items aren't batched
-                batch_range: 0..1,
-                extra_index: PhaseItemExtraIndex::None,
-                indexed: mesh.indexed(),
-            });
+            custom_phase.add(
+                visible_entity,
+                Stencil3d {
+                    // Sort the data based on the distance to the view
+                    sort_key: FloatOrd(distance),
+                    entity: (Entity::PLACEHOLDER, visible_entity),
+                    pipeline: pipeline_id,
+                    draw_function: draw_custom,
+                    // Sorted phase items aren't batched
+                    batch_range: 0..1,
+                    extra_index: PhaseItemExtraIndex::None,
+                    indexed: mesh.indexed(),
+                },
+            );
         }
     }
 }

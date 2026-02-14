@@ -1,7 +1,6 @@
 use crate::{
     init_mesh_2d_pipeline, DrawMesh2d, Mesh2d, Mesh2dPipeline, Mesh2dPipelineKey,
     RenderMesh2dInstances, SetMesh2dBindGroup, SetMesh2dViewBindGroup, ViewKeyCache,
-    ViewSpecializationTicks,
 };
 use bevy_app::{App, Plugin, PostUpdate};
 use bevy_asset::prelude::AssetChanged;
@@ -639,7 +638,7 @@ pub struct SpecializedMaterial2dPipelineCache<M> {
 pub struct SpecializedMaterial2dViewPipelineCache<M> {
     // material entity -> (tick, pipeline_id)
     #[deref]
-    map: MainEntityHashMap<(Tick, CachedRenderPipelineId)>,
+    map: MainEntityHashMap<CachedRenderPipelineId>,
     marker: PhantomData<M>,
 }
 
@@ -703,9 +702,6 @@ pub fn specialize_material2d_meshes<M: Material2d>(
     alpha_mask_render_phases: Res<ViewBinnedRenderPhases<AlphaMask2d>>,
     views: Query<(&MainEntity, &ExtractedView, &RenderVisibleEntities)>,
     view_key_cache: Res<ViewKeyCache>,
-    entity_specialization_ticks: Res<EntitySpecializationTickPair<M>>,
-    view_specialization_ticks: Res<ViewSpecializationTicks>,
-    ticks: SystemChangeTick,
     mut specialized_material_pipeline_cache: ResMut<SpecializedMaterial2dPipelineCache<M>>,
 ) where
     M::Data: PartialEq + Eq + Hash + Clone,
@@ -726,7 +722,6 @@ pub fn specialize_material2d_meshes<M: Material2d>(
             continue;
         };
 
-        let view_tick = view_specialization_ticks.get(view_entity).unwrap();
         let view_specialized_material_pipeline_cache = specialized_material_pipeline_cache
             .entry(*view_entity)
             .or_default();
@@ -741,20 +736,6 @@ pub fn specialize_material2d_meshes<M: Material2d>(
             let Some(mesh_instance) = render_mesh_instances.get_mut(visible_entity) else {
                 continue;
             };
-            let Some(entity_tick) = entity_specialization_ticks.get(visible_entity) else {
-                error!("{visible_entity:?} is missing specialization tick. Spawning Meshes in PostUpdate or later is currently not fully supported.");
-                continue;
-            };
-            let last_specialized_tick = view_specialized_material_pipeline_cache
-                .get(visible_entity)
-                .map(|(tick, _)| *tick);
-            let needs_specialization = last_specialized_tick.is_none_or(|tick| {
-                view_tick.is_newer_than(tick, ticks.this_run())
-                    || entity_tick.is_newer_than(tick, ticks.this_run())
-            });
-            if !needs_specialization {
-                continue;
-            }
             let Some(material_2d) = render_materials.get(*material_asset_id) else {
                 continue;
             };
@@ -783,8 +764,7 @@ pub fn specialize_material2d_meshes<M: Material2d>(
                 }
             };
 
-            view_specialized_material_pipeline_cache
-                .insert(*visible_entity, (ticks.this_run(), pipeline_id));
+            view_specialized_material_pipeline_cache.insert(*visible_entity, pipeline_id);
         }
     }
 }
@@ -831,19 +811,12 @@ pub fn queue_material2d_meshes<M: Material2d>(
             continue;
         };
         for (render_entity, visible_entity) in visible_entities.entities.iter() {
-            let Some((current_change_tick, pipeline_id)) = view_specialized_material_pipeline_cache
+            let Some(pipeline_id) = view_specialized_material_pipeline_cache
                 .get(visible_entity)
-                .map(|(current_change_tick, pipeline_id)| (*current_change_tick, *pipeline_id))
+                .copied()
             else {
                 continue;
             };
-
-            // Skip the entity if it's cached in a bin and up to date.
-            if opaque_phase.validate_cached_entity(*visible_entity)
-                || alpha_mask_phase.validate_cached_entity(*visible_entity)
-            {
-                continue;
-            }
 
             let Some(material_asset_id) = render_material_instances.get(visible_entity) else {
                 continue;

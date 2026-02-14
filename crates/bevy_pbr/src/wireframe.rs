@@ -1,7 +1,7 @@
 use crate::{
-    DrawMesh, EntitiesNeedingSpecializationThisFrame, MeshPipeline, MeshPipelineKey,
-    RenderLightmaps, RenderMeshInstanceFlags, RenderMeshInstances, SetMeshBindGroup,
-    SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup, ViewKeyCache, ViewSpecializationTicks,
+    DirtySpecializations, DrawMesh, MeshPipeline, MeshPipelineKey, RenderLightmaps,
+    RenderMeshInstanceFlags, RenderMeshInstances, SetMeshBindGroup, SetMeshViewBindGroup,
+    SetMeshViewBindingArrayBindGroup, ViewKeyCache,
 };
 use bevy_app::{App, Plugin, PostUpdate, Startup, Update};
 use bevy_asset::{
@@ -498,7 +498,7 @@ pub struct SpecializedWireframePipelineCache {
 pub struct SpecializedWireframeViewPipelineCache {
     // material entity -> (tick, pipeline_id)
     #[deref]
-    map: MainEntityHashMap<(Tick, CachedRenderPipelineId)>,
+    map: MainEntityHashMap<CachedRenderPipelineId>,
 }
 
 #[derive(Resource)]
@@ -727,15 +727,12 @@ pub fn specialize_wireframes(
     wireframe_phases: Res<ViewBinnedRenderPhases<Wireframe3d>>,
     views: Query<(&ExtractedView, &RenderVisibleEntities)>,
     view_key_cache: Res<ViewKeyCache>,
-    entity_specialization_ticks: Res<WireframeEntitySpecializationTicks>,
-    view_specialization_ticks: Res<ViewSpecializationTicks>,
-    entities_needing_specialization_this_frame: Res<EntitiesNeedingSpecializationThisFrame>,
+    dirty_specializations: Res<DirtySpecializations>,
     mut specialized_material_pipeline_cache: ResMut<SpecializedWireframePipelineCache>,
     mut pipelines: ResMut<SpecializedMeshPipelines<Wireframe3dPipeline>>,
     pipeline: Res<Wireframe3dPipeline>,
     pipeline_cache: Res<PipelineCache>,
     render_lightmaps: Res<RenderLightmaps>,
-    ticks: SystemChangeTick,
 ) {
     // Record the retained IDs of all views so that we can expire old
     // pipeline IDs.
@@ -752,23 +749,16 @@ pub fn specialize_wireframes(
             continue;
         };
 
-        let view_tick = view_specialization_ticks
-            .get(&view.retained_view_entity)
-            .unwrap();
         let view_specialized_material_pipeline_cache = specialized_material_pipeline_cache
             .entry(view.retained_view_entity)
             .or_default();
 
-        for visible_entity in visible_entities
-            .get::<Mesh3d>()
-            .iter()
-            .flat_map(|visible_entities| {
-                visible_entities
-                    .added_entities
-                    .iter()
-                    .map(|(_, main_entity)| *main_entity)
-            })
-            .chain(entities_needing_specialization_this_frame.iter().copied())
+        let Some(render_visible_mesh_entities) = visible_entities.get::<Mesh3d>() else {
+            continue;
+        };
+
+        for &visible_entity in dirty_specializations
+            .iter_to_respecialize(view.retained_view_entity, render_visible_mesh_entities)
         {
             if !render_wireframe_instances.contains_key(&visible_entity) {
                 continue;
@@ -777,17 +767,6 @@ pub fn specialize_wireframes(
             else {
                 continue;
             };
-            let entity_tick = entity_specialization_ticks.get(&visible_entity).unwrap();
-            let last_specialized_tick = view_specialized_material_pipeline_cache
-                .get(&visible_entity)
-                .map(|(tick, _)| *tick);
-            let needs_specialization = last_specialized_tick.is_none_or(|tick| {
-                view_tick.is_newer_than(tick, ticks.this_run())
-                    || entity_tick.is_newer_than(tick, ticks.this_run())
-            });
-            if !needs_specialization {
-                continue;
-            }
             let Some(mesh) = render_meshes.get(mesh_instance.mesh_asset_id) else {
                 continue;
             };
@@ -837,8 +816,7 @@ pub fn specialize_wireframes(
                 }
             };
 
-            view_specialized_material_pipeline_cache
-                .insert(visible_entity, (ticks.this_run(), pipeline_id));
+            view_specialized_material_pipeline_cache.insert(visible_entity, pipeline_id);
         }
     }
 
@@ -854,7 +832,7 @@ fn queue_wireframes(
     mesh_allocator: Res<MeshAllocator>,
     specialized_wireframe_pipeline_cache: Res<SpecializedWireframePipelineCache>,
     render_wireframe_instances: Res<RenderWireframeInstances>,
-    entities_needing_specialization_this_frame: Res<EntitiesNeedingSpecializationThisFrame>,
+    dirty_specializations: Res<DirtySpecializations>,
     mut wireframe_3d_phases: ResMut<ViewBinnedRenderPhases<Wireframe3d>>,
     mut views: Query<(&ExtractedView, &RenderVisibleEntities)>,
 ) {
@@ -870,31 +848,31 @@ fn queue_wireframes(
             continue;
         };
 
-        for visible_entity in visible_entities
-            .get::<Mesh3d>()
-            .iter()
-            .flat_map(|visible_entities| {
-                visible_entities
-                    .added_entities
-                    .iter()
-                    .map(|(_, main_entity)| *main_entity)
-            })
-            .chain(entities_needing_specialization_this_frame.iter().copied())
+        let Some(render_mesh_visible_entities) = visible_entities.get::<Mesh3d>() else {
+            continue;
+        };
+
+        // First, remove meshes that need to be respecialized, and those that were removed, from the bins.
+        for &main_entity in dirty_specializations
+            .iter_to_remove(view.retained_view_entity, render_mesh_visible_entities)
+        {
+            wireframe_phase.remove(main_entity);
+        }
+
+        // Now iterate through all newly-visible entities and those needing respecialization.
+        for &visible_entity in dirty_specializations
+            .iter_to_respecialize(view.retained_view_entity, render_mesh_visible_entities)
         {
             let Some(wireframe_instance) = render_wireframe_instances.get(&visible_entity) else {
                 continue;
             };
-            let Some((current_change_tick, pipeline_id)) = view_specialized_material_pipeline_cache
+            let Some(pipeline_id) = view_specialized_material_pipeline_cache
                 .get(&visible_entity)
-                .map(|(current_change_tick, pipeline_id)| (*current_change_tick, *pipeline_id))
+                .copied()
             else {
                 continue;
             };
 
-            // Skip the entity if it's cached in a bin and up to date.
-            if wireframe_phase.validate_cached_entity(visible_entity) {
-                continue;
-            }
             let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(visible_entity)
             else {
                 continue;

@@ -124,6 +124,8 @@ impl PhaseItem for TransparentUi {
 impl SortedPhaseItem for TransparentUi {
     type SortKey = FloatOrd;
 
+    const IS_RETAINED: bool = false;
+
     #[inline]
     fn sort_key(&self) -> Self::SortKey {
         self.sort_key

@@ -84,6 +84,8 @@ impl SortedPhaseItem for Transmissive3d {
     // NOTE: Values increase towards the camera. Back-to-front ordering for transmissive means we need an ascending sort.
     type SortKey = FloatOrd;
 
+    const IS_RETAINED: bool = true;
+
     #[inline]
     fn sort_key(&self) -> Self::SortKey {
         FloatOrd(self.distance)

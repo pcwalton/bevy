@@ -404,7 +404,10 @@ pub fn queue_colored_mesh2d(
             | Mesh2dPipelineKey::from_hdr(view.hdr);
 
         // Queue all entities visible to that view
-        for (render_entity, visible_entity) in visible_entities.iter::<Mesh2d>() {
+        let Some(visible_entities) = visible_entities.get::<Mesh2d>() else {
+            continue;
+        };
+        for (render_entity, visible_entity) in visible_entities.entities.iter() {
             if let Some(mesh_instance) = render_mesh_instances.get(visible_entity) {
                 let mesh2d_handle = mesh_instance.mesh_asset_id;
                 let mesh2d_transforms = &mesh_instance.transforms;
@@ -419,19 +422,22 @@ pub fn queue_colored_mesh2d(
                     pipelines.specialize(&pipeline_cache, &colored_mesh2d_pipeline, mesh2d_key);
 
                 let mesh_z = mesh2d_transforms.world_from_local.translation.z;
-                transparent_phase.add(Transparent2d {
-                    entity: (*render_entity, *visible_entity),
-                    draw_function: draw_colored_mesh2d,
-                    pipeline: pipeline_id,
-                    // The 2d render items are sorted according to their z value before rendering,
-                    // in order to get correct transparency
-                    sort_key: FloatOrd(mesh_z),
-                    // This material is not batched
-                    batch_range: 0..1,
-                    extra_index: PhaseItemExtraIndex::None,
-                    extracted_index: usize::MAX,
-                    indexed: mesh.indexed(),
-                });
+                transparent_phase.add(
+                    *visible_entity,
+                    Transparent2d {
+                        entity: (*render_entity, *visible_entity),
+                        draw_function: draw_colored_mesh2d,
+                        pipeline: pipeline_id,
+                        // The 2d render items are sorted according to their z value before rendering,
+                        // in order to get correct transparency
+                        sort_key: FloatOrd(mesh_z),
+                        // This material is not batched
+                        batch_range: 0..1,
+                        extra_index: PhaseItemExtraIndex::None,
+                        extracted_index: usize::MAX,
+                        indexed: mesh.indexed(),
+                    },
+                );
             }
         }
     }

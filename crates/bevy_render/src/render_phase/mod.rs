@@ -542,7 +542,11 @@ where
     }
 
     /// Inserts an entity into the cache with the given change tick.
-    pub fn update_cache(&mut self, main_entity: MainEntity, cached_bin_key: Option<CachedBinKey<BPI>>) {
+    pub fn update_cache(
+        &mut self,
+        main_entity: MainEntity,
+        cached_bin_key: Option<CachedBinKey<BPI>>,
+    ) {
         let new_cached_binned_entity = CachedBinnedEntity { cached_bin_key };
         self.cached_entity_bin_keys
             .insert(main_entity, new_cached_binned_entity);
@@ -854,12 +858,6 @@ where
         }
     }
 
-    /// Checks to see whether the entity is in a bin and returns true if it's
-    /// both in a bin and up to date.
-    pub fn validate_cached_entity(&mut self, visible_entity: MainEntity) -> bool {
-        self.cached_entity_bin_keys.contains_key(&visible_entity)
-    }
-
     pub fn remove(&mut self, main_entity: MainEntity) {
         let Some(cached_binned_entity) = self.cached_entity_bin_keys.remove(&main_entity) else {
             return;
@@ -1128,7 +1126,11 @@ where
 {
     pub fn insert_or_clear(&mut self, retained_view_entity: RetainedViewEntity) {
         match self.entry(retained_view_entity) {
-            Entry::Occupied(mut entry) => entry.get_mut().clear(),
+            Entry::Occupied(mut entry) => {
+                if !SPI::IS_RETAINED {
+                    entry.get_mut().clear();
+                }
+            }
             Entry::Vacant(entry) => {
                 entry.insert(default());
             }
@@ -1599,6 +1601,8 @@ pub trait SortedPhaseItem: PhaseItem {
     /// This order can be calculated using the [`ViewRangefinder3d`],
     /// based on the view-space `Z` value of the corresponding view matrix.
     type SortKey: Ord;
+
+    const IS_RETAINED: bool;
 
     /// Determines the order in which the items are drawn.
     fn sort_key(&self) -> Self::SortKey;

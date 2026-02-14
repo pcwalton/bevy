@@ -358,6 +358,8 @@ impl PhaseItem for Transparent2d {
 impl SortedPhaseItem for Transparent2d {
     type SortKey = FloatOrd;
 
+    const IS_RETAINED: bool = false;
+
     #[inline]
     fn sort_key(&self) -> Self::SortKey {
         self.sort_key

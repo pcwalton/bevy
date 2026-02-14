@@ -163,15 +163,18 @@ fn queue_custom(
             let pipeline = pipelines
                 .specialize(&pipeline_cache, &custom_pipeline, key, &mesh.layout)
                 .unwrap();
-            transparent_phase.add(Transparent3d {
-                entity: (entity, *main_entity),
-                pipeline,
-                draw_function: draw_custom,
-                distance: rangefinder.distance(&mesh_instance.center),
-                batch_range: 0..1,
-                extra_index: PhaseItemExtraIndex::None,
-                indexed: true,
-            });
+            transparent_phase.add(
+                *main_entity,
+                Transparent3d {
+                    entity: (entity, *main_entity),
+                    pipeline,
+                    draw_function: draw_custom,
+                    distance: rangefinder.distance(&mesh_instance.center),
+                    batch_range: 0..1,
+                    extra_index: PhaseItemExtraIndex::None,
+                    indexed: true,
+                },
+            );
         }
     }
 }

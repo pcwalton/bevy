@@ -43,6 +43,7 @@ use bevy_render::erased_render_asset::{
 use bevy_render::render_asset::{prepare_assets, RenderAssets};
 use bevy_render::renderer::RenderQueue;
 use bevy_render::sync_world::MainEntityHashSet;
+use bevy_render::view::RenderVisibleMeshEntities;
 use bevy_render::RenderStartup;
 use bevy_render::{
     batching::gpu_preprocessing::GpuPreprocessingSupport,
@@ -65,6 +66,7 @@ use core::{
     hash::Hash,
     marker::PhantomData,
 };
+use itertools::Either;
 use smallvec::SmallVec;
 use tracing::error;
 
@@ -298,7 +300,7 @@ impl Plugin for MaterialsPlugin {
                 .init_resource::<DrawFunctions<Shadow>>()
                 .init_resource::<RenderMaterialInstances>()
                 .init_resource::<MaterialBindGroupAllocators>()
-                .init_resource::<EntitiesNeedingSpecializationThisFrame>()
+                .init_resource::<DirtySpecializations>()
                 .add_render_command::<Shadow, DrawPrepass>()
                 .add_render_command::<Shadow, DrawDepthOnlyPrepass>()
                 .add_render_command::<Transparent3d, DrawMaterial>()
@@ -774,7 +776,7 @@ pub fn late_sweep_material_instances(
 pub fn extract_entities_needs_specialization<M>(
     entities_needing_specialization: Extract<Res<EntitiesNeedingSpecialization<M>>>,
     mut entity_specialization_ticks: ResMut<EntitySpecializationTicks>,
-    mut entities_needing_specialization_this_frame: ResMut<EntitiesNeedingSpecializationThisFrame>,
+    mut dirty_specializations: ResMut<DirtySpecializations>,
     render_material_instances: Res<RenderMaterialInstances>,
     ticks: SystemChangeTick,
 ) where
@@ -790,7 +792,9 @@ pub fn extract_entities_needs_specialization<M>(
             },
         );
 
-        entities_needing_specialization_this_frame.insert(MainEntity::from(*entity));
+        dirty_specializations
+            .entities
+            .insert(MainEntity::from(*entity));
     }
 }
 
@@ -902,8 +906,68 @@ pub struct EntitySpecializationTicks {
     pub entities: MainEntityHashMap<EntitySpecializationTickPair>,
 }
 
-#[derive(Clone, Resource, Deref, DerefMut, Default)]
-pub struct EntitiesNeedingSpecializationThisFrame(pub MainEntityHashSet);
+#[derive(Clone, Resource, Default)]
+pub struct DirtySpecializations {
+    /// Renderables that must be respecialized this frame.
+    pub entities: MainEntityHashSet, // TODO rename to renderables
+    /// Views that must be respecialized this frame.
+    ///
+    /// This causes all entities within them to be respecialized.
+    pub views: HashSet<RetainedViewEntity>,
+}
+
+impl DirtySpecializations {
+    pub fn iter_to_respecialize<'a>(
+        &'a self,
+        view: RetainedViewEntity,
+        render_visible_mesh_entities: &'a RenderVisibleMeshEntities,
+    ) -> impl Iterator<Item = &'a MainEntity> {
+        if self.views.contains(&view) {
+            Either::Left(
+                render_visible_mesh_entities
+                    .entities
+                    .iter()
+                    .map(|(_, main_entity)| main_entity),
+            )
+        } else {
+            Either::Right(
+                render_visible_mesh_entities
+                    .added_entities
+                    .iter()
+                    .map(|(_, main_entity)| main_entity)
+                    .chain(self.entities.iter().filter(|main_entity| {
+                        render_visible_mesh_entities
+                            .entities
+                            .binary_search_by_key(*main_entity, |(_, main_entity)| *main_entity)
+                            .is_ok()
+                    })),
+            )
+        }
+    }
+
+    pub fn iter_to_remove<'a>(
+        &'a self,
+        view: RetainedViewEntity,
+        render_visible_mesh_entities: &'a RenderVisibleMeshEntities,
+    ) -> impl Iterator<Item = &'a MainEntity> {
+        if self.views.contains(&view) {
+            Either::Left(
+                render_visible_mesh_entities
+                    .entities
+                    .iter()
+                    .map(|(_, main_entity)| main_entity),
+            )
+        } else {
+            Either::Right(
+                render_visible_mesh_entities
+                    .removed_entities
+                    .iter()
+                    .map(|(_, main_entity)| main_entity)
+                    .chain(self.entities.iter()),
+            )
+        }
+    }
+}
 
 /// Ticks that specify the last time an entity's pipeline was specialized.
 ///
@@ -957,7 +1021,7 @@ pub struct SpecializedMaterialPipelineCache {
 pub struct SpecializedMaterialViewPipelineCache {
     // material entity -> (tick, pipeline_id)
     #[deref]
-    map: MainEntityHashMap<(Tick, CachedRenderPipelineId)>,
+    map: MainEntityHashMap<CachedRenderPipelineId>,
 }
 
 pub fn check_entities_needing_specialization<M>(
@@ -1010,11 +1074,7 @@ pub(crate) struct SpecializeMaterialMeshesSystemParam<'w, 's> {
     transparent_render_phases: Res<'w, ViewSortedRenderPhases<Transparent3d>>,
     views: Query<'w, 's, (&'static ExtractedView, &'static RenderVisibleEntities)>,
     view_key_cache: Res<'w, ViewKeyCache>,
-    entity_specialization_ticks: Res<'w, EntitySpecializationTicks>,
-    view_specialization_ticks: Res<'w, ViewSpecializationTicks>,
-    entities_needing_specialization_this_frame: Res<'w, EntitiesNeedingSpecializationThisFrame>,
-    specialized_material_pipeline_cache: Res<'w, SpecializedMaterialPipelineCache>,
-    this_run: SystemChangeTick,
+    dirty_specializations: Res<'w, DirtySpecializations>,
 }
 
 pub(crate) fn specialize_material_meshes(
@@ -1025,8 +1085,6 @@ pub(crate) fn specialize_material_meshes(
 ) {
     work_items.clear();
     all_views.clear();
-
-    let this_run;
 
     {
         let SpecializeMaterialMeshesSystemParam {
@@ -1042,14 +1100,8 @@ pub(crate) fn specialize_material_meshes(
             transparent_render_phases,
             views,
             view_key_cache,
-            entity_specialization_ticks,
-            view_specialization_ticks,
-            entities_needing_specialization_this_frame,
-            specialized_material_pipeline_cache,
-            this_run: system_change_tick,
+            dirty_specializations,
         } = state.get(world);
-
-        this_run = system_change_tick.this_run();
 
         for (view, visible_entities) in &views {
             all_views.insert(view.retained_view_entity);
@@ -1066,22 +1118,12 @@ pub(crate) fn specialize_material_meshes(
                 continue;
             };
 
-            let view_tick = view_specialization_ticks
-                .get(&view.retained_view_entity)
-                .unwrap();
-            let view_specialized_material_pipeline_cache =
-                specialized_material_pipeline_cache.get(&view.retained_view_entity);
+            let Some(render_visible_mesh_entities) = visible_entities.get::<Mesh3d>() else {
+                continue;
+            };
 
-            for visible_entity in visible_entities
-                .get::<Mesh3d>()
-                .iter()
-                .flat_map(|visible_entities| {
-                    visible_entities
-                        .added_entities
-                        .iter()
-                        .map(|(_, main_entity)| *main_entity)
-                })
-                .chain(entities_needing_specialization_this_frame.iter().copied())
+            for &visible_entity in dirty_specializations
+                .iter_to_respecialize(view.retained_view_entity, render_visible_mesh_entities)
             {
                 let Some(material_instance) =
                     render_material_instances.instances.get(&visible_entity)
@@ -1093,20 +1135,6 @@ pub(crate) fn specialize_material_meshes(
                 else {
                     continue;
                 };
-                let entity_tick = entity_specialization_ticks
-                    .get(&visible_entity)
-                    .unwrap()
-                    .system_tick;
-                let last_specialized_tick = view_specialized_material_pipeline_cache
-                    .and_then(|cache| cache.get(&visible_entity))
-                    .map(|(tick, _)| *tick);
-                let needs_specialization = last_specialized_tick.is_none_or(|tick| {
-                    view_tick.is_newer_than(tick, this_run)
-                        || entity_tick.is_newer_than(tick, this_run)
-                });
-                if !needs_specialization {
-                    continue;
-                }
                 let Some(mesh) = render_meshes.get(mesh_instance.mesh_asset_id) else {
                     continue;
                 };
@@ -1180,7 +1208,7 @@ pub(crate) fn specialize_material_meshes(
                     .resource_mut::<SpecializedMaterialPipelineCache>()
                     .entry(item.retained_view_entity)
                     .or_default()
-                    .insert(item.visible_entity, (this_run, pipeline_id));
+                    .insert(item.visible_entity, pipeline_id);
             }
             Err(err) => error!("{}", err),
         }
@@ -1205,7 +1233,7 @@ pub fn queue_material_meshes(
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
     views: Query<(&ExtractedView, &RenderVisibleEntities)>,
     specialized_material_pipeline_cache: ResMut<SpecializedMaterialPipelineCache>,
-    entities_needing_specialization_this_frame: Res<EntitiesNeedingSpecializationThisFrame>,
+    dirty_specializations: Res<DirtySpecializations>,
 ) {
     for (view, visible_entities) in &views {
         let (
@@ -1231,17 +1259,13 @@ pub fn queue_material_meshes(
 
         let rangefinder = view.rangefinder3d();
 
+        let Some(render_visible_mesh_entities) = visible_entities.get::<Mesh3d>() else {
+            continue;
+        };
+
         // First, remove meshes that need to be respecialized, and those that were removed, from the bins.
-        for main_entity in visible_entities
-            .get::<Mesh3d>()
-            .iter()
-            .flat_map(|visible_entities| {
-                visible_entities
-                    .removed_entities
-                    .iter()
-                    .map(|(_, main_entity)| *main_entity)
-            })
-            .chain(entities_needing_specialization_this_frame.iter().copied())
+        for &main_entity in dirty_specializations
+            .iter_to_remove(view.retained_view_entity, render_visible_mesh_entities)
         {
             opaque_phase.remove(main_entity);
             alpha_mask_phase.remove(main_entity);
@@ -1250,30 +1274,15 @@ pub fn queue_material_meshes(
         }
 
         // Now iterate through all newly-visible entities and those needing respecialization.
-        for visible_entity in visible_entities
-            .get::<Mesh3d>()
-            .iter()
-            .flat_map(|visible_entities| {
-                visible_entities
-                    .added_entities
-                    .iter()
-                    .map(|(_, main_entity)| *main_entity)
-            })
-            .chain(entities_needing_specialization_this_frame.iter().copied())
+        for &visible_entity in dirty_specializations
+            .iter_to_respecialize(view.retained_view_entity, render_visible_mesh_entities)
         {
-            let Some((current_change_tick, pipeline_id)) = view_specialized_material_pipeline_cache
+            let Some(pipeline_id) = view_specialized_material_pipeline_cache
                 .get(&visible_entity)
-                .map(|(current_change_tick, pipeline_id)| (*current_change_tick, *pipeline_id))
+                .copied()
             else {
                 continue;
             };
-
-            // Skip the entity if it's cached in a bin and up to date.
-            if opaque_phase.validate_cached_entity(visible_entity)
-                || alpha_mask_phase.validate_cached_entity(visible_entity)
-            {
-                continue;
-            }
 
             let Some(material_instance) = render_material_instances.instances.get(&visible_entity)
             else {
@@ -1858,7 +1867,8 @@ pub fn write_material_bind_group_buffers(
 }
 
 pub fn clear_entities_needing_specialization_this_frame(
-    mut entities_needing_specialization_this_frame: ResMut<EntitiesNeedingSpecializationThisFrame>,
+    mut dirty_specializations: ResMut<DirtySpecializations>,
 ) {
-    entities_needing_specialization_this_frame.clear();
+    dirty_specializations.entities.clear();
+    dirty_specializations.views.clear();
 }

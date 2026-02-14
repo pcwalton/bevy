@@ -67,10 +67,8 @@ use bevy_render::{
 };
 use bevy_transform::{components::GlobalTransform, prelude::Transform};
 use bevy_utils::default;
-use core::any::TypeId;
-use core::{hash::Hash, ops::Range};
+use core::{any::TypeId, array, hash::Hash, mem, ops::Range};
 use decal::clustered::RenderClusteredDecals;
-use std::{array, mem};
 #[cfg(feature = "trace")]
 use tracing::info_span;
 use tracing::{error, warn};
@@ -1838,7 +1836,7 @@ pub struct SpecializedShadowMaterialPipelineCache {
 #[derive(Deref, DerefMut, Default)]
 pub struct SpecializedShadowMaterialViewPipelineCache {
     #[deref]
-    map: MainEntityHashMap<(Tick, CachedRenderPipelineId, DrawFunctionId)>,
+    map: MainEntityHashMap<(CachedRenderPipelineId, DrawFunctionId)>,
 }
 
 pub fn check_views_lights_need_specialization(
@@ -1914,11 +1912,7 @@ pub(crate) struct SpecializeShadowsSystemParam<'w, 's> {
     spot_light_entities:
         Query<'w, 's, &'static RenderVisibleMeshEntities, With<ExtractedPointLight>>,
     light_key_cache: Res<'w, LightKeyCache>,
-    specialized_material_pipeline_cache: Res<'w, SpecializedShadowMaterialPipelineCache>,
-    light_specialization_ticks: Res<'w, LightSpecializationTicks>,
-    entity_specialization_ticks: Res<'w, EntitySpecializationTicks>,
-    entities_needing_specialization_this_frame: Res<'w, EntitiesNeedingSpecializationThisFrame>,
-    this_run: SystemChangeTick,
+    dirty_specializations: Res<'w, DirtySpecializations>,
 }
 
 pub(crate) fn specialize_shadows(
@@ -1929,8 +1923,6 @@ pub(crate) fn specialize_shadows(
 ) {
     work_items.clear();
     all_shadow_views.clear();
-
-    let this_run;
 
     {
         let SpecializeShadowsSystemParam {
@@ -1946,14 +1938,8 @@ pub(crate) fn specialize_shadows(
             directional_light_entities,
             spot_light_entities,
             light_key_cache,
-            specialized_material_pipeline_cache,
-            light_specialization_ticks,
-            entity_specialization_ticks,
-            entities_needing_specialization_this_frame,
-            this_run: system_change_tick,
+            dirty_specializations,
         } = state.get(world);
-
-        this_run = system_change_tick.this_run();
 
         for (entity, view_lights) in &view_lights {
             for view_light_entity in view_lights.lights.iter().copied() {
@@ -2001,11 +1987,11 @@ pub(crate) fn specialize_shadows(
                 // NOTE: Lights with shadow mapping disabled will have no visible entities
                 // so no meshes will be queued
 
-                for visible_entity in visible_entities
-                    .added_entities
-                    .iter()
-                    .map(|(_, main_entity)| *main_entity)
-                    .chain(entities_needing_specialization_this_frame.iter().copied())
+                for &visible_entity in dirty_specializations
+                    .iter_to_respecialize(
+                        extracted_view_light.retained_view_entity,
+                        visible_entities,
+                    )
                 {
                     let Some(material_instance) =
                         render_material_instances.instances.get(&visible_entity)
@@ -2112,7 +2098,7 @@ pub(crate) fn specialize_shadows(
                     .resource_mut::<SpecializedShadowMaterialPipelineCache>()
                     .entry(item.retained_view_entity)
                     .or_default()
-                    .insert(item.visible_entity, (this_run, pipeline_id, draw_function));
+                    .insert(item.visible_entity, (pipeline_id, draw_function));
             }
             Err(err) => error!("{}", err),
         }
@@ -2143,7 +2129,7 @@ pub fn queue_shadows(
     >,
     spot_light_entities: Query<&RenderVisibleMeshEntities, With<ExtractedPointLight>>,
     specialized_material_pipeline_cache: Res<SpecializedShadowMaterialPipelineCache>,
-    entities_needing_specialization_this_frame: Res<EntitiesNeedingSpecializationThisFrame>,
+    dirty_specializations: Res<DirtySpecializations>,
 ) {
     for (entity, view_lights, camera_layers) in &view_lights {
         for view_light_entity in view_lights.lights.iter().copied() {
@@ -2188,13 +2174,18 @@ pub fn queue_shadows(
                     .expect("Failed to get spot light visible entities"),
             };
 
-            for main_entity in visible_entities
-                .added_entities
-                .iter()
-                .map(|(_, main_entity)| *main_entity)
-                .chain(entities_needing_specialization_this_frame.iter().copied())
+            // First, remove meshes that need to be respecialized, and those that were removed, from the bins.
+            for &main_entity in dirty_specializations
+                .iter_to_remove(extracted_view_light.retained_view_entity, visible_entities)
             {
-                let Some(&(current_change_tick, pipeline_id, draw_function)) =
+                shadow_phase.remove(main_entity);
+            }
+
+            // Now iterate through all newly-visible entities and those needing respecialization.
+            for &main_entity in dirty_specializations
+                .iter_to_respecialize(extracted_view_light.retained_view_entity, visible_entities)
+            {
+                let Some(&(pipeline_id, draw_function)) =
                     view_specialized_material_pipeline_cache.get(&main_entity)
                 else {
                     continue;
@@ -2220,11 +2211,6 @@ pub fn queue_shadows(
                 let camera_layers = camera_layers.unwrap_or_default();
 
                 if !camera_layers.intersects(mesh_layers) {
-                    continue;
-                }
-
-                // Skip the entity if it's cached in a bin and up to date.
-                if shadow_phase.validate_cached_entity(main_entity) {
                     continue;
                 }
 
@@ -2268,10 +2254,6 @@ pub fn queue_shadows(
                         &gpu_preprocessing_support,
                     ),
                 );
-            }
-
-            for (_, main_entity) in &visible_entities.removed_entities {
-                shadow_phase.remove(*main_entity);
             }
         }
     }

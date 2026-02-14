@@ -820,10 +820,6 @@ fn queue_wireframes(
                 continue;
             };
 
-            // Skip the entity if it's cached in a bin and up to date.
-            if wireframe_phase.validate_cached_entity(*visible_entity) {
-                continue;
-            }
             let Some(mesh_instance) = render_mesh_instances.get(visible_entity) else {
                 continue;
             };
