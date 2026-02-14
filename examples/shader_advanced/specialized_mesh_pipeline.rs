@@ -14,8 +14,9 @@ use bevy::{
     math::{vec3, vec4},
     mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
     pbr::{
-        DrawMesh, MeshPipeline, MeshPipelineKey, MeshPipelineViewLayoutKey, RenderMeshInstances,
-        SetMeshBindGroup, SetMeshViewBindGroup, SetMeshViewEmptyBindGroup, ViewKeyCache,
+        DirtySpecializations, DrawMesh, MeshPipeline, MeshPipelineKey, MeshPipelineViewLayoutKey,
+        RenderMeshInstances, SetMeshBindGroup, SetMeshViewBindGroup, SetMeshViewEmptyBindGroup,
+        ViewKeyCache,
     },
     prelude::*,
     render::{

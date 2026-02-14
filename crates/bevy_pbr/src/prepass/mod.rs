@@ -862,6 +862,8 @@ pub(crate) struct SpecializePrepassSystemParam<'w, 's> {
     alpha_mask_prepass_render_phases: Res<'w, ViewBinnedRenderPhases<AlphaMask3dPrepass>>,
     opaque_deferred_render_phases: Res<'w, ViewBinnedRenderPhases<Opaque3dDeferred>>,
     alpha_mask_deferred_render_phases: Res<'w, ViewBinnedRenderPhases<AlphaMask3dDeferred>>,
+    specialized_prepass_material_pipeline_cache:
+        ResMut<'w, SpecializedPrepassMaterialPipelineCache>,
     dirty_specializations: Res<'w, DirtySpecializations>,
     this_run: SystemChangeTick,
 }
@@ -893,9 +895,10 @@ pub(crate) fn specialize_prepass_material_meshes(
             alpha_mask_prepass_render_phases,
             opaque_deferred_render_phases,
             alpha_mask_deferred_render_phases,
+            mut specialized_prepass_material_pipeline_cache,
             dirty_specializations,
             this_run: system_change_tick,
-        } = state.get(world);
+        } = state.get_mut(world);
 
         this_run = system_change_tick.this_run();
 
@@ -921,6 +924,20 @@ pub(crate) fn specialize_prepass_material_meshes(
             let Some(render_visible_mesh_entities) = visible_entities.get::<Mesh3d>() else {
                 continue;
             };
+
+            // Remove cached pipeline IDs corresponding to entities that
+            // either have been removed or need to be respecialized.
+            if let Some(specialized_prepass_material_pipeline_cache) =
+                specialized_prepass_material_pipeline_cache
+                    .get_mut(&extracted_view.retained_view_entity)
+            {
+                for &invisible_entity in dirty_specializations.iter_to_remove(
+                    extracted_view.retained_view_entity,
+                    render_visible_mesh_entities,
+                ) {
+                    specialized_prepass_material_pipeline_cache.remove(&invisible_entity);
+                }
+            }
 
             for &visible_entity in dirty_specializations.iter_to_respecialize(
                 extracted_view.retained_view_entity,

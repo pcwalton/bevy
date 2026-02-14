@@ -13,9 +13,8 @@ use bevy_color::{Color, ColorToComponents};
 use bevy_core_pipeline::schedule::{Core3d, Core3dSystems};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
-    change_detection::Tick,
     prelude::*,
-    system::{lifetimeless::SRes, SystemChangeTick, SystemParamItem},
+    system::{lifetimeless::SRes, SystemParamItem},
 };
 use bevy_mesh::{Mesh3d, MeshVertexBufferLayoutRef};
 use bevy_platform::{
@@ -87,7 +86,7 @@ impl Plugin for WireframePlugin {
         .init_asset::<WireframeMaterial>()
         .init_resource::<SpecializedMeshPipelines<Wireframe3dPipeline>>()
         .init_resource::<WireframeConfig>()
-        .init_resource::<WireframeEntitiesNeedingSpecialization>()
+        .init_resource::<DirtyWireframeSpecializations>()
         .add_systems(Startup, setup_global_wireframe_material)
         .add_systems(
             Update,
@@ -123,7 +122,6 @@ impl Plugin for WireframePlugin {
         }
 
         render_app
-            .init_resource::<WireframeEntitySpecializationTicks>()
             .init_resource::<SpecializedWireframePipelineCache>()
             .init_resource::<DrawFunctions<Wireframe3d>>()
             .add_render_command::<Wireframe3d, DrawWireframe3d>()
@@ -479,10 +477,8 @@ pub struct WireframeEntitiesNeedingSpecialization {
     pub entities: Vec<Entity>,
 }
 
-#[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
-pub struct WireframeEntitySpecializationTicks {
-    pub entities: MainEntityHashMap<Tick>,
-}
+#[derive(Clone, Resource, Default, Deref, DerefMut)]
+pub struct DirtyWireframeSpecializations(pub DirtySpecializations);
 
 /// Stores the [`SpecializedWireframeViewPipelineCache`] for each view.
 #[derive(Resource, Deref, DerefMut, Default)]
@@ -679,15 +675,15 @@ fn extract_wireframe_3d_camera(
 
 pub fn extract_wireframe_entities_needing_specialization(
     entities_needing_specialization: Extract<Res<WireframeEntitiesNeedingSpecialization>>,
-    mut entity_specialization_ticks: ResMut<WireframeEntitySpecializationTicks>,
     views: Query<&ExtractedView>,
     mut specialized_wireframe_pipeline_cache: ResMut<SpecializedWireframePipelineCache>,
+    mut dirty_wireframe_specializations: ResMut<DirtyWireframeSpecializations>,
     mut removed_meshes_query: Extract<RemovedComponents<Mesh3d>>,
-    ticks: SystemChangeTick,
 ) {
     for entity in entities_needing_specialization.iter() {
-        // Update the entity's specialization tick with this run's tick
-        entity_specialization_ticks.insert((*entity).into(), ticks.this_run());
+        dirty_wireframe_specializations
+            .entities
+            .insert(MainEntity::from(*entity));
     }
 
     for entity in removed_meshes_query.read() {
@@ -727,7 +723,7 @@ pub fn specialize_wireframes(
     wireframe_phases: Res<ViewBinnedRenderPhases<Wireframe3d>>,
     views: Query<(&ExtractedView, &RenderVisibleEntities)>,
     view_key_cache: Res<ViewKeyCache>,
-    dirty_specializations: Res<DirtySpecializations>,
+    dirty_wireframe_specializations: Res<DirtyWireframeSpecializations>,
     mut specialized_material_pipeline_cache: ResMut<SpecializedWireframePipelineCache>,
     mut pipelines: ResMut<SpecializedMeshPipelines<Wireframe3dPipeline>>,
     pipeline: Res<Wireframe3dPipeline>,
@@ -757,7 +753,19 @@ pub fn specialize_wireframes(
             continue;
         };
 
-        for &visible_entity in dirty_specializations
+        // Remove cached pipeline IDs corresponding to entities that
+        // either have been removed or need to be respecialized.
+        if let Some(specialized_material_pipeline_cache) =
+            specialized_material_pipeline_cache.get_mut(&view.retained_view_entity)
+        {
+            for &invisible_entity in dirty_wireframe_specializations
+                .iter_to_remove(view.retained_view_entity, render_visible_mesh_entities)
+            {
+                specialized_material_pipeline_cache.remove(&invisible_entity);
+            }
+        }
+
+        for &visible_entity in dirty_wireframe_specializations
             .iter_to_respecialize(view.retained_view_entity, render_visible_mesh_entities)
         {
             if !render_wireframe_instances.contains_key(&visible_entity) {

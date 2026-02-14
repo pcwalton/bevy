@@ -1912,6 +1912,7 @@ pub(crate) struct SpecializeShadowsSystemParam<'w, 's> {
     spot_light_entities:
         Query<'w, 's, &'static RenderVisibleMeshEntities, With<ExtractedPointLight>>,
     light_key_cache: Res<'w, LightKeyCache>,
+    specialized_shadow_material_pipeline_cache: ResMut<'w, SpecializedShadowMaterialPipelineCache>,
     dirty_specializations: Res<'w, DirtySpecializations>,
 }
 
@@ -1938,8 +1939,9 @@ pub(crate) fn specialize_shadows(
             directional_light_entities,
             spot_light_entities,
             light_key_cache,
+            mut specialized_shadow_material_pipeline_cache,
             dirty_specializations,
-        } = state.get(world);
+        } = state.get_mut(world);
 
         for (entity, view_lights) in &view_lights {
             for view_light_entity in view_lights.lights.iter().copied() {
@@ -1984,15 +1986,26 @@ pub(crate) fn specialize_shadows(
                         .expect("Failed to get spot light visible entities"),
                 };
 
+                // Remove cached pipeline IDs corresponding to entities that
+                // either have been removed or need to be respecialized.
+                if let Some(specialized_shadow_material_pipeline_cache) =
+                    specialized_shadow_material_pipeline_cache
+                        .get_mut(&extracted_view_light.retained_view_entity)
+                {
+                    for &invisible_entity in dirty_specializations
+                        .iter_to_remove(extracted_view_light.retained_view_entity, visible_entities)
+                    {
+                        specialized_shadow_material_pipeline_cache.remove(&invisible_entity);
+                    }
+                }
+
                 // NOTE: Lights with shadow mapping disabled will have no visible entities
                 // so no meshes will be queued
 
-                for &visible_entity in dirty_specializations
-                    .iter_to_respecialize(
-                        extracted_view_light.retained_view_entity,
-                        visible_entities,
-                    )
-                {
+                for &visible_entity in dirty_specializations.iter_to_respecialize(
+                    extracted_view_light.retained_view_entity,
+                    visible_entities,
+                ) {
                     let Some(material_instance) =
                         render_material_instances.instances.get(&visible_entity)
                     else {
