@@ -69,6 +69,7 @@ use bevy_utils::default;
 use core::any::TypeId;
 use core::{hash::Hash, ops::Range};
 use decal::clustered::RenderClusteredDecals;
+use std::{array, mem};
 #[cfg(feature = "trace")]
 use tracing::info_span;
 use tracing::{error, warn};
@@ -372,6 +373,9 @@ pub fn extract_lights(
         >,
     >,
     mapper: Extract<Query<RenderEntity>>,
+    mut existing_render_cascades_visible_entities: Query<&mut RenderCascadesVisibleEntities>,
+    mut existing_render_cubemap_visible_entities: Query<&mut RenderCubemapVisibleEntities>,
+    mut existing_render_visible_mesh_entities: Query<&mut RenderVisibleMeshEntities>,
     (mut removed_point_lights, mut removed_spot_lights, mut removed_directional_lights): (
         Extract<RemovedComponents<PointLight>>,
         Extract<RemovedComponents<SpotLight>>,
@@ -424,14 +428,22 @@ pub fn extract_lights(
             continue;
         }
 
-        let render_cubemap_visible_entities = RenderCubemapVisibleEntities {
-            data: cubemap_visible_entities
-                .iter()
-                .map(|v| create_render_visible_mesh_entities(&mapper, v))
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
-        };
+        let mut render_cubemap_visible_entities =
+            match existing_render_cubemap_visible_entities.get_mut(render_entity) {
+                Ok(ref mut existing_cubemap_visible_entities) => {
+                    mem::take(&mut **existing_cubemap_visible_entities)
+                }
+                Err(_) => RenderCubemapVisibleEntities {
+                    data: array::repeat(RenderVisibleMeshEntities::default()),
+                },
+            };
+
+        for (render_visible_mesh_entities, visible_mesh_entities) in render_cubemap_visible_entities
+            .iter_mut()
+            .zip(cubemap_visible_entities.iter())
+        {
+            render_visible_mesh_entities.update_from(&mapper, visible_mesh_entities);
+        }
 
         let extracted_point_light = ExtractedPointLight {
             color: point_light.color.into(),
@@ -491,8 +503,14 @@ pub fn extract_lights(
             continue;
         }
 
-        let render_visible_entities =
-            create_render_visible_mesh_entities(&mapper, visible_entities);
+        let mut render_visible_entities =
+            match existing_render_visible_mesh_entities.get_mut(render_entity) {
+                Ok(ref mut existing_render_visible_entities) => {
+                    mem::take(&mut **existing_render_visible_entities)
+                }
+                Err(_) => RenderVisibleMeshEntities::default(),
+            };
+        render_visible_entities.update_from(&mapper, visible_entities);
 
         let texel_size =
             2.0 * ops::tan(spot_light.outer_angle) / directional_light_shadow_map.size as f32;
@@ -565,7 +583,15 @@ pub fn extract_lights(
         // TODO: update in place instead of reinserting.
         let mut extracted_cascades = EntityHashMap::default();
         let mut extracted_frusta = EntityHashMap::default();
-        let mut cascade_visible_entities = EntityHashMap::default();
+        let mut cascade_visible_entities =
+            match existing_render_cascades_visible_entities.get_mut(entity) {
+                Ok(ref mut existing_cascade_visible_entities) => {
+                    mem::take(&mut **existing_cascade_visible_entities)
+                }
+                Err(_) => RenderCascadesVisibleEntities {
+                    entities: EntityHashMap::default(),
+                },
+            };
         for (e, v) in cascades.cascades.iter() {
             if let Ok(entity) = mapper.get(*e) {
                 extracted_cascades.insert(entity, v.clone());
@@ -580,16 +606,23 @@ pub fn extract_lights(
                 break;
             }
         }
-        for (e, v) in visible_entities.entities.iter() {
-            if let Ok(entity) = mapper.get(*e) {
-                cascade_visible_entities.insert(
-                    entity,
-                    v.iter()
-                        .map(|v| create_render_visible_mesh_entities(&mapper, v))
-                        .collect(),
-                );
-            } else {
-                break;
+        for (e, visible_mesh_entities_list) in visible_entities.entities.iter() {
+            let Ok(entity) = mapper.get(*e) else { break };
+            let render_visible_mesh_entities_list: &mut Vec<RenderVisibleMeshEntities> =
+                cascade_visible_entities
+                    .entities
+                    .entry(entity)
+                    .or_insert_with(default);
+            render_visible_mesh_entities_list.resize_with(
+                visible_mesh_entities_list.len(),
+                RenderVisibleMeshEntities::default,
+            );
+            for (render_visible_mesh_entities, visible_mesh_entities) in
+                render_visible_mesh_entities_list
+                    .iter_mut()
+                    .zip(visible_mesh_entities_list.iter())
+            {
+                render_visible_mesh_entities.update_from(&mapper, visible_mesh_entities);
             }
         }
 
@@ -622,9 +655,7 @@ pub fn extract_lights(
                     sun_disk_angular_size: sun_disk.unwrap_or_default().angular_size,
                     sun_disk_intensity: sun_disk.unwrap_or_default().intensity,
                 },
-                RenderCascadesVisibleEntities {
-                    entities: cascade_visible_entities,
-                },
+                cascade_visible_entities,
                 MainEntity::from(main_entity),
             ));
     }
@@ -682,35 +713,50 @@ pub fn extract_lights(
     }
 }
 
-fn create_render_visible_mesh_entities(
-    mapper: &Extract<Query<RenderEntity>>,
-    visible_entities: &VisibleMeshEntities,
-) -> RenderVisibleMeshEntities {
-    RenderVisibleMeshEntities {
-        entities: visible_entities
-            .entities
-            .iter()
-            .map(|e| {
-                let render_entity = mapper.get(*e).unwrap_or(Entity::PLACEHOLDER);
-                (render_entity, MainEntity::from(*e))
-            })
-            .collect(),
-        added_entities: visible_entities
-            .added_entities
-            .iter()
-            .map(|e| {
-                let render_entity = mapper.get(*e).unwrap_or(Entity::PLACEHOLDER);
-                (render_entity, MainEntity::from(*e))
-            })
-            .collect(),
-        removed_entities: visible_entities
-            .removed_entities
-            .iter()
-            .map(|e| {
-                let render_entity = mapper.get(*e).unwrap_or(Entity::PLACEHOLDER);
-                (render_entity, MainEntity::from(*e))
-            })
-            .collect(),
+impl RenderVisibleMeshEntities {
+    fn update_from(
+        &mut self,
+        mapper: &Extract<Query<RenderEntity>>,
+        visible_mesh_entities: &VisibleMeshEntities,
+    ) {
+        let old_entities = mem::take(&mut self.entities);
+        self.added_entities.clear();
+        self.removed_entities.clear();
+
+        // March over the old and new visible entity lists in lockstep, diffing
+        // as we go to determine the added and removed entities. The lists must
+        // be sorted.
+        let mut old_entity_iter = old_entities.iter().peekable();
+        for &visible_main_entity in &visible_mesh_entities.entities {
+            let visible_main_entity = MainEntity::from(visible_main_entity);
+
+            // Mark entities as removed until we see the one we're looking at.
+            while old_entity_iter
+                .peek()
+                .is_some_and(|(_, main_entity)| *main_entity < visible_main_entity)
+            {
+                self.removed_entities.push(*old_entity_iter.next().unwrap());
+            }
+
+            // Add the visible entity to the list.
+            let render_entity = mapper
+                .get(*visible_main_entity)
+                .unwrap_or(Entity::PLACEHOLDER);
+            self.entities.push((render_entity, visible_main_entity));
+
+            if old_entity_iter
+                .peek()
+                .is_some_and(|&&(_, main_entity)| main_entity == visible_main_entity)
+            {
+                old_entity_iter.next();
+            } else {
+                self.added_entities
+                    .push((render_entity, visible_main_entity));
+            }
+        }
+
+        // Any entities we didn't see yet are removed, so drain them.
+        self.removed_entities.extend(old_entity_iter.copied());
     }
 }
 
@@ -1646,7 +1692,7 @@ pub fn prepare_lights(
                     .collect()
             });
             if light_view_entities.len() != iter.len() {
-                let entities = core::mem::take(light_view_entities);
+                let entities = mem::take(light_view_entities);
                 despawn_entities(&mut commands, entities);
                 light_view_entities.extend((0..iter.len()).map(|_| commands.spawn_empty().id()));
             }
@@ -2000,12 +2046,6 @@ pub(crate) fn specialize_shadows(
 
                 // NOTE: Lights with shadow mapping disabled will have no visible entities
                 // so no meshes will be queued
-
-                let view_tick = light_specialization_ticks
-                    .get(&extracted_view_light.retained_view_entity)
-                    .unwrap();
-                let view_specialized_material_pipeline_cache = specialized_material_pipeline_cache
-                    .get(&extracted_view_light.retained_view_entity);
 
                 for visible_entity in visible_entities
                     .added_entities

@@ -365,7 +365,6 @@ pub fn check_dir_light_mesh_visibility(
     visible_entity_ranges: Option<Res<VisibleEntityRanges>>,
     mut defer_visible_entities_queue: Local<Parallel<Vec<Entity>>>,
     mut view_visible_entities_queue: Local<Parallel<Vec<Vec<Entity>>>>,
-    mut temp_visible_entities: Local<EntityHashSet>,
 ) {
     let visible_entity_ranges = visible_entity_ranges.as_deref();
 
@@ -470,15 +469,11 @@ pub fn check_dir_light_mesh_visibility(
                 .iter_mut()
                 .enumerate()
             {
-                init_visible_entity_collection(view_dest, &mut temp_visible_entities);
+                view_dest.entities.clear();
                 for thread_entity_queue in view_visible_entities_queue.iter_mut() {
-                    collect_visible_entities_from_parallel_queue(
-                        view_dest,
-                        &mut thread_entity_queue[view_dest_index],
-                        &mut temp_visible_entities,
-                    );
+                    view_dest.entities.append(&mut thread_entity_queue[view_dest_index]);
                 }
-                finish_visible_entity_collection(view_dest, &mut temp_visible_entities);
+                view_dest.entities.sort_unstable();
             }
         }
     }
@@ -536,7 +531,6 @@ pub fn check_point_light_mesh_visibility(
     mut cubemap_visible_entities_queue: Local<Parallel<[Vec<Entity>; 6]>>,
     mut spot_visible_entities_queue: Local<Parallel<Vec<Entity>>>,
     mut checked_lights: Local<EntityHashSet>,
-    mut temp_visible_entities: Local<EntityHashSet>,
 ) {
     checked_lights.clear();
 
@@ -629,15 +623,11 @@ pub fn check_point_light_mesh_visibility(
                 // Collect entities from parallel queue.
                 for (view_dest_index, view_dest) in cubemap_visible_entities.iter_mut().enumerate()
                 {
-                    init_visible_entity_collection(view_dest, &mut temp_visible_entities);
+                    view_dest.entities.clear();
                     for thread_entity_queue in cubemap_visible_entities_queue.iter_mut() {
-                        collect_visible_entities_from_parallel_queue(
-                            view_dest,
-                            &mut thread_entity_queue[view_dest_index],
-                            &mut temp_visible_entities,
-                        );
+                        view_dest.entities.append(&mut thread_entity_queue[view_dest_index]);
                     }
-                    finish_visible_entity_collection(view_dest, &mut temp_visible_entities);
+                    view_dest.entities.sort_unstable();
                 }
             }
 
@@ -708,46 +698,12 @@ pub fn check_point_light_mesh_visibility(
                     },
                 );
 
-                init_visible_entity_collection(&mut visible_entities, &mut temp_visible_entities);
+                visible_entities.entities.clear();
                 for thread_entity_queue in spot_visible_entities_queue.iter_mut() {
-                    collect_visible_entities_from_parallel_queue(
-                        &mut visible_entities,
-                        thread_entity_queue,
-                        &mut temp_visible_entities,
-                    );
+                    visible_entities.entities.append(thread_entity_queue);
                 }
-                finish_visible_entity_collection(&mut visible_entities, &mut temp_visible_entities);
+                visible_entities.entities.sort_unstable();
             }
         }
     }
-}
-
-fn init_visible_entity_collection(
-    dest: &mut VisibleMeshEntities,
-    temp_visible_entities: &mut EntityHashSet,
-) {
-    temp_visible_entities.clear();
-    dest.added_entities.clear();
-    dest.removed_entities.clear();
-}
-
-fn collect_visible_entities_from_parallel_queue(
-    dest: &mut VisibleMeshEntities,
-    source: &mut Vec<Entity>,
-    temp_visible_entities: &mut EntityHashSet,
-) {
-    for visible_entity in source.drain(..) {
-        if !dest.entities.remove(&visible_entity) {
-            dest.added_entities.insert(visible_entity);
-        }
-        temp_visible_entities.insert(visible_entity);
-    }
-}
-
-fn finish_visible_entity_collection(
-    dest: &mut VisibleMeshEntities,
-    temp_visible_entities: &mut EntityHashSet,
-) {
-    mem::swap(&mut dest.entities, &mut dest.removed_entities);
-    mem::swap(&mut dest.entities, &mut *temp_visible_entities);
 }

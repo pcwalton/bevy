@@ -3,7 +3,7 @@ mod render_layers;
 
 use core::any::TypeId;
 
-use bevy_ecs::entity::{EntityHashMap, EntityHashSet};
+use bevy_ecs::entity::EntityHashMap;
 use bevy_ecs::lifecycle::HookContext;
 use bevy_ecs::world::DeferredWorld;
 use bevy_mesh::skinning::{
@@ -351,9 +351,7 @@ impl VisibleEntities {
 #[reflect(Component, Debug, Default, Clone)]
 pub struct VisibleMeshEntities {
     #[reflect(ignore, clone)]
-    pub entities: EntityHashSet,
-    pub added_entities: EntityHashSet,
-    pub removed_entities: EntityHashSet,
+    pub entities: Vec<Entity>,
 }
 
 #[derive(Component, Clone, Debug, Default, Reflect)]
