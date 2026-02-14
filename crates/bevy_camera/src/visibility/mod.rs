@@ -354,6 +354,26 @@ pub struct VisibleMeshEntities {
     pub entities: Vec<Entity>,
 }
 
+impl VisibleMeshEntities {
+    /// Resizes the entity vector so that its capacity isn't too much higher
+    /// than its size.
+    pub fn shrink(&mut self) {
+        // Check that visible entities capacity() is no more than two times greater than len()
+        let capacity = self.entities.capacity();
+        let reserved = capacity
+            .checked_div(self.entities.len())
+            .map_or(0, |reserve| {
+                if reserve > 2 {
+                    capacity / (reserve / 2)
+                } else {
+                    capacity
+                }
+            });
+
+        self.entities.shrink_to(reserved);
+    }
+}
+
 #[derive(Component, Clone, Debug, Default, Reflect)]
 #[reflect(Component, Debug, Default, Clone)]
 pub struct CubemapVisibleEntities {

@@ -317,22 +317,6 @@ pub enum SimulationLightSystems {
     CheckLightVisibility,
 }
 
-fn shrink_entities(visible_entities: &mut Vec<Entity>) {
-    // Check that visible entities capacity() is no more than two times greater than len()
-    let capacity = visible_entities.capacity();
-    let reserved = capacity
-        .checked_div(visible_entities.len())
-        .map_or(0, |reserve| {
-            if reserve > 2 {
-                capacity / (reserve / 2)
-            } else {
-                capacity
-            }
-        });
-
-    visible_entities.shrink_to(reserved);
-}
-
 /// Updates the visibility for [`DirectionalLight`]s so that shadow map rendering can work.
 pub fn check_dir_light_mesh_visibility(
     mut commands: Commands,
@@ -471,8 +455,11 @@ pub fn check_dir_light_mesh_visibility(
             {
                 view_dest.entities.clear();
                 for thread_entity_queue in view_visible_entities_queue.iter_mut() {
-                    view_dest.entities.append(&mut thread_entity_queue[view_dest_index]);
+                    view_dest
+                        .entities
+                        .append(&mut thread_entity_queue[view_dest_index]);
                 }
+                view_dest.entities.shrink();
                 view_dest.entities.sort_unstable();
             }
         }
@@ -625,8 +612,11 @@ pub fn check_point_light_mesh_visibility(
                 {
                     view_dest.entities.clear();
                     for thread_entity_queue in cubemap_visible_entities_queue.iter_mut() {
-                        view_dest.entities.append(&mut thread_entity_queue[view_dest_index]);
+                        view_dest
+                            .entities
+                            .append(&mut thread_entity_queue[view_dest_index]);
                     }
+                    view_dest.entities.shrink();
                     view_dest.entities.sort_unstable();
                 }
             }
@@ -702,6 +692,7 @@ pub fn check_point_light_mesh_visibility(
                 for thread_entity_queue in spot_visible_entities_queue.iter_mut() {
                     visible_entities.entities.append(thread_entity_queue);
                 }
+                visible_entities.entities.shrink();
                 visible_entities.entities.sort_unstable();
             }
         }
