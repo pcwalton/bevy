@@ -304,10 +304,7 @@ impl Plugin for MaterialsPlugin {
                 .add_render_command::<Transparent3d, DrawMaterial>()
                 .add_render_command::<Opaque3d, DrawMaterial>()
                 .add_render_command::<AlphaMask3d, DrawMaterial>()
-                .add_systems(
-                    ExtractSchedule,
-                    clear_entities_needing_specialization_this_frame,
-                )
+                .add_systems(ExtractSchedule, clear_dirty_specializations)
                 .add_systems(RenderStartup, init_material_pipeline)
                 .add_systems(
                     Render,
@@ -398,12 +395,9 @@ where
                         early_sweep_material_instances::<M>
                             .after(MaterialExtractionSystems)
                             .before(late_sweep_material_instances),
-                        // See the comments in
-                        // `sweep_entities_needing_specialization` for an
-                        // explanation of why the systems are ordered this way.
                         extract_entities_needs_specialization::<M>
                             .in_set(MaterialExtractEntitiesNeedingSpecializationSystems)
-                            .after(clear_entities_needing_specialization_this_frame),
+                            .after(clear_dirty_specializations),
                     ),
                 );
         }
@@ -1788,9 +1782,7 @@ pub fn write_material_bind_group_buffers(
     }
 }
 
-pub fn clear_entities_needing_specialization_this_frame(
-    mut dirty_specializations: ResMut<DirtySpecializations>,
-) {
+pub fn clear_dirty_specializations(mut dirty_specializations: ResMut<DirtySpecializations>) {
     dirty_specializations.entities.clear();
     dirty_specializations.views.clear();
 }

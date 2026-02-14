@@ -84,9 +84,9 @@ impl Plugin for WireframePlugin {
             RenderAssetPlugin::<RenderWireframeMaterial>::default(),
         ))
         .init_asset::<WireframeMaterial>()
+        .init_resource::<WireframeEntitiesNeedingSpecialization>()
         .init_resource::<SpecializedMeshPipelines<Wireframe3dPipeline>>()
         .init_resource::<WireframeConfig>()
-        .init_resource::<DirtyWireframeSpecializations>()
         .add_systems(Startup, setup_global_wireframe_material)
         .add_systems(
             Update,
@@ -122,6 +122,7 @@ impl Plugin for WireframePlugin {
         }
 
         render_app
+            .init_resource::<DirtyWireframeSpecializations>()
             .init_resource::<SpecializedWireframePipelineCache>()
             .init_resource::<DrawFunctions<Wireframe3d>>()
             .add_render_command::<Wireframe3d, DrawWireframe3d>()
@@ -137,8 +138,11 @@ impl Plugin for WireframePlugin {
             .add_systems(
                 ExtractSchedule,
                 (
+                    clear_dirty_wireframe_specializations,
                     extract_wireframe_3d_camera,
-                    extract_wireframe_entities_needing_specialization.after(extract_cameras),
+                    extract_wireframe_entities_needing_specialization
+                        .after(extract_cameras)
+                        .after(clear_dirty_wireframe_specializations),
                     extract_wireframe_materials,
                 ),
             )
@@ -755,14 +759,10 @@ pub fn specialize_wireframes(
 
         // Remove cached pipeline IDs corresponding to entities that
         // either have been removed or need to be respecialized.
-        if let Some(specialized_material_pipeline_cache) =
-            specialized_material_pipeline_cache.get_mut(&view.retained_view_entity)
+        for &invisible_entity in dirty_wireframe_specializations
+            .iter_to_remove(view.retained_view_entity, render_visible_mesh_entities)
         {
-            for &invisible_entity in dirty_wireframe_specializations
-                .iter_to_remove(view.retained_view_entity, render_visible_mesh_entities)
-            {
-                specialized_material_pipeline_cache.remove(&invisible_entity);
-            }
+            view_specialized_material_pipeline_cache.remove(&invisible_entity);
         }
 
         for &visible_entity in dirty_wireframe_specializations
@@ -908,4 +908,11 @@ fn queue_wireframes(
             );
         }
     }
+}
+
+pub fn clear_dirty_wireframe_specializations(
+    mut dirty_wireframe_specializations: ResMut<DirtyWireframeSpecializations>,
+) {
+    dirty_wireframe_specializations.entities.clear();
+    dirty_wireframe_specializations.views.clear();
 }
