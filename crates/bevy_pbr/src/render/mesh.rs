@@ -584,11 +584,14 @@ impl AtomicPod for MeshInputUniform {
     type Blob = MeshInputUniformBlob;
 
     fn from_blob(blob: &Self::Blob) -> Self {
-        todo!()
+        let nonatomic_data: [u32; MESH_INPUT_UNIFORM_SIZE_IN_WORDS] =
+            array::from_fn(|i| blob.0[i].load(Ordering::Relaxed));
+        bytemuck::must_cast(nonatomic_data)
     }
 
     fn to_blob(&self) -> Self::Blob {
-        todo!()
+        let nonatomic_data: [u32; MESH_INPUT_UNIFORM_SIZE_IN_WORDS] = bytemuck::must_cast(*self);
+        MeshInputUniformBlob(array::from_fn(|i| AtomicU32::new(nonatomic_data[i])))
     }
 }
 
@@ -635,11 +638,14 @@ impl AtomicPod for MeshCullingData {
     type Blob = MeshCullingDataBlob;
 
     fn from_blob(blob: &Self::Blob) -> Self {
-        todo!()
+        let nonatomic_data: [u32; MESH_CULLING_DATA_SIZE_IN_WORDS] =
+            array::from_fn(|i| blob.0[i].load(Ordering::Relaxed));
+        bytemuck::must_cast(nonatomic_data)
     }
 
     fn to_blob(&self) -> Self::Blob {
-        todo!()
+        let nonatomic_data: [u32; MESH_CULLING_DATA_SIZE_IN_WORDS] = bytemuck::must_cast(*self);
+        MeshCullingDataBlob(array::from_fn(|i| AtomicU32::new(nonatomic_data[i])))
     }
 }
 

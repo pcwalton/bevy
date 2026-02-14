@@ -311,7 +311,7 @@ fn queue_custom_mesh_pipeline(
             };
 
             // Get the mesh data
-            let Some(mesh) = render_meshes.get(mesh_instance.mesh_asset_id) else {
+            let Some(mesh) = render_meshes.get(mesh_instance.mesh_asset_id()) else {
                 continue;
             };
 
