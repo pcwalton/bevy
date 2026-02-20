@@ -1544,15 +1544,16 @@ where
                 // Allocate or update the material.
                 match render_material_bindings.entry(material_id.into()) {
                     Entry::Occupied(mut occupied_entry) => {
-                        // TODO: Have a fast path that doesn't require
-                        // recreating the bind group if only buffer contents
-                        // change. For now, we just delete and recreate the bind
-                        // group.
-                        bind_group_allocator.free(*occupied_entry.get());
-                        let new_binding =
-                            bind_group_allocator.allocate_unprepared(unprepared, &material_layout);
-                        *occupied_entry.get_mut() = new_binding;
-                        new_binding
+                        let old_binding = *occupied_entry.get();
+                        if bind_group_allocator.try_update_in_place(old_binding, &unprepared) {
+                            old_binding
+                        } else {
+                            bind_group_allocator.free(*occupied_entry.get());
+                            let new_binding = bind_group_allocator
+                                .allocate_unprepared(unprepared, &material_layout);
+                            *occupied_entry.get_mut() = new_binding;
+                            new_binding
+                        }
                     }
                     Entry::Vacant(vacant_entry) => *vacant_entry.insert(
                         bind_group_allocator.allocate_unprepared(unprepared, &material_layout),

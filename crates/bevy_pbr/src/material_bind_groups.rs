@@ -540,6 +540,23 @@ impl MaterialBindGroupAllocator {
         }
     }
 
+    pub fn try_update_in_place(
+        &mut self,
+        old_binding: MaterialBindingId,
+        unprepared_bind_group: &UnpreparedBindGroup,
+    ) -> bool {
+        match *self {
+            MaterialBindGroupAllocator::Bindless(
+                ref mut material_bind_group_bindless_allocator,
+            ) => material_bind_group_bindless_allocator
+                .try_update_in_place(old_binding, unprepared_bind_group),
+            MaterialBindGroupAllocator::NonBindless(_) => {
+                // TODO: Support this.
+                false
+            }
+        }
+    }
+
     /// Deallocates the material with the given binding ID.
     ///
     /// Any resources that are no longer referenced are removed from the slab.
@@ -848,6 +865,19 @@ impl MaterialBindGroupBindlessAllocator {
         MaterialBindingId { group, slot }
     }
 
+    fn try_update_in_place(
+        &mut self,
+        old_binding_id: MaterialBindingId,
+        unprepared_bind_group: &UnpreparedBindGroup,
+    ) -> bool {
+        match self.get_mut(old_binding_id.group) {
+            Some(slab) => {
+                slab.try_update_in_place(old_binding_id.slot, &unprepared_bind_group.bindings)
+            }
+            None => false,
+        }
+    }
+
     /// Deallocates the material with the given binding ID.
     ///
     /// Any resources that are no longer referenced are removed from the slab.
@@ -864,6 +894,10 @@ impl MaterialBindGroupBindlessAllocator {
     /// [`MaterialBindingId`].
     fn get(&self, group: MaterialBindGroupIndex) -> Option<&MaterialBindlessSlab> {
         self.slabs.get(group.0 as usize)
+    }
+
+    fn get_mut(&mut self, group: MaterialBindGroupIndex) -> Option<&mut MaterialBindlessSlab> {
+        self.slabs.get_mut(group.0 as usize)
     }
 
     /// Recreates any bind groups corresponding to slabs that have been modified
@@ -1132,6 +1166,95 @@ impl MaterialBindlessSlab {
         }
 
         allocated_resource_slots
+    }
+
+    fn try_update_in_place(
+        &mut self,
+        slot: MaterialBindGroupSlot,
+        new_binding_resources: &BindingResources,
+    ) -> bool {
+        for (bindless_index, new_binding_resource) in new_binding_resources.iter() {
+            let bindless_index = BindlessIndex::from(*bindless_index);
+            let Some(bindless_index_table) = self.get_bindless_index_table(bindless_index) else {
+                continue;
+            };
+            let Some(bindless_binding) = bindless_index_table.get_binding(slot, bindless_index)
+            else {
+                continue;
+            };
+
+            match new_binding_resource {
+                OwnedBindingResource::Buffer(new_buffer) => {
+                    if self
+                        .buffers
+                        .get(&bindless_index)
+                        .and_then(|existing_buffer| {
+                            existing_buffer
+                                .bindings
+                                .get(bindless_binding as usize)?
+                                .as_ref()
+                        })
+                        .is_none_or(|existing_binding| {
+                            existing_binding.resource.id() != new_buffer.id()
+                        })
+                    {
+                        println!("buffer fail");
+                        return false;
+                    }
+                }
+
+                OwnedBindingResource::TextureView(new_texture_view_dimension, new_texture_view) => {
+                    let bindless_resource_type =
+                        BindlessResourceType::from(*new_texture_view_dimension);
+                    if self
+                        .textures
+                        .get(&bindless_resource_type)
+                        .and_then(|existing_texture_view| {
+                            existing_texture_view
+                                .bindings
+                                .get(bindless_binding as usize)?
+                                .as_ref()
+                        })
+                        .is_none_or(|existing_texture_view| {
+                            existing_texture_view.resource.id() != new_texture_view.id()
+                        })
+                    {
+                        println!("texture view fail");
+                        return false;
+                    }
+                }
+
+                OwnedBindingResource::Sampler(new_sampler_binding_type, new_sampler) => {
+                    let bindless_resource_type =
+                        BindlessResourceType::from(*new_sampler_binding_type);
+                    if self
+                        .samplers
+                        .get(&bindless_resource_type)
+                        .and_then(|existing_sampler| {
+                            existing_sampler
+                                .bindings
+                                .get(bindless_binding as usize)?
+                                .as_ref()
+                        })
+                        .is_none_or(|existing_sampler| {
+                            existing_sampler.resource.id() != new_sampler.id()
+                        })
+                    {
+                        println!("sampler fail");
+                        return false;
+                    }
+                }
+
+                OwnedBindingResource::Data(owned_data) => {
+                    match self.data_buffers.get_mut(&bindless_index) {
+                        None => return false,
+                        Some(data_buffer) => data_buffer.set(bindless_binding, owned_data),
+                    }
+                }
+            }
+        }
+
+        true
     }
 
     /// Removes the material allocated in the given slot, with the given
@@ -2041,6 +2164,16 @@ impl MaterialDataBuffer {
         self.len += 1;
         self.buffer.dirty = BufferDirtyState::NeedsReserve;
         slot
+    }
+
+    fn set(&mut self, slot: u32, data: &[u8]) {
+        // Calculate the range we're going to copy to.
+        let start = slot as usize * self.aligned_element_size as usize;
+        let end = (slot as usize + 1) * self.aligned_element_size as usize;
+
+        self.buffer.values_mut()[start..end].copy_from_slice(data);
+
+        self.buffer.dirty = BufferDirtyState::NeedsUpload;
     }
 
     /// Marks the given slot as free.
