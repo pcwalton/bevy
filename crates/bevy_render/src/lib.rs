@@ -84,7 +84,7 @@ use crate::{
     gpu_readback::GpuReadbackPlugin,
     mesh::{MeshRenderAssetPlugin, RenderMesh},
     render_asset::prepare_assets,
-    render_resource::PipelineCache,
+    render_resource::{PipelineCache, SparseBufferPlugin},
     renderer::{render_system, RenderAdapterInfo, RenderGraph},
     settings::RenderCreation,
     storage::StoragePlugin,

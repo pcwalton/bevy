@@ -1326,19 +1326,19 @@ impl MeshCullingData {
     fn update(
         &self,
         mesh_culling_data_buffer: &mut MeshCullingDataBuffer,
-        instance_data_index: usize,
+        instance_data_index: u32,
     ) {
         while mesh_culling_data_buffer.len() < instance_data_index + 1 {
             mesh_culling_data_buffer.push(MeshCullingData::default());
         }
-        mesh_culling_data_buffer.values_mut()[instance_data_index] = *self;
+        mesh_culling_data_buffer.set(instance_data_index, *self);
     }
 }
 
 impl Default for MeshCullingDataBuffer {
     #[inline]
     fn default() -> Self {
-        Self(RawBufferVec::new(BufferUsages::STORAGE))
+        Self(SparseBufferVec::new(BufferUsages::STORAGE, "mesh culling data buffer".to_owned()))
     }
 }
 
@@ -1837,7 +1837,7 @@ pub fn collect_meshes_for_gpu_building(
                         if let Some(mesh_culling_data) = mesh_culling_builder {
                             mesh_culling_data.update(
                                 &mut mesh_culling_data_buffer,
-                                instance_data_index as usize,
+                                instance_data_index,
                             );
                         }
                     }
