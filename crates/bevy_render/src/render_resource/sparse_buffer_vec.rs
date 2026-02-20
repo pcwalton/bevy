@@ -255,12 +255,13 @@ where
         }
 
         // FIXME: Try 1.5 instead of power of two
-        self.reserve(self.values.len().next_power_of_two());
+        self.reserve(self.values.len().next_power_of_two(), render_device);
 
         match mem::replace(&mut self.state, SparseBufferVecState::Clean) {
             SparseBufferVecState::Clean => {}
 
             SparseBufferVecState::DirtyDense => {
+                
             }
 
             SparseBufferVecState::DirtySparse => {
