@@ -588,7 +588,7 @@ pub struct MeshCullingData {
 /// To avoid wasting CPU time in the CPU culling case, this buffer will be empty
 /// if GPU culling isn't in use.
 #[derive(Resource, Deref, DerefMut)]
-pub struct MeshCullingDataBuffer(RawBufferVec<MeshCullingData>);
+pub struct MeshCullingDataBuffer(SparseBufferVec<MeshCullingData>);
 
 impl MeshUniform {
     pub fn new(
@@ -1327,19 +1327,22 @@ impl MeshCullingData {
     fn update(
         &self,
         mesh_culling_data_buffer: &mut MeshCullingDataBuffer,
-        instance_data_index: usize,
+        instance_data_index: u32,
     ) {
         while mesh_culling_data_buffer.len() < instance_data_index + 1 {
             mesh_culling_data_buffer.push(MeshCullingData::default());
         }
-        mesh_culling_data_buffer.values_mut()[instance_data_index] = *self;
+        mesh_culling_data_buffer.set(instance_data_index, *self);
     }
 }
 
 impl Default for MeshCullingDataBuffer {
     #[inline]
     fn default() -> Self {
-        Self(RawBufferVec::new(BufferUsages::STORAGE))
+        Self(SparseBufferVec::new(
+            BufferUsages::STORAGE,
+            "mesh culling data buffer".to_owned(),
+        ))
     }
 }
 
@@ -1842,10 +1845,8 @@ pub fn collect_meshes_for_gpu_building(
                             continue;
                         };
                         if let Some(mesh_culling_data) = mesh_culling_builder {
-                            mesh_culling_data.update(
-                                &mut mesh_culling_data_buffer,
-                                instance_data_index as usize,
-                            );
+                            mesh_culling_data
+                                .update(&mut mesh_culling_data_buffer, instance_data_index);
                         }
                     }
                 }
