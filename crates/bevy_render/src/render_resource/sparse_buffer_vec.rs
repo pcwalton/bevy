@@ -1,14 +1,19 @@
 //! A buffer that's sparsely updated from the CPU.
 
-use std::sync::atomic::AtomicU64;
+use std::{
+    mem,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-use bevy_asset::{load_embedded_asset, Handle};
+use bevy_app::{App, Plugin};
+use bevy_asset::{embedded_asset, load_embedded_asset, Handle};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     resource::Resource,
     system::{Res, ResMut},
     world::{FromWorld, World},
 };
+use bevy_log::error;
 use bevy_material::{
     bind_group_layout_entries::{
         binding_types::{storage_buffer, storage_buffer_read_only, uniform_buffer},
@@ -20,11 +25,14 @@ use bevy_platform::collections::HashMap;
 use bevy_shader::Shader;
 use bytemuck::{NoUninit, Pod, Zeroable};
 use encase::ShaderType;
-use wgpu::{BindGroup, ComputePassDescriptor, ShaderStages};
+use wgpu::{BindGroup, BufferDescriptor, BufferUsages, ComputePassDescriptor, ShaderStages};
 
 use crate::{
-    render_resource::{PipelineCache, RawBufferVec, SpecializedComputePipeline, UniformBuffer},
-    renderer::RenderContext,
+    render_resource::{
+        BindGroupEntries, Buffer, PipelineCache, RawBufferVec, SpecializedComputePipeline,
+        UniformBuffer,
+    },
+    renderer::{RenderContext, RenderDevice, RenderQueue},
 };
 
 pub struct SparseBufferPlugin;
@@ -169,14 +177,173 @@ impl SpecializedComputePipeline for SparseBufferUpdatePipelines {
     }
 }
 
-pub struct SparseBufferVec<T> where T: NoUninit {
+pub struct SparseBufferVec<T>
+where
+    T: NoUninit,
+{
+    id: SparseBufferId,
     values: Vec<T>,
     data_buffer: Option<Buffer>,
-    staging_buffer: Option<RawBufferVec<u32>>,
+    staging_buffers: SparseBufferStagingBuffers<T>,
     metadata_uniform: UniformBuffer<GpuSparseBufferUpdateMetadata>,
     capacity: usize,
-    item_size: usize,
     buffer_usages: BufferUsages,
-    label: Option<String>,
-    changed: bool,
+    label: String,
+    state: SparseBufferVecState,
+}
+
+struct SparseBufferStagingBuffers<T>
+where
+    T: NoUninit,
+{
+    source_data: RawBufferVec<T>,
+    indices: RawBufferVec<u32>,
+}
+
+enum SparseBufferVecState {
+    Clean,
+    DirtySparse,
+    DirtyDense,
+}
+
+impl<T> SparseBufferVec<T>
+where
+    T: NoUninit,
+{
+    pub const fn new(buffer_usages: BufferUsages, label: String) -> Self {
+        let id = SparseBufferId(NEXT_SPARSE_BUFFER_ID.fetch_add(1, Ordering::Relaxed));
+        Self {
+            id,
+            values: vec![],
+            data_buffer: None,
+            staging_buffers: SparseBufferStagingBuffers::new(&label),
+            metadata_uniform: UniformBuffer::from(GpuSparseBufferUpdateMetadata::default()),
+            capacity: 0,
+            buffer_usages,
+            label,
+            state: SparseBufferVecState::Clean,
+        }
+    }
+
+    pub fn reserve(&mut self, new_capacity: usize, render_device: &RenderDevice) {
+        if new_capacity == 0 || new_capacity <= self.capacity {
+            return;
+        }
+
+        self.capacity = new_capacity;
+        self.buffer = Some(render_device.create_buffer(&BufferDescriptor {
+            label: &self.label,
+            size: size_of::<T>() as u64 * new_capacity as u64,
+            usage: self.buffer_usage,
+            mapped_at_creation: false,
+        }));
+        // Since we resized the buffer, we need to reupload it.
+        self.state = SparseBufferVecState::DirtyDense;
+    }
+
+    pub fn write_buffer(
+        &mut self,
+        render_device: &RenderDevice,
+        render_queue: &RenderQueue,
+        pipeline_cache: &PipelineCache,
+        sparse_buffer_update_jobs: &mut SparseBufferUpdateJobs,
+        sparse_buffer_update_bind_groups: &mut SparseBufferUpdateBindGroups,
+        sparse_buffer_update_pipelines: &SparseBufferUpdatePipelines,
+    ) {
+        if self.values.is_empty() {
+            return;
+        }
+
+        // FIXME: Try 1.5 instead of power of two
+        self.reserve(self.values.len().next_power_of_two());
+
+        match mem::replace(&mut self.state, SparseBufferVecState::Clean) {
+            SparseBufferVecState::Clean => {}
+
+            SparseBufferVecState::DirtyDense => {
+            }
+
+            SparseBufferVecState::DirtySparse => {
+                let Some(ref mut staging_buffers) = self.staging_buffers else {
+                    error!("Dirty sparse buffer should have had a staging buffer");
+                    return;
+                };
+                let Some(ref mut data_buffer) = self.data_buffer else {
+                    error!("Dirty sparse buffer should have created a data buffer by now");
+                    return;
+                };
+
+                sparse_buffer_update_jobs.push(SparseBufferUpdateJob {
+                    sparse_buffer_id: self.id,
+                    count: staging_buffers.len() as u32,
+                });
+
+                staging_buffers.write_buffer(render_device, render_queue);
+                staging_buffers.clear();
+
+                self.metadata_uniform
+                    .write_buffer(render_device, render_queue);
+                let Some(ref mut metadata_buffer) = self.metadata_uniform.buffer() else {
+                    error!("Dirty metadata buffer should now exist");
+                    return;
+                };
+
+                let bind_group = render_device.create_bind_group(
+                    format!("{} bind group", self.label),
+                    &pipeline_cache
+                        .get_bind_group_layout(&sparse_buffer_update_pipelines.bind_group_layout),
+                    &BindGroupEntries::sequential((
+                        // @group(0) @binding(0) var<storage, read_write> dest_buffer: array<u32>;
+                        data_buffer,
+                        // @group(0) @binding(1) var<storage> src_buffer: array<u32>;
+                        staging_buffers.source_data,
+                        // @group(0) @binding(2) var<storage> indices: array<u32>;
+                        staging_buffers.indices,
+                        // @group(0) @binding(3) var<uniform> metadata:
+                        // SparseBufferUpdateMetadata;
+                        metadata_buffer,
+                    )),
+                );
+
+                sparse_buffer_update_bind_groups.bind_groups.insert(self.id, SparseBufferUpdateBindGroup {
+                    bind_group,
+                });
+            }
+        }
+    }
+}
+
+impl<T> SparseBufferStagingBuffers<T>
+where
+    T: NoUninit,
+{
+    fn new(label: &str) -> SparseBufferStagingBuffers<T> {
+        let mut source_data_buffer =
+            RawBufferVec::new(BufferUsages::COPY_DST | BufferUsages::STORAGE);
+        source_data_buffer.set_label(Some(&*format!("{} staging buffer", label)));
+        let mut indices_buffer = RawBufferVec::new(BufferUsages::COPY_DST | BufferUsages::STORAGE);
+        indices_buffer.set_label(Some(&*format!("{} index buffer", label)));
+        SparseBufferStagingBuffers {
+            source_data: source_data_buffer,
+            indices: indices_buffer,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.source_data.clear();
+        self.indices.clear();
+    }
+
+    fn len(&self) -> u32 {
+        self.source_data.len() as u32
+    }
+
+    fn is_empty(&self) -> bool {
+        self.source_data.is_empty()
+    }
+
+    fn write_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
+        self.source_data.write_buffer(&render_device, &render_queue);
+        self.indices.write_buffer(&render_device, &render_queue);
+    }
 }
