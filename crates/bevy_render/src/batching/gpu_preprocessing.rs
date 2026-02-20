@@ -33,7 +33,10 @@ use crate::{
         SortedRenderPhase, UnbatchableBinnedEntityIndices, ViewBinnedRenderPhases,
         ViewSortedRenderPhases,
     },
-    render_resource::{Buffer, GpuArrayBufferable, RawBufferVec, UninitBufferVec},
+    render_resource::{
+        Buffer, GpuArrayBufferable, PipelineCache, RawBufferVec, SparseBufferUpdateBindGroups,
+        SparseBufferUpdateJobs, SparseBufferUpdatePipelines, SparseBufferVec, UninitBufferVec,
+    },
     renderer::{RenderAdapter, RenderAdapterInfo, RenderDevice, RenderQueue, WgpuWrapper},
     sync_world::MainEntity,
     view::{ExtractedView, NoIndirectDrawing, RetainedViewEntity},
@@ -276,7 +279,7 @@ where
     BDI: Pod + Default,
 {
     /// The buffer containing the data that will be uploaded to the GPU.
-    buffer: RawBufferVec<BDI>,
+    buffer: SparseBufferVec<BDI>,
 
     /// Indices of slots that are free within the buffer.
     ///
@@ -292,7 +295,10 @@ where
     /// Creates a new, empty buffer.
     pub fn new() -> InstanceInputUniformBuffer<BDI> {
         InstanceInputUniformBuffer {
-            buffer: RawBufferVec::new(BufferUsages::STORAGE),
+            buffer: SparseBufferVec::new(
+                BufferUsages::STORAGE,
+                "instance input uniform buffer".to_owned(),
+            ),
             free_uniform_indices: vec![],
         }
     }
@@ -303,9 +309,9 @@ where
         self.free_uniform_indices.clear();
     }
 
-    /// Returns the [`RawBufferVec`] corresponding to this input uniform buffer.
+    /// Returns the [`SparseBufferVec`] corresponding to this input uniform buffer.
     #[inline]
-    pub fn buffer(&self) -> &RawBufferVec<BDI> {
+    pub fn buffer(&self) -> &SparseBufferVec<BDI> {
         &self.buffer
     }
 
@@ -314,7 +320,7 @@ where
     pub fn add(&mut self, element: BDI) -> u32 {
         match self.free_uniform_indices.pop() {
             Some(uniform_index) => {
-                self.buffer.values_mut()[uniform_index as usize] = element;
+                self.buffer.set(uniform_index, element);
                 uniform_index
             }
             None => self.buffer.push(element) as u32,
@@ -332,8 +338,7 @@ where
     ///
     /// Returns [`None`] if the index is out of bounds or the data is removed.
     pub fn get(&self, uniform_index: u32) -> Option<BDI> {
-        if (uniform_index as usize) >= self.buffer.len()
-            || self.free_uniform_indices.contains(&uniform_index)
+        if uniform_index >= self.buffer.len() || self.free_uniform_indices.contains(&uniform_index)
         {
             None
         } else {
@@ -347,7 +352,7 @@ where
     /// # Panics
     /// if `uniform_index` is not in bounds of [`Self::buffer`].
     pub fn get_unchecked(&self, uniform_index: u32) -> BDI {
-        self.buffer.values()[uniform_index as usize]
+        *self.buffer.get(uniform_index)
     }
 
     /// Stores a piece of buffered data at the given index.
@@ -355,7 +360,7 @@ where
     /// # Panics
     /// if `uniform_index` is not in bounds of [`Self::buffer`].
     pub fn set(&mut self, uniform_index: u32, element: BDI) {
-        self.buffer.values_mut()[uniform_index as usize] = element;
+        self.buffer.set(uniform_index, element);
     }
 
     // Ensures that the buffers are nonempty, which the GPU requires before an
@@ -367,7 +372,7 @@ where
     }
 
     /// Returns the number of instances in this buffer.
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> u32 {
         self.buffer.len()
     }
 
@@ -379,7 +384,7 @@ where
 
     /// Consumes this [`InstanceInputUniformBuffer`] and returns the raw buffer
     /// ready to be uploaded to the GPU.
-    pub fn into_buffer(self) -> RawBufferVec<BDI> {
+    pub fn into_buffer(self) -> SparseBufferVec<BDI> {
         self.buffer
     }
 }
@@ -2005,6 +2010,10 @@ pub fn write_batched_instance_buffers<GFBD>(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     gpu_array_buffer: ResMut<BatchedInstanceBuffers<GFBD::BufferData, GFBD::BufferInputData>>,
+    pipeline_cache: Res<PipelineCache>,
+    mut sparse_buffer_update_jobs: ResMut<SparseBufferUpdateJobs>,
+    mut sparse_buffer_update_bind_groups: ResMut<SparseBufferUpdateBindGroups>,
+    sparse_buffer_update_pipelines: Res<SparseBufferUpdatePipelines>,
 ) where
     GFBD: GetFullBatchData,
 {
@@ -2022,13 +2031,13 @@ pub fn write_batched_instance_buffers<GFBD>(
             let _span = bevy_log::info_span!("write_current_input_buffers").entered();
             current_input_buffer
                 .buffer
-                .write_buffer(render_device, render_queue);
+                .write_buffers(render_device, render_queue);
         });
         scope.spawn(async {
             let _span = bevy_log::info_span!("write_previous_input_buffers").entered();
             previous_input_buffer
                 .buffer
-                .write_buffer(render_device, render_queue);
+                .write_buffers(render_device, render_queue);
         });
 
         for phase_instance_buffers in phase_instance_buffers.values_mut() {
@@ -2082,6 +2091,21 @@ pub fn write_batched_instance_buffers<GFBD>(
             }
         }
     });
+
+    current_input_buffer.buffer.prepare_to_populate_buffers(
+        render_device,
+        &pipeline_cache,
+        &mut sparse_buffer_update_jobs,
+        &mut sparse_buffer_update_bind_groups,
+        &sparse_buffer_update_pipelines,
+    );
+    previous_input_buffer.buffer.prepare_to_populate_buffers(
+        render_device,
+        &pipeline_cache,
+        &mut sparse_buffer_update_jobs,
+        &mut sparse_buffer_update_bind_groups,
+        &sparse_buffer_update_pipelines,
+    );
 }
 
 pub fn clear_indirect_parameters_buffers(

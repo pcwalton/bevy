@@ -29,13 +29,13 @@ use encase::ShaderType;
 use wgpu::{BufferDescriptor, BufferUsages, ComputePassDescriptor, ShaderStages};
 
 use crate::{
-    diagnostic::RecordDiagnostics as _,
+    diagnostic::{DiagnosticsRecorder, RecordDiagnostics as _},
     render_resource::{
         BindGroup, BindGroupEntries, BindingResource, Buffer, PipelineCache, RawBufferVec,
         SpecializedComputePipeline, SpecializedComputePipelines, UniformBuffer,
     },
-    renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue},
-    Render, RenderApp, RenderSystems,
+    renderer::{RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue},
+    ExtractSchedule, RenderApp,
 };
 
 pub struct SparseBufferPlugin;
@@ -43,23 +43,6 @@ pub struct SparseBufferPlugin;
 impl Plugin for SparseBufferPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "sparse_buffer_update.wgsl");
-
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-
-        render_app
-            .init_resource::<SparseBufferUpdatePipelines>()
-            .init_resource::<SparseBufferUpdateJobs>()
-            .init_resource::<SpecializedComputePipelines<SparseBufferUpdatePipelines>>()
-            .add_systems(
-                Render,
-                clear_sparse_buffer_jobs.in_set(RenderSystems::PrepareAssets),
-            )
-            .add_systems(
-                RenderGraph,
-                update_sparse_buffers.in_set(RenderGraphSystems::Render),
-            );
     }
 
     fn finish(&self, app: &mut App) {
@@ -67,7 +50,16 @@ impl Plugin for SparseBufferPlugin {
             return;
         };
 
-        render_app.init_resource::<SparseBufferUpdateBindGroups>();
+        render_app
+            .init_resource::<SparseBufferUpdateJobs>()
+            .init_resource::<SparseBufferUpdatePipelines>()
+            .init_resource::<SpecializedComputePipelines<SparseBufferUpdatePipelines>>()
+            .init_resource::<SparseBufferUpdateBindGroups>()
+            .add_systems(ExtractSchedule, clear_sparse_buffer_jobs)
+            .add_systems(
+                RenderGraph,
+                update_sparse_buffers.in_set(RenderGraphSystems::Begin),
+            );
     }
 }
 
@@ -100,7 +92,7 @@ pub struct SparseBufferUpdateJobs(pub Vec<SparseBufferUpdateJob>);
 
 pub struct SparseBufferUpdateJob {
     sparse_buffer_id: SparseBufferId,
-    count: u32,
+    word_len: u32,
 }
 
 #[derive(Clone, Copy, Default, ShaderType, Pod, Zeroable)]
@@ -108,29 +100,36 @@ pub struct SparseBufferUpdateJob {
 struct GpuSparseBufferUpdateMetadata {
     element_size: u32,
     element_stride: u32,
-    element_update_count: u32,
+    element_update_word_len: u32,
 }
 
 fn update_sparse_buffers(
     sparse_buffer_update_jobs: Res<SparseBufferUpdateJobs>,
     sparse_buffer_update_bind_groups: Res<SparseBufferUpdateBindGroups>,
     pipeline_cache: Res<PipelineCache>,
-    mut render_context: RenderContext,
+    mut diagnostics: Option<ResMut<DiagnosticsRecorder>>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
 ) {
     if sparse_buffer_update_jobs.is_empty() {
         return;
     }
 
-    let diagnostics = render_context.diagnostic_recorder();
-    let diagnostics = diagnostics.as_deref();
-    let time_span = diagnostics.time_span(render_context.command_encoder(), "sparse buffer update");
+    let mut command_encoder =
+        render_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("sparse buffer update"),
+        });
 
-    let command_encoder = render_context.command_encoder();
+    let time_span = diagnostics
+        .as_mut()
+        .map(|diagnostics| diagnostics.time_span(&mut command_encoder, "sparse buffer update"));
+
     command_encoder.push_debug_group("sparse buffer update");
 
     let Some(compute_pipeline) =
         pipeline_cache.get_compute_pipeline(sparse_buffer_update_bind_groups.pipeline_id)
     else {
+        println!("failed to get compute pipeline");
         return;
     };
 
@@ -139,6 +138,7 @@ fn update_sparse_buffers(
             .bind_groups
             .get(&sparse_buffer_update_job.sparse_buffer_id)
         else {
+            println!("failed to get sparse buffer update bind group");
             continue;
         };
 
@@ -155,7 +155,7 @@ fn update_sparse_buffers(
         );
         sparse_buffer_update_pass.dispatch_workgroups(
             sparse_buffer_update_job
-                .count
+                .word_len
                 .div_ceil(SPARSE_BUFFER_UPDATE_WORKGROUP_SIZE),
             1,
             1,
@@ -163,11 +163,15 @@ fn update_sparse_buffers(
     }
 
     command_encoder.pop_debug_group();
-    time_span.end(render_context.command_encoder());
+    if let Some(mut time_span) = time_span {
+        time_span.end(&mut command_encoder);
+    }
+
+    render_queue.submit([command_encoder.finish()]);
 }
 
-fn clear_sparse_buffer_jobs(mut sparse_buffer_vec_update_jobs: ResMut<SparseBufferUpdateJobs>) {
-    sparse_buffer_vec_update_jobs.clear();
+fn clear_sparse_buffer_jobs(mut sparse_buffer_update_jobs: ResMut<SparseBufferUpdateJobs>) {
+    sparse_buffer_update_jobs.clear();
 }
 
 impl FromWorld for SparseBufferUpdatePipelines {
@@ -234,6 +238,7 @@ where
     indices: RawBufferVec<u32>,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum SparseBufferVecState {
     Clean,
     DirtySparse,
@@ -252,12 +257,12 @@ where
             data_buffer: None,
             staging_buffers: SparseBufferStagingBuffers::new(&label),
             metadata_uniform: UniformBuffer::from(GpuSparseBufferUpdateMetadata {
-                element_size: size_of::<T>() as u32,
-                element_stride: size_of::<T>() as u32,
-                element_update_count: 0,
+                element_size: (size_of::<T>() / 4) as u32,
+                element_stride: (size_of::<T>() / 4) as u32,
+                element_update_word_len: 0,
             }),
             capacity: 0,
-            buffer_usages,
+            buffer_usages: buffer_usages | BufferUsages::COPY_DST,
             label,
             state: SparseBufferVecState::Clean,
         }
@@ -297,6 +302,11 @@ where
         self.values.is_empty()
     }
 
+    pub fn clear(&mut self) {
+        self.values.clear();
+        self.state = SparseBufferVecState::Clean;
+    }
+
     pub fn push(&mut self, value: T) -> u32 {
         let index = self.values.len() as u32;
         self.values.push(value);
@@ -322,15 +332,7 @@ where
         self.state = SparseBufferVecState::DirtySparse;
     }
 
-    pub fn write_buffer(
-        &mut self,
-        render_device: &RenderDevice,
-        render_queue: &RenderQueue,
-        pipeline_cache: &PipelineCache,
-        sparse_buffer_update_jobs: &mut SparseBufferUpdateJobs,
-        sparse_buffer_update_bind_groups: &mut SparseBufferUpdateBindGroups,
-        sparse_buffer_update_pipelines: &SparseBufferUpdatePipelines,
-    ) {
+    pub fn write_buffers(&mut self, render_device: &RenderDevice, render_queue: &RenderQueue) {
         if self.values.is_empty() {
             return;
         }
@@ -338,7 +340,7 @@ where
         // FIXME: Try 1.5 instead of power of two
         self.reserve(self.values.len().next_power_of_two(), render_device);
 
-        match mem::replace(&mut self.state, SparseBufferVecState::Clean) {
+        match self.state {
             SparseBufferVecState::Clean => {}
 
             SparseBufferVecState::DirtyDense => {
@@ -351,35 +353,49 @@ where
             }
 
             SparseBufferVecState::DirtySparse => {
-                let Some(ref mut data_buffer) = self.data_buffer else {
-                    error!("Dirty sparse buffer should have created a data buffer by now");
+                self.metadata_uniform.get_mut().element_update_word_len =
+                    self.staging_buffers.word_len();
+                self.metadata_uniform
+                    .write_buffer(render_device, render_queue);
+
+                self.staging_buffers
+                    .write_buffers(render_device, render_queue);
+            }
+        }
+    }
+
+    pub fn prepare_to_populate_buffers(
+        &mut self,
+        render_device: &RenderDevice,
+        pipeline_cache: &PipelineCache,
+        sparse_buffer_update_jobs: &mut SparseBufferUpdateJobs,
+        sparse_buffer_update_bind_groups: &mut SparseBufferUpdateBindGroups,
+        sparse_buffer_update_pipelines: &SparseBufferUpdatePipelines,
+    ) {
+        match mem::replace(&mut self.state, SparseBufferVecState::Clean) {
+            SparseBufferVecState::Clean | SparseBufferVecState::DirtyDense => {}
+
+            SparseBufferVecState::DirtySparse => {
+                let (
+                    Some(data_buffer),
+                    Some(source_data_staging_buffer),
+                    Some(indices_staging_buffer),
+                    Some(metadata_buffer),
+                ) = (
+                    &self.data_buffer,
+                    self.staging_buffers.source_data.buffer(),
+                    self.staging_buffers.indices.buffer(),
+                    self.metadata_uniform.buffer(),
+                )
+                else {
+                    error!("Buffers should have been created by now");
                     return;
                 };
 
                 sparse_buffer_update_jobs.push(SparseBufferUpdateJob {
                     sparse_buffer_id: self.id,
-                    count: self.staging_buffers.len(),
+                    word_len: self.staging_buffers.word_len(),
                 });
-
-                self.metadata_uniform.get_mut().element_update_count = self.staging_buffers.len();
-                self.metadata_uniform
-                    .write_buffer(render_device, render_queue);
-                let Some(ref mut metadata_buffer) = self.metadata_uniform.buffer() else {
-                    error!("Dirty metadata buffer should exist now");
-                    return;
-                };
-
-                self.staging_buffers
-                    .write_buffers(render_device, render_queue);
-                self.staging_buffers.clear();
-
-                let (Some(source_data_staging_buffer), Some(indices_staging_buffer)) = (
-                    self.staging_buffers.source_data.buffer(),
-                    self.staging_buffers.indices.buffer(),
-                ) else {
-                    error!("Staging buffers should exist by now");
-                    return;
-                };
 
                 let bind_group = render_device.create_bind_group(
                     Some(&*format!("{} bind group", self.label)),
@@ -401,6 +417,8 @@ where
                 sparse_buffer_update_bind_groups
                     .bind_groups
                     .insert(self.id, SparseBufferUpdateBindGroup { bind_group });
+
+                self.staging_buffers.clear();
             }
         }
     }
@@ -429,6 +447,10 @@ where
 
     fn len(&self) -> u32 {
         self.source_data.len() as u32
+    }
+
+    fn word_len(&self) -> u32 {
+        (self.source_data.len() * size_of::<T>() / 4) as u32
     }
 
     #[allow(unused)]
