@@ -58,6 +58,7 @@ pub struct SparseBufferUpdatePipelines {
 
 #[derive(Resource)]
 pub struct SparseBufferUpdateBindGroups {
+    // TODO: make this a weak map
     bind_groups: HashMap<SparseBufferId, SparseBufferUpdateBindGroup>,
     pipeline_id: CachedComputePipelineId,
 }
@@ -241,6 +242,28 @@ where
         self.state = SparseBufferVecState::DirtyDense;
     }
 
+    pub fn push(&mut self, value: T) -> u32 {
+        let index = self.values.len() as u32;
+        self.values.push(value);
+        self.note_changed_index(index);
+        index
+    }
+
+    pub fn get(&self, index: u32) -> &T {
+        &self.values[index as usize]
+    }
+
+    pub fn set(&mut self, index: u32, value: T) {
+        self.values[index as usize] = value;
+        self.note_changed_index(index);
+    }
+
+    fn note_changed_index(&mut self, index: u32) {
+        // TODO: switch to dense
+        self.staging_buffers.source_data.push(self.values[index]);
+        self.staging_buffers.indices.push(index);
+    }
+
     pub fn write_buffer(
         &mut self,
         render_device: &RenderDevice,
@@ -261,7 +284,12 @@ where
             SparseBufferVecState::Clean => {}
 
             SparseBufferVecState::DirtyDense => {
-                
+                let Some(ref mut data_buffer) = self.data_buffer else {
+                    error!("Dirty sparse buffer should have created a data buffer by now");
+                    return;
+                };
+
+                render_queue.write_buffer(data_buffer, 0, &self.values);
             }
 
             SparseBufferVecState::DirtySparse => {
@@ -279,7 +307,7 @@ where
                     count: staging_buffers.len() as u32,
                 });
 
-                staging_buffers.write_buffer(render_device, render_queue);
+                staging_buffers.write_buffers(render_device, render_queue);
                 staging_buffers.clear();
 
                 self.metadata_uniform

@@ -587,7 +587,7 @@ pub struct MeshCullingData {
 /// To avoid wasting CPU time in the CPU culling case, this buffer will be empty
 /// if GPU culling isn't in use.
 #[derive(Resource, Deref, DerefMut)]
-pub struct MeshCullingDataBuffer(RawBufferVec<MeshCullingData>);
+pub struct MeshCullingDataBuffer(SparseBufferVec<MeshCullingData>);
 
 impl MeshUniform {
     pub fn new(
