@@ -19,6 +19,7 @@ use std::f32::consts::PI;
 use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
 use bevy::{
     asset::RenderAssetUsages,
+    camera::visibility::NoCpuCulling,
     color::palettes::basic::SILVER,
     input::common_conditions::{input_just_pressed, input_toggle_active},
     prelude::*,
@@ -121,7 +122,7 @@ fn setup(
     let num_shapes = shapes.len();
 
     for (i, shape) in shapes.into_iter().enumerate() {
-        commands.spawn((
+        let id = commands.spawn((
             Mesh3d(shape),
             MeshMaterial3d(debug_material.clone()),
             Transform::from_xyz(
@@ -132,7 +133,8 @@ fn setup(
             .with_rotation(Quat::from_rotation_x(-PI / 4.)),
             Shape,
             Row::Front,
-        ));
+            NoCpuCulling,
+        )).id();
     }
 
     let num_extrusions = extrusions.len();
@@ -150,6 +152,7 @@ fn setup(
             .with_rotation(Quat::from_rotation_x(-PI / 4.)),
             Shape,
             Row::Middle,
+            NoCpuCulling,
         ));
     }
 
@@ -168,6 +171,7 @@ fn setup(
             .with_rotation(Quat::from_rotation_x(-PI / 4.)),
             Shape,
             Row::Rear,
+            NoCpuCulling,
         ));
     }
 

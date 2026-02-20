@@ -202,6 +202,7 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
 
     // Frustum cull if necessary.
 #ifdef FRUSTUM_CULLING
+    /*
     if ((current_input[input_index].flags & MESH_FLAGS_NO_FRUSTUM_CULLING_BIT) == 0u) {
         let aabb_center = mesh_culling_data[input_index].aabb_center.xyz;
         let aabb_half_extents = mesh_culling_data[input_index].aabb_half_extents.xyz;
@@ -212,6 +213,7 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
             return;
         }
     }
+    */
 #endif
 
     // See whether the `MeshInputUniform` was updated on this frame. If it

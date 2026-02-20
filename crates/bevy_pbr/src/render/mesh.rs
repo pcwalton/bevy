@@ -5,6 +5,7 @@ use crate::{
     skin::skin_uniforms_from_world,
 };
 use bevy_asset::{embedded_asset, load_embedded_asset, AssetId};
+use bevy_camera::visibility::NoCpuCulling;
 use bevy_camera::{
     primitives::Aabb,
     visibility::{NoFrustumCulling, RenderLayers, ViewVisibility, VisibilityRange},
@@ -1493,12 +1494,15 @@ type GpuMeshExtractionQuery = (
     Option<Read<Aabb>>,
     Read<Mesh3d>,
     Option<Read<MeshTag>>,
-    Has<NoFrustumCulling>,
-    Has<NotShadowReceiver>,
-    Has<TransmittedShadowReceiver>,
-    Has<NotShadowCaster>,
-    Has<NoAutomaticBatching>,
-    Has<VisibilityRange>,
+    (
+        Has<NoFrustumCulling>,
+        Has<NotShadowReceiver>,
+        Has<TransmittedShadowReceiver>,
+        Has<NotShadowCaster>,
+        Has<NoAutomaticBatching>,
+        Has<VisibilityRange>,
+        Has<NoCpuCulling>,
+    ),
     Option<Read<RenderLayers>>,
 );
 
@@ -1659,12 +1663,15 @@ fn extract_mesh_for_gpu_building(
         aabb,
         mesh,
         tag,
-        no_frustum_culling,
-        not_shadow_receiver,
-        transmitted_receiver,
-        not_shadow_caster,
-        no_automatic_batching,
-        visibility_range,
+        (
+            no_frustum_culling,
+            not_shadow_receiver,
+            transmitted_receiver,
+            not_shadow_caster,
+            no_automatic_batching,
+            visibility_range,
+            no_cpu_culling,
+        ),
         render_layers,
     ): <GpuMeshExtractionQuery as QueryData>::Item<'_, '_>,
     render_visibility_ranges: &RenderVisibilityRanges,
@@ -1672,7 +1679,7 @@ fn extract_mesh_for_gpu_building(
     queue: &mut RenderMeshInstanceGpuQueue,
     any_gpu_culling: bool,
 ) {
-    if !view_visibility.get() {
+    if !view_visibility.get() && !no_cpu_culling {
         queue.remove(entity.into(), any_gpu_culling);
         return;
     }
