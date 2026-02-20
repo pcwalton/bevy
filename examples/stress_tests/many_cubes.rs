@@ -172,7 +172,7 @@ fn setup(
         Layout::Sphere => {
             // NOTE: This pattern is good for testing performance of culling as it provides roughly
             // the same number of visible meshes regardless of the viewing angle.
-            const N_POINTS: usize = WIDTH * HEIGHT * 4;
+            const N_POINTS: usize = WIDTH * HEIGHT * 85;
             // NOTE: f64 is used to avoid precision issues that produce visual artifacts in the distribution
             let radius = WIDTH as f64 * 2.5;
             let golden_ratio = 0.5f64 * (1.0f64 + 5.0f64.sqrt());

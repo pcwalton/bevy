@@ -226,19 +226,26 @@ pub fn update_mesh_previous_global_transforms(
         (Entity, &GlobalTransform),
         (PreviousMeshFilter, Without<PreviousGlobalTransform>),
     >,
-    mut meshes: Query<(&GlobalTransform, &mut PreviousGlobalTransform), PreviousMeshFilter>,
+    mut meshes: Query<(Ref<GlobalTransform>, &mut PreviousGlobalTransform), PreviousMeshFilter>,
+    mut system_change_tick: SystemChangeTick,
 ) {
-    let should_run = views.iter().any(|camera| camera.is_active);
-
-    if should_run {
-        for (entity, transform) in &new_meshes {
-            let new_previous_transform = PreviousGlobalTransform(transform.affine());
-            commands.entity(entity).try_insert(new_previous_transform);
-        }
-        meshes.par_iter_mut().for_each(|(transform, mut previous)| {
-            previous.set_if_neq(PreviousGlobalTransform(transform.affine()));
-        });
+    if !views.iter().any(|camera| camera.is_active) {
+        return;
     }
+
+    let (last_change_tick, this_change_tick) =
+        (system_change_tick.last_run(), system_change_tick.this_run());
+
+    for (entity, transform) in &new_meshes {
+        let new_previous_transform = PreviousGlobalTransform(transform.affine());
+        commands.entity(entity).try_insert(new_previous_transform);
+    }
+    meshes.par_iter_mut().for_each(|(transform, mut previous)| {
+        let last_changed = transform.last_changed();
+        if last_changed == last_change_tick || last_changed == this_change_tick {
+            previous.set_if_neq(PreviousGlobalTransform(transform.affine()));
+        }
+    });
 }
 
 #[derive(Resource, Clone)]
