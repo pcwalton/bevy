@@ -47,6 +47,7 @@ pub mod extract_plugin;
 pub mod extract_resource;
 pub mod globals;
 pub mod gpu_component_array_buffer;
+mod gpu_index_map;
 pub mod gpu_readback;
 pub mod mesh;
 pub mod occlusion_culling;
