@@ -781,7 +781,7 @@ impl BsnSymbol {
         Ok(ResolvedSymbol::new(type_registration, true, is_template))
     }
 
-    fn as_path(&self) -> String {
+    pub(crate) fn as_path(&self) -> String {
         let mut path = String::new();
         for component in &self.0 {
             let _ = write!(&mut path, "{}::", &**component);
