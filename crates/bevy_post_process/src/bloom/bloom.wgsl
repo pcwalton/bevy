@@ -13,10 +13,29 @@ struct BloomUniforms {
     aspect: f32,
 };
 
-@group(0) @binding(0) var input_texture: texture_2d<f32>;
-@group(0) @binding(1) var s: sampler;
+#ifdef BLOOM_COMPUTE
+struct BloomImmediates {
+    input_mip: u32,
+    output_mip: u32,
+    src_blend_factor: f32,
+    dest_blend_factor: f32,
+};
+#endif  // BLOOM_COMPUTE
 
-@group(0) @binding(2) var<uniform> uniforms: BloomUniforms;
+@group(0) @binding(0) var<uniform> uniforms: BloomUniforms;
+
+#ifdef BLOOM_COMPUTE
+
+@group(1) @binding(0) var textures: binding_array<texture_storage_2d<rg11b10ufloat, read_write>>;
+
+var<immediate> immediates: BloomImmediates;
+
+#else   // BLOOM_COMPUTE
+
+@group(0) @binding(1) var s: sampler;
+@group(0) @binding(2) var input_texture: texture_2d<f32>;
+
+#endif  // BLOOM_COMPUTE
 
 #ifdef FIRST_DOWNSAMPLE
 // https://catlikecoding.com/unity/tutorials/advanced-rendering/bloom/#3.4
@@ -45,9 +64,31 @@ fn karis_average(color: vec3<f32>) -> f32 {
     return 1.0 / (1.0 + luma);
 }
 
-// [COD] slide 153
-fn sample_input_13_tap(uv: vec2<f32>) -> vec3<f32> {
+fn texture_sample_offset(uv: vec2<f32>, offset: vec2<i32>) -> vec3<f32> {
+#ifdef BLOOM_COMPUTE
+
+    let dimensions = vec2<f32>(textureDimensions(textures[immediates.input_mip]));
+    let st = uv * dimensions + vec2<f32>(offset) - vec2<f32>(0.5);
+
+    var st0 = vec2<i32>(floor(st));
+    var st1 = st0 + 1;
+    let st_frac = fract(st);
+
+    st0 = clamp(st0, vec2(0), vec2<i32>(dimensions) - 1);
+    st1 = clamp(st1, vec2(0), vec2<i32>(dimensions) - 1);
+
+    let color_00 = textureLoad(textures[immediates.input_mip], st0).rgb;
+    let color_10 = textureLoad(textures[immediates.input_mip], vec2(st1.x, st0.y)).rgb;
+    let color_01 = textureLoad(textures[immediates.input_mip], vec2(st0.x, st1.y)).rgb;
+    let color_11 = textureLoad(textures[immediates.input_mip], st1).rgb;
+
+    let color_0 = mix(color_00, color_10, st_frac.x);
+    let color_1 = mix(color_01, color_11, st_frac.x);
+    return mix(color_0, color_1, st_frac.y);
+
+#else   // BLOOM_COMPUTE
 #ifdef UNIFORM_SCALE
+
     // This is the fast path. When the bloom scale is uniform, the 13 tap sampling kernel can be
     // expressed with constant offsets.
     //
@@ -55,20 +96,11 @@ fn sample_input_13_tap(uv: vec2<f32>) -> vec3<f32> {
     // is hard to test performance on all platforms, and uniform bloom is the most common case, this
     // path was retained when adding non-uniform (anamorphic) bloom. This adds a small, but nonzero,
     // cost to maintainability, but it does help me sleep at night.
-    let a = textureSample(input_texture, s, uv, vec2<i32>(-2, 2)).rgb;
-    let b = textureSample(input_texture, s, uv, vec2<i32>(0, 2)).rgb;
-    let c = textureSample(input_texture, s, uv, vec2<i32>(2, 2)).rgb;
-    let d = textureSample(input_texture, s, uv, vec2<i32>(-2, 0)).rgb;
-    let e = textureSample(input_texture, s, uv).rgb;
-    let f = textureSample(input_texture, s, uv, vec2<i32>(2, 0)).rgb;
-    let g = textureSample(input_texture, s, uv, vec2<i32>(-2, -2)).rgb;
-    let h = textureSample(input_texture, s, uv, vec2<i32>(0, -2)).rgb;
-    let i = textureSample(input_texture, s, uv, vec2<i32>(2, -2)).rgb;
-    let j = textureSample(input_texture, s, uv, vec2<i32>(-1, 1)).rgb;
-    let k = textureSample(input_texture, s, uv, vec2<i32>(1, 1)).rgb;
-    let l = textureSample(input_texture, s, uv, vec2<i32>(-1, -1)).rgb;
-    let m = textureSample(input_texture, s, uv, vec2<i32>(1, -1)).rgb;
-#else
+    let uv_offset = vec2<f32>(offset) / vec2<f32>(textureDimensions(input_texture));
+    return textureSample(input_texture, s, uv + uv_offset).rgb;
+
+#else   // UNIFORM_SCALE
+
     // This is the flexible, but potentially slower, path for non-uniform sampling. Because the
     // sample is not a constant, and it can fall outside of the limits imposed on constant sample
     // offsets (-8..8), we have to compute the pixel offset in uv coordinates using the size of the
@@ -78,25 +110,33 @@ fn sample_input_13_tap(uv: vec2<f32>) -> vec3<f32> {
     // mention it anywhere: https://www.w3.org/TR/WGSL/#texturesample, but the fact that the offset
     // syntax uses a const-expr implies that it allows some compiler optimizations - maybe more
     // impactful on mobile?
-    let scale = uniforms.scale;
-    let ps = scale / vec2<f32>(textureDimensions(input_texture));
-    let pl = 2.0 * ps;
-    let ns = -1.0 * ps;
-    let nl = -2.0 * ps;
-    let a = textureSample(input_texture, s, uv + vec2<f32>(nl.x, pl.y)).rgb;
-    let b = textureSample(input_texture, s, uv + vec2<f32>(0.00, pl.y)).rgb;
-    let c = textureSample(input_texture, s, uv + vec2<f32>(pl.x, pl.y)).rgb;
-    let d = textureSample(input_texture, s, uv + vec2<f32>(nl.x, 0.00)).rgb;
-    let e = textureSample(input_texture, s, uv).rgb;
-    let f = textureSample(input_texture, s, uv + vec2<f32>(pl.x, 0.00)).rgb;
-    let g = textureSample(input_texture, s, uv + vec2<f32>(nl.x, nl.y)).rgb;
-    let h = textureSample(input_texture, s, uv + vec2<f32>(0.00, nl.y)).rgb;
-    let i = textureSample(input_texture, s, uv + vec2<f32>(pl.x, nl.y)).rgb;
-    let j = textureSample(input_texture, s, uv + vec2<f32>(ns.x, ps.y)).rgb;
-    let k = textureSample(input_texture, s, uv + vec2<f32>(ps.x, ps.y)).rgb;
-    let l = textureSample(input_texture, s, uv + vec2<f32>(ns.x, ns.y)).rgb;
-    let m = textureSample(input_texture, s, uv + vec2<f32>(ps.x, ns.y)).rgb;
-#endif
+    let uv_offset = uniforms.scale * vec2<f32>(offset) /
+        vec2<f32>(textureDimensions(input_texture));
+    return textureSample(input_texture, s, uv + uv_offset).rgb;
+
+#endif  // UNIFORM_SCALE
+#endif  // BLOOM_COMPUTE
+}
+
+fn texture_sample(uv: vec2<f32>) -> vec3<f32> {
+    return texture_sample_offset(uv, vec2<i32>(0));
+}
+
+// [COD] slide 153
+fn sample_input_13_tap(uv: vec2<f32>) -> vec3<f32> {
+    let a = texture_sample_offset(uv, vec2<i32>(-2, 2)).rgb;
+    let b = texture_sample_offset(uv, vec2<i32>(0, 2)).rgb;
+    let c = texture_sample_offset(uv, vec2<i32>(2, 2)).rgb;
+    let d = texture_sample_offset(uv, vec2<i32>(-2, 0)).rgb;
+    let e = texture_sample(uv).rgb;
+    let f = texture_sample_offset(uv, vec2<i32>(2, 0)).rgb;
+    let g = texture_sample_offset(uv, vec2<i32>(-2, -2)).rgb;
+    let h = texture_sample_offset(uv, vec2<i32>(0, -2)).rgb;
+    let i = texture_sample_offset(uv, vec2<i32>(2, -2)).rgb;
+    let j = texture_sample_offset(uv, vec2<i32>(-1, 1)).rgb;
+    let k = texture_sample_offset(uv, vec2<i32>(1, 1)).rgb;
+    let l = texture_sample_offset(uv, vec2<i32>(-1, -1)).rgb;
+    let m = texture_sample_offset(uv, vec2<i32>(1, -1)).rgb;
 
 #ifdef FIRST_DOWNSAMPLE
     // [COD] slide 168
@@ -130,21 +170,25 @@ fn sample_input_13_tap(uv: vec2<f32>) -> vec3<f32> {
 fn sample_input_3x3_tent(uv: vec2<f32>) -> vec3<f32> {
     // While this is probably technically incorrect, it makes nonuniform bloom smoother, without
     // having any impact on uniform bloom, which simply evaluates to 1.0 here.
+#ifdef BLOOM_COMPUTE
+    let frag_size = uniforms.scale / vec2<f32>(textureDimensions(textures[immediates.input_mip]));
+#else   // BLOOM_COMPUTE
     let frag_size = uniforms.scale / vec2<f32>(textureDimensions(input_texture));
+#endif  // BLOOM_COMPUTE
     let x = frag_size.x;
     let y = frag_size.y;
 
-    let a = textureSample(input_texture, s, vec2<f32>(uv.x - x, uv.y + y)).rgb;
-    let b = textureSample(input_texture, s, vec2<f32>(uv.x, uv.y + y)).rgb;
-    let c = textureSample(input_texture, s, vec2<f32>(uv.x + x, uv.y + y)).rgb;
+    let a = texture_sample(vec2<f32>(uv.x - x, uv.y + y)).rgb;
+    let b = texture_sample(vec2<f32>(uv.x, uv.y + y)).rgb;
+    let c = texture_sample(vec2<f32>(uv.x + x, uv.y + y)).rgb;
 
-    let d = textureSample(input_texture, s, vec2<f32>(uv.x - x, uv.y)).rgb;
-    let e = textureSample(input_texture, s, vec2<f32>(uv.x, uv.y)).rgb;
-    let f = textureSample(input_texture, s, vec2<f32>(uv.x + x, uv.y)).rgb;
+    let d = texture_sample(vec2<f32>(uv.x - x, uv.y)).rgb;
+    let e = texture_sample(vec2<f32>(uv.x, uv.y)).rgb;
+    let f = texture_sample(vec2<f32>(uv.x + x, uv.y)).rgb;
 
-    let g = textureSample(input_texture, s, vec2<f32>(uv.x - x, uv.y - y)).rgb;
-    let h = textureSample(input_texture, s, vec2<f32>(uv.x, uv.y - y)).rgb;
-    let i = textureSample(input_texture, s, vec2<f32>(uv.x + x, uv.y - y)).rgb;
+    let g = texture_sample(vec2<f32>(uv.x - x, uv.y - y)).rgb;
+    let h = texture_sample(vec2<f32>(uv.x, uv.y - y)).rgb;
+    let i = texture_sample(vec2<f32>(uv.x + x, uv.y - y)).rgb;
 
     var sample = e * 0.25;
     sample += (b + d + f + h) * 0.125;
@@ -154,8 +198,7 @@ fn sample_input_3x3_tent(uv: vec2<f32>) -> vec3<f32> {
 }
 
 #ifdef FIRST_DOWNSAMPLE
-@fragment
-fn downsample_first(@location(0) output_uv: vec2<f32>) -> @location(0) vec4<f32> {
+fn do_downsample_first(output_uv: vec2<f32>) -> vec3<f32> {
     let sample_uv = uniforms.viewport.xy + output_uv * uniforms.viewport.zw;
     var sample = sample_input_13_tap(sample_uv);
     // Lower bound of 0.0001 is to avoid propagating multiplying by 0.0 through the
@@ -168,9 +211,47 @@ fn downsample_first(@location(0) output_uv: vec2<f32>) -> @location(0) vec4<f32>
     sample = soft_threshold(sample);
 #endif
 
-    return vec4<f32>(sample, 1.0);
+    return sample;
 }
-#endif
+#endif  // FIRST_DOWNSAMPLE
+
+#ifdef BLOOM_COMPUTE
+
+@compute
+@workgroup_size(16, 16, 1)
+fn downsample(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let output_size = textureDimensions(textures[immediates.output_mip]).xy;
+    if (global_id.x >= output_size.x || global_id.y >= output_size.y) {
+        return;
+    }
+    let output_uv = (vec2<f32>(global_id.xy) + 0.5) / vec2<f32>(output_size);
+    let sample = vec4<f32>(sample_input_13_tap(output_uv), 1.0);
+    textureStore(textures[immediates.output_mip], global_id.xy, sample);
+}
+
+@compute
+@workgroup_size(16, 16, 1)
+fn upsample(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let output_size = textureDimensions(textures[immediates.output_mip]).xy;
+    if (global_id.x >= output_size.x || global_id.y >= output_size.y) {
+        return;
+    }
+    let output_uv = (vec2<f32>(global_id.xy) + 0.5) / vec2<f32>(output_size);
+    let src = sample_input_3x3_tent(output_uv);
+
+    let dest = textureLoad(textures[immediates.output_mip], global_id.xy).rgb;
+    let sample = vec4(src * immediates.src_blend_factor + dest * immediates.dest_blend_factor, 1.0);
+    textureStore(textures[immediates.output_mip], global_id.xy, sample);
+}
+
+#else   // BLOOM_COMPUTE
+
+#ifdef FIRST_DOWNSAMPLE
+@fragment
+fn downsample_first(@location(0) output_uv: vec2<f32>) -> @location(0) vec4<f32> {
+    return vec4<f32>(do_downsample_first(output_uv), 1.0);
+}
+#endif  // FIRST_DOWNSAMPLE
 
 @fragment
 fn downsample(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
@@ -181,3 +262,5 @@ fn downsample(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 fn upsample(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     return vec4<f32>(sample_input_3x3_tent(uv), 1.0);
 }
+
+#endif  // BLOOM_COMPUTE
