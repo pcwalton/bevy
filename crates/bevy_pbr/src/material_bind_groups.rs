@@ -1736,6 +1736,11 @@ impl MaterialBindlessSlab {
         for (bindless_index, bindless_resource_type) in
             bindless_descriptor.resources.iter().enumerate()
         {
+            println!(
+                "building slab, bindless descriptor {:?} = {:?}",
+                bindless_index, bindless_resource_type
+            );
+
             let bindless_index = BindlessIndex(bindless_index as u32);
             match *bindless_resource_type {
                 BindlessResourceType::None => {}

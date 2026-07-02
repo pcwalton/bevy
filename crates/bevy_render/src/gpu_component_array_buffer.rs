@@ -1,12 +1,12 @@
 use crate::storage::ShaderBuffer;
 
 use bevy_app::{App, Plugin, PostUpdate};
-use bevy_asset::RenderAssetUsages;
+use bevy_asset::{Assets, Handle, RenderAssetUsages};
 use bevy_ecs::{
     prelude::Entity,
     query::{QueryFilter, QueryItem, ReadOnlyQueryData},
     resource::Resource,
-    system::{Commands, Query, ResMut},
+    system::{Commands, If, Query, ResMut},
 };
 use bevy_mesh::MeshTag;
 use bytemuck::Pod;
@@ -42,7 +42,7 @@ pub struct GpuComponentArray<C>
 where
     C: GpuComponentArrayBuffer,
 {
-    pub buffer: ShaderBuffer,
+    pub buffer: Handle<ShaderBuffer>,
     pub tag_to_entity: Vec<Entity>,
     phantom: PhantomData<C>,
 }
@@ -53,10 +53,6 @@ where
 {
     fn build(&self, app: &mut App) {
         app.add_systems(PostUpdate, update_components::<C>);
-    }
-
-    fn finish(&self, app: &mut App) {
-        app.init_resource::<GpuComponentArray<C>>();
     }
 }
 
@@ -69,19 +65,20 @@ where
     }
 }
 
-impl<C> Default for GpuComponentArray<C>
+impl<C> GpuComponentArray<C>
 where
     C: GpuComponentArrayBuffer,
 {
-    fn default() -> Self {
+    pub fn new(shader_buffer_assets: &mut Assets<ShaderBuffer>) -> Self {
+        let buffer = shader_buffer_assets.add(ShaderBuffer {
+            data: Some(vec![0; size_of::<C>()]),
+            buffer_description: C::buffer_descriptor(),
+            asset_usage: RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+            copy_on_resize: true,
+        });
+
         GpuComponentArray {
-            buffer: ShaderBuffer {
-                data: None,
-                buffer_description: C::buffer_descriptor(),
-                asset_usage: RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-                // FIXME: Is this desired?
-                copy_on_resize: true,
-            },
+            buffer,
             tag_to_entity: vec![],
             phantom: PhantomData,
         }
@@ -91,10 +88,15 @@ where
 fn update_components<C>(
     mut commands: Commands,
     query: Query<(Entity, Option<&MeshTag>, C::QueryData), C::QueryFilter>,
-    mut component_array: ResMut<GpuComponentArray<C>>,
+    mut component_array: If<ResMut<GpuComponentArray<C>>>,
+    mut shader_buffers: ResMut<Assets<ShaderBuffer>>,
 ) where
     C: GpuComponentArrayBuffer,
 {
+    let Some(mut buffer) = shader_buffers.get_mut(&mut component_array.buffer) else {
+        return;
+    };
+
     for (entity, maybe_tag, item) in &query {
         match C::extract_component(item) {
             None => {
@@ -103,11 +105,12 @@ fn update_components<C>(
             Some(data) => match maybe_tag {
                 None => {
                     let tag = component_array.len();
-                    component_array.push(entity, data);
+                    component_array.push(&mut buffer, entity, data);
                     commands.entity(entity).insert(MeshTag(tag as u32));
+                    println!("gpu component array buffer processed new mesh");
                 }
                 Some(tag) => {
-                    component_array.set(tag.0 as usize, data);
+                    component_array.set(&mut buffer, tag.0 as usize, data);
                 }
             },
         }
@@ -119,26 +122,26 @@ where
     C: GpuComponentArrayBuffer,
 {
     fn len(&self) -> usize {
-        match self.buffer.data {
-            None => 0,
-            Some(ref data) => data.len() / size_of::<C::Out>(),
+        self.tag_to_entity.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tag_to_entity.is_empty()
+    }
+
+    fn push(&mut self, buffer: &mut ShaderBuffer, entity: Entity, data: C::Out) {
+        let data_buffer = buffer.data.get_or_insert_default();
+        if self.is_empty() {
+            data_buffer.clear();
         }
-    }
+        data_buffer.extend_from_slice(bytemuck::cast_slice(&[data]));
 
-    fn push(&mut self, entity: Entity, data: C::Out) {
-        self.buffer
-            .data
-            .get_or_insert_default()
-            .extend_from_slice(bytemuck::cast_slice(&[data]));
         self.tag_to_entity.push(entity);
-        debug_assert_eq!(
-            self.buffer.data.as_ref().unwrap().len(),
-            self.tag_to_entity.len()
-        );
+
+        debug_assert_eq!(data_buffer.len() / size_of::<C::Out>(), self.len());
     }
 
-    fn set(&mut self, index: usize, data: C::Out) {
-        bytemuck::cast_slice_mut(self.buffer.data.get_or_insert_default().as_mut_slice())[index] =
-            data;
+    fn set(&mut self, buffer: &mut ShaderBuffer, index: usize, data: C::Out) {
+        bytemuck::cast_slice_mut(buffer.data.get_or_insert_default().as_mut_slice())[index] = data;
     }
 }

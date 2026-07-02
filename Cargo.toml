@@ -5604,3 +5604,14 @@ name = "Light Probe Blending"
 description = "Demonstrates blending between multiple reflection probes"
 category = "3D Rendering"
 wasm = false
+
+[[example]]
+name = "gpu_component_array_buffer"
+path = "examples/shader/gpu_component_array_buffer.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.gpu_component_array_buffer]
+name = "GPU Component Array Buffer"
+description = "TODO"
+category = "Shaders"
+wasm = false
