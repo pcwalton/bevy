@@ -316,12 +316,13 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                     ),
                     bindless_index:
                         #render_path::render_resource::BindlessIndex(#binding_index),
-                            size: #FQOption::Some(
-                                <
-                                    #converted_shader_type as
-                                    #render_path::render_resource::ShaderType
-                                >::min_size().get() as usize
-                            ),
+                    size: #FQOption::Some(
+                        <
+                            #converted_shader_type as
+                            #render_path::render_resource::ShaderType
+                        >::min_size().get() as usize
+                    ),
+                    shader_buffer_id: None,
                 }
             });
 
@@ -513,6 +514,12 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
 
                         has_buffer_binding_arrays = true;
 
+                        let shader_buffer_id = if buffer {
+                            quote! { None }
+                        } else {
+                            quote! { Some(self.#field_name.id()) }
+                        };
+
                         // Push the buffer descriptor.
                         bindless_buffer_descriptors.push(quote! {
                             #render_path::render_resource::BindlessBufferDescriptor {
@@ -526,6 +533,7 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
                                 bindless_index:
                                     #render_path::render_resource::BindlessIndex(#binding_index),
                                 size: #FQOption::None,
+                                shader_buffer_id: #shader_buffer_id,
                             }
                         });
 
