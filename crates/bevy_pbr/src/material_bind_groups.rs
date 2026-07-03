@@ -1398,23 +1398,20 @@ impl MaterialBindlessSlab {
         &mut self,
         changed_shader_buffers: &RenderChangedShaderBuffers,
     ) {
-        /*if self.bind_group.is_some() &&
-            self.buffers.values().any(|buffer| {
-                matches!(
-                    buffer.resource_type,
-                    BindlessResourceType::ShaderBuffer) &&
-                        buffer.resource_to_slot.keys().any(|binding_resource_id| {
-                            matches!(
-                                *binding_resource_id,
-                                BindingResourceId::ShaderBuffer(ref shader_buffer) if
-                                    changed_shader_buffers.contains(shader_buffer)
-                            )
-                    }
-                )
-            }) {
+        if self.bind_group.is_some()
+            && self.shader_buffers.values().any(|buffer| {
+                matches!(buffer.resource_type, BindlessResourceType::ShaderBuffer)
+                    && buffer.resource_to_slot.keys().any(|binding_resource_id| {
+                        matches!(
+                            *binding_resource_id,
+                            BindingResourceId::ShaderBuffer(ref shader_buffer) if
+                                changed_shader_buffers.contains(shader_buffer)
+                        )
+                    })
+            })
+        {
             self.bind_group = None;
-        }*/
-        self.bind_group = None;
+        }
     }
 
     /// Writes any buffers that we're managing to the GPU.

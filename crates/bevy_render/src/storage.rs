@@ -1,5 +1,5 @@
 use alloc::borrow::Cow;
-use std::mem;
+use std::{iter, mem};
 
 use crate::{
     render_asset::{AssetExtractionError, PrepareAssetError, RenderAsset, RenderAssetPlugin},
@@ -24,6 +24,8 @@ use bevy_utils::default;
 use encase::{internal::WriteInto, ShaderType};
 use wgpu::util::BufferInitDescriptor;
 use wgpu_types::BufferDescriptor;
+
+const BUFFER_ALLOCATION_GROWTH_FACTOR: f64 = 1.5;
 
 /// Adds [`ShaderBuffer`] as an asset that is extracted and uploaded to the GPU.
 #[derive(Default)]
@@ -223,10 +225,11 @@ impl RenderAsset for GpuShaderBuffer {
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
         let had_data = matches!(source_asset.data, ShaderBufferData::Initialized(_));
 
-        // FIXME: round up to amortize reallocation costs
+        // Round up to amortize reallocation costs.
+        let rounded_size = round_buffer_size_up(source_asset.len());
 
         let buffer = if let Some(prev) = previous_asset
-            && prev.buffer.size() == source_asset.len() as u64
+            && prev.buffer.size() >= rounded_size
             && prev.buffer.usage() == source_asset.buffer_usage
             && *prev.label == *source_asset.label
             && (!had_data || source_asset.buffer_usage.contains(BufferUsages::COPY_DST))
@@ -238,16 +241,19 @@ impl RenderAsset for GpuShaderBuffer {
         } else if let ShaderBufferData::Initialized(ref data) = source_asset.data {
             println!("created new storage buffer, size={}", data.len());
             changed_shader_buffers.insert(asset_id);
+
+            let mut data = data.clone();
+            data.extend(iter::repeat_n(0, rounded_size as usize - data.len()));
             render_device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some(&*source_asset.label),
-                contents: data,
+                contents: &data,
                 usage: source_asset.buffer_usage,
             })
         } else {
             changed_shader_buffers.insert(asset_id);
             let new_buffer = render_device.create_buffer(&BufferDescriptor {
                 label: Some(&*source_asset.label),
-                size: source_asset.len() as u64,
+                size: rounded_size,
                 usage: source_asset.buffer_usage,
                 mapped_at_creation: false,
             });
@@ -267,7 +273,11 @@ impl RenderAsset for GpuShaderBuffer {
             new_buffer
         };
 
-        println!("RENDER ASSET PREP asset id {:?} -> {}", asset_id, buffer.size());
+        println!(
+            "RENDER ASSET PREP asset id {:?} -> {}",
+            asset_id,
+            buffer.size()
+        );
 
         Ok(GpuShaderBuffer {
             buffer,
@@ -280,4 +290,13 @@ impl RenderAsset for GpuShaderBuffer {
 
 fn clear_changed_shader_buffers(mut changed_shader_buffers: ResMut<RenderChangedShaderBuffers>) {
     changed_shader_buffers.clear();
+}
+
+fn round_buffer_size_up(original_size: usize) -> u64 {
+    if original_size <= 1 {
+        return 1;
+    }
+
+    let exponent = (original_size as f64).ln() / BUFFER_ALLOCATION_GROWTH_FACTOR.ln();
+    BUFFER_ALLOCATION_GROWTH_FACTOR.powi(exponent.ceil() as i32) as u64
 }
