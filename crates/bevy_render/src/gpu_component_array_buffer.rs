@@ -1,5 +1,6 @@
-use crate::storage::ShaderBuffer;
+use crate::storage::{ShaderBuffer, ShaderBufferData};
 
+use alloc::borrow::Cow;
 use bevy_app::{App, Plugin, PostUpdate};
 use bevy_asset::{Assets, Handle, RenderAssetUsages};
 use bevy_ecs::{
@@ -12,7 +13,7 @@ use bevy_mesh::MeshTag;
 use bytemuck::Pod;
 use core::marker::PhantomData;
 use encase::ShaderType;
-use wgpu::{BufferDescriptor, BufferUsages};
+use wgpu::BufferUsages;
 
 /// This plugin prepares the components of the corresponding type for the GPU
 /// by storing them in a [`RawBufferVec`].
@@ -27,13 +28,12 @@ pub trait GpuComponentArrayBuffer: Send + Sync + 'static {
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out>;
 
-    fn buffer_descriptor() -> BufferDescriptor<'static> {
-        BufferDescriptor {
-            label: Some("GPU component array"),
-            mapped_at_creation: false,
-            size: 1,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-        }
+    fn label() -> Cow<'static, str> {
+        Cow::Borrowed("GPU component array")
+    }
+
+    fn buffer_usage() -> BufferUsages {
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC
     }
 }
 
@@ -71,8 +71,9 @@ where
 {
     pub fn new(shader_buffer_assets: &mut Assets<ShaderBuffer>) -> Self {
         let buffer = shader_buffer_assets.add(ShaderBuffer {
-            data: Some(vec![0; size_of::<C>()]),
-            buffer_description: C::buffer_descriptor(),
+            data: ShaderBufferData::Initialized(vec![0; size_of::<C::Out>()]),
+            label: C::label(),
+            buffer_usage: C::buffer_usage(),
             asset_usage: RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
             copy_on_resize: true,
         });
@@ -130,10 +131,16 @@ where
     }
 
     fn push(&mut self, buffer: &mut ShaderBuffer, entity: Entity, data: C::Out) {
-        let data_buffer = buffer.data.get_or_insert_default();
+        let ShaderBufferData::Initialized(ref mut data_buffer) = buffer.data else {
+            panic!(
+                "Shader buffers created for use in a `GpuComponentArrayBuffer` must have been \
+                created with `ShaderBufferData::Initialized`"
+            );
+        };
         if self.is_empty() {
             data_buffer.clear();
         }
+
         data_buffer.extend_from_slice(bytemuck::cast_slice(&[data]));
 
         self.tag_to_entity.push(entity);
@@ -142,6 +149,12 @@ where
     }
 
     fn set(&mut self, buffer: &mut ShaderBuffer, index: usize, data: C::Out) {
-        bytemuck::cast_slice_mut(buffer.data.get_or_insert_default().as_mut_slice())[index] = data;
+        let ShaderBufferData::Initialized(ref mut data_buffer) = buffer.data else {
+            panic!(
+                "Shader buffers created for use in a `GpuComponentArrayBuffer` must have been \
+                created with `ShaderBufferData::Initialized`"
+            );
+        };
+        bytemuck::cast_slice_mut(data_buffer.as_mut_slice())[index] = data;
     }
 }

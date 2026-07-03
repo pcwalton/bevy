@@ -45,9 +45,9 @@ use bevy_render::erased_render_asset::{
 };
 use bevy_render::render_asset::{prepare_assets, RenderAssets};
 use bevy_render::renderer::RenderQueue;
+use bevy_render::storage::{GpuShaderBuffer, RenderChangedShaderBuffers};
 use bevy_render::GpuResourceAppExt;
 use bevy_render::RenderStartup;
-use bevy_render::storage::GpuShaderBuffer;
 use bevy_render::{
     batching::gpu_preprocessing::GpuPreprocessingSupport,
     extract_resource::ExtractResource,
@@ -1821,6 +1821,7 @@ pub fn prepare_material_bind_groups(
     fallback_image: Res<FallbackImage>,
     fallback_resources: Res<FallbackBindlessResources>,
     shader_buffer_assets: Res<RenderAssets<GpuShaderBuffer>>,
+    changed_shader_buffers: Res<RenderChangedShaderBuffers>,
 ) {
     for (_, allocator) in allocators.iter_mut() {
         allocator.prepare_bind_groups(
@@ -1829,6 +1830,7 @@ pub fn prepare_material_bind_groups(
             &fallback_resources,
             &fallback_image,
             &shader_buffer_assets,
+            &changed_shader_buffers,
         );
     }
 }

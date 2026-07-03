@@ -1,7 +1,6 @@
 //! Types and functions relating to bindless resources.
 
 use alloc::borrow::Cow;
-use bevy_asset::AssetId;
 use core::{
     num::{NonZeroU32, NonZeroU64},
     ops::Range,
@@ -16,8 +15,6 @@ use bevy_material::bind_group_layout_entries::binding_types::{
     sampler, storage_buffer_read_only_sized, texture_1d, texture_2d, texture_2d_array, texture_3d,
     texture_cube, texture_cube_array,
 };
-
-use crate::storage::ShaderBuffer;
 
 /// The default value for the number of resources that can be stored in a slab
 /// on this platform.
@@ -194,7 +191,7 @@ pub struct BindlessBufferDescriptor {
     pub bindless_index: BindlessIndex,
     /// The size of the buffer in bytes, if known.
     pub size: Option<usize>,
-    pub shader_buffer_id: Option<AssetId<ShaderBuffer>>,
+    pub is_shader_buffer: bool,
 }
 
 /// Describes the layout of the bindless index table, which maps bindless
