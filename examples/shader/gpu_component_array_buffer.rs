@@ -18,7 +18,7 @@ use bevy::{
 };
 use bytemuck::{Pod, Zeroable};
 use chacha20::ChaCha8Rng;
-use rand::{RngExt as _, SeedableRng as _};
+use rand::{seq::IndexedRandom, RngExt as _, SeedableRng as _};
 
 /// This example uses a shader source file from the assets subdirectory
 const SHADER_ASSET_PATH: &str = "shaders/gpu_component_array_buffer.wgsl";
@@ -40,7 +40,10 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            spawn_cube.run_if(on_timer(Duration::from_millis(300))),
+            (
+                add_cube.run_if(on_timer(Duration::from_millis(300))),
+                remove_cube.run_if(on_timer(Duration::from_millis(1000))),
+            ),
         )
         .run();
 }
@@ -76,11 +79,7 @@ fn setup(
     ));
 }
 
-fn spawn_cube(
-    mut commands: Commands,
-    mut app_data: ResMut<AppData>,
-    mut materials: ResMut<Assets<CustomMaterial>>,
-) {
+fn add_cube(mut commands: Commands, mut app_data: ResMut<AppData>) {
     let xz_offset = vec2(
         app_data.rng.random_range((-1.0)..1.0),
         app_data.rng.random_range((-1.0)..1.0),
@@ -98,10 +97,17 @@ fn spawn_cube(
         CustomMaterialData { color },
     ));
     println!("spawned cube");
+}
 
-    // FIXME: Hack to mark changed
-    //let _x: &mut CustomMaterial =
-    //    &mut **materials.get_mut(app_data.material.id()).as_mut().unwrap();
+fn remove_cube(
+    mut commands: Commands,
+    mut app_data: ResMut<AppData>,
+    cubes: Query<Entity, With<CustomMaterialData>>,
+) {
+    let all_cubes: Vec<Entity> = cubes.iter().collect();
+    if let Some(&cube_to_despawn) = all_cubes.choose(&mut app_data.rng) {
+        commands.entity(cube_to_despawn).despawn();
+    }
 }
 
 // This struct defines the data that will be passed to your shader

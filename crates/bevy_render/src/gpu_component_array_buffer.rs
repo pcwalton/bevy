@@ -4,10 +4,13 @@ use alloc::borrow::Cow;
 use bevy_app::{App, Plugin, PostUpdate};
 use bevy_asset::{Assets, Handle, RenderAssetUsages};
 use bevy_ecs::{
+    component::Component,
+    entity::{EntityHashMap, EntityHashSet},
+    lifecycle::RemovedComponents,
     prelude::Entity,
     query::{QueryFilter, QueryItem, ReadOnlyQueryData},
     resource::Resource,
-    system::{Commands, If, Query, ResMut},
+    system::{Commands, If, Local, Query, ResMut},
 };
 use bevy_mesh::MeshTag;
 use bytemuck::Pod;
@@ -21,7 +24,7 @@ pub struct GpuComponentArrayBufferPlugin<C>(PhantomData<C>)
 where
     C: GpuComponentArrayBuffer;
 
-pub trait GpuComponentArrayBuffer: Send + Sync + 'static {
+pub trait GpuComponentArrayBuffer: Component + Send + Sync + 'static {
     type QueryData: ReadOnlyQueryData;
     type QueryFilter: QueryFilter;
     type Out: Pod + ShaderType + Default;
@@ -43,6 +46,7 @@ where
     C: GpuComponentArrayBuffer,
 {
     pub buffer: Handle<ShaderBuffer>,
+    pub entity_to_tag: EntityHashMap<u32>,
     pub tag_to_entity: Vec<Entity>,
     phantom: PhantomData<C>,
 }
@@ -80,6 +84,7 @@ where
 
         GpuComponentArray {
             buffer,
+            entity_to_tag: EntityHashMap::default(),
             tag_to_entity: vec![],
             phantom: PhantomData,
         }
@@ -91,6 +96,8 @@ fn update_components<C>(
     query: Query<(Entity, Option<&MeshTag>, C::QueryData), C::QueryFilter>,
     mut component_array: If<ResMut<GpuComponentArray<C>>>,
     mut shader_buffers: ResMut<Assets<ShaderBuffer>>,
+    mut removed_components: RemovedComponents<C>,
+    mut processed_entities: Local<EntityHashSet>,
 ) where
     C: GpuComponentArrayBuffer,
 {
@@ -98,10 +105,18 @@ fn update_components<C>(
         return;
     };
 
+    processed_entities.clear();
+
     for (entity, maybe_tag, item) in &query {
         match C::extract_component(item) {
             None => {
-                // TODO: remove
+                if let Some((displaced_entity, displaced_entity_new_tag)) =
+                    component_array.remove(&mut buffer, entity)
+                {
+                    commands
+                        .entity(displaced_entity)
+                        .insert(MeshTag(displaced_entity_new_tag));
+                }
             }
             Some(data) => match maybe_tag {
                 None => {
@@ -111,9 +126,28 @@ fn update_components<C>(
                     println!("gpu component array buffer processed new mesh");
                 }
                 Some(tag) => {
-                    component_array.set(&mut buffer, tag.0 as usize, data);
+                    component_array.set(&mut buffer, tag.0, data);
                 }
             },
+        }
+
+        processed_entities.insert(entity);
+    }
+
+    // Only remove from the component array if we didn't pick up the entity
+    // above.
+    // It's possible that the component was removed and then re-added in the
+    // same frame.
+    for entity in removed_components
+        .read()
+        .filter(|entity| !processed_entities.contains(entity))
+    {
+        if let Some((displaced_entity, displaced_entity_new_tag)) =
+            component_array.remove(&mut buffer, entity)
+        {
+            commands
+                .entity(displaced_entity)
+                .insert(MeshTag(displaced_entity_new_tag));
         }
     }
 }
@@ -143,18 +177,306 @@ where
 
         data_buffer.extend_from_slice(bytemuck::cast_slice(&[data]));
 
+        let tag = self.tag_to_entity.len() as u32;
+        self.entity_to_tag.insert(entity, tag);
         self.tag_to_entity.push(entity);
 
         debug_assert_eq!(data_buffer.len() / size_of::<C::Out>(), self.len());
     }
 
-    fn set(&mut self, buffer: &mut ShaderBuffer, index: usize, data: C::Out) {
+    #[cfg(test)]
+    fn get<'a>(&'_ self, buffer: &'a ShaderBuffer, tag: u32) -> &'a C::Out {
+        let ShaderBufferData::Initialized(ref data_buffer) = buffer.data else {
+            panic!(
+                "Shader buffers created for use in a `GpuComponentArrayBuffer` must have been \
+                created with `ShaderBufferData::Initialized`"
+            );
+        };
+        &bytemuck::cast_slice(data_buffer.as_slice())[tag as usize]
+    }
+
+    fn set(&mut self, buffer: &mut ShaderBuffer, tag: u32, data: C::Out) {
         let ShaderBufferData::Initialized(ref mut data_buffer) = buffer.data else {
             panic!(
                 "Shader buffers created for use in a `GpuComponentArrayBuffer` must have been \
                 created with `ShaderBufferData::Initialized`"
             );
         };
-        bytemuck::cast_slice_mut(data_buffer.as_mut_slice())[index] = data;
+        bytemuck::cast_slice_mut(data_buffer.as_mut_slice())[tag as usize] = data;
+    }
+
+    fn remove(
+        &mut self,
+        buffer: &mut ShaderBuffer,
+        entity_to_remove: Entity,
+    ) -> Option<(Entity, u32)> {
+        let displaced_tag = self.tag_to_entity.len() as u32 - 1;
+        let displaced_data = pop::<C>(buffer);
+        let displaced_entity = *self.tag_to_entity.last().unwrap();
+
+        let tag_to_remove = self.entity_to_tag.remove(&entity_to_remove)?;
+        let removed_entity = self.tag_to_entity.swap_remove(tag_to_remove as usize);
+        debug_assert_eq!(entity_to_remove, removed_entity);
+
+        if tag_to_remove == displaced_tag {
+            return None;
+        }
+
+        *self.entity_to_tag.get_mut(&displaced_entity).unwrap() = tag_to_remove;
+        self.set(buffer, tag_to_remove, displaced_data);
+        return Some((displaced_entity, tag_to_remove));
+
+        fn pop<C>(buffer: &mut ShaderBuffer) -> C::Out
+        where
+            C: GpuComponentArrayBuffer,
+        {
+            let ShaderBufferData::Initialized(ref mut data_buffer) = buffer.data else {
+                panic!(
+                    "Shader buffers created for use in a `GpuComponentArrayBuffer` must have been \
+                    created with `ShaderBufferData::Initialized`"
+                );
+            };
+
+            debug_assert!(!data_buffer.is_empty());
+
+            let new_len = data_buffer.len() - size_of::<C::Out>();
+            let last_element: C::Out = bytemuck::cast_slice(&data_buffer[new_len..])[0];
+            data_buffer.truncate(new_len);
+            last_element
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::marker::PhantomData;
+
+    use bevy_asset::{Handle, RenderAssetUsages};
+    use bevy_ecs::{
+        component::Component,
+        entity::{Entity, EntityHashMap, EntityIndex},
+        query::QueryItem,
+    };
+    use bytemuck::{Pod, Zeroable};
+    use encase::ShaderType;
+    use nonmax::NonMaxU32;
+
+    use crate::storage::ShaderBuffer;
+
+    use super::{GpuComponentArray, GpuComponentArrayBuffer};
+
+    #[derive(Component)]
+    struct MockComponent;
+
+    #[derive(Clone, Copy, Default, PartialEq, Pod, Zeroable, ShaderType, Debug)]
+    #[repr(C)]
+    struct MockComponentData {
+        a: u32,
+        b: u32,
+    }
+
+    impl MockComponentData {
+        fn new(a: u32, b: u32) -> Self {
+            Self { a, b }
+        }
+    }
+
+    impl GpuComponentArrayBuffer for MockComponent {
+        type QueryData = ();
+        type QueryFilter = ();
+        type Out = MockComponentData;
+
+        fn extract_component(_: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+            None
+        }
+    }
+
+    struct TestData {
+        gpu_component_array: GpuComponentArray<MockComponent>,
+        buffer: ShaderBuffer,
+        entity_a: Entity,
+        entity_b: Entity,
+        entity_c: Entity,
+        entity_data_a: MockComponentData,
+        entity_data_b: MockComponentData,
+        entity_data_c: MockComponentData,
+    }
+
+    impl TestData {
+        fn new() -> TestData {
+            TestData {
+                gpu_component_array: GpuComponentArray::<MockComponent> {
+                    buffer: Handle::default(),
+                    entity_to_tag: EntityHashMap::default(),
+                    tag_to_entity: vec![],
+                    phantom: PhantomData,
+                },
+                buffer: ShaderBuffer::new(vec![], RenderAssetUsages::all()),
+                entity_a: Entity::from_index(EntityIndex::new(NonMaxU32::new(1).unwrap())),
+                entity_b: Entity::from_index(EntityIndex::new(NonMaxU32::new(2).unwrap())),
+                entity_c: Entity::from_index(EntityIndex::new(NonMaxU32::new(3).unwrap())),
+
+                entity_data_a: MockComponentData::new(11, 111),
+                entity_data_b: MockComponentData::new(22, 222),
+                entity_data_c: MockComponentData::new(33, 333),
+            }
+        }
+
+        fn check(&self, expected_data: &[(Entity, MockComponentData)]) {
+            assert_eq!(
+                self.gpu_component_array.entity_to_tag.len(),
+                expected_data.len()
+            );
+            assert_eq!(
+                self.gpu_component_array.tag_to_entity.len(),
+                expected_data.len()
+            );
+            assert_eq!(
+                self.buffer.len() / size_of::<MockComponentData>(),
+                expected_data.len()
+            );
+
+            for (tag, (entity, data)) in expected_data.iter().enumerate() {
+                assert_eq!(
+                    self.gpu_component_array.entity_to_tag.get(entity),
+                    Some(&(tag as u32))
+                );
+                assert_eq!(
+                    self.gpu_component_array.tag_to_entity.get(tag as usize),
+                    Some(entity)
+                );
+                assert_eq!(self.gpu_component_array.get(&self.buffer, tag as u32), data);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_gpu_component_array() {
+        let test_data = TestData::new();
+        test_data.check(&[]);
+    }
+
+    #[test]
+    fn push_onto_gpu_component_array() {
+        let mut test_data = TestData::new();
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_a,
+            test_data.entity_data_a,
+        );
+        test_data.check(&[(test_data.entity_a, test_data.entity_data_a)]);
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_b,
+            test_data.entity_data_b,
+        );
+        test_data.check(&[
+            (test_data.entity_a, test_data.entity_data_a),
+            (test_data.entity_b, test_data.entity_data_b),
+        ]);
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_c,
+            test_data.entity_data_c,
+        );
+        test_data.check(&[
+            (test_data.entity_a, test_data.entity_data_a),
+            (test_data.entity_b, test_data.entity_data_b),
+            (test_data.entity_c, test_data.entity_data_c),
+        ]);
+    }
+
+    // Check setting an element.
+    #[test]
+    fn set_element_in_gpu_component_array() {
+        let mut test_data = TestData::new();
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_a,
+            test_data.entity_data_a,
+        );
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_b,
+            test_data.entity_data_b,
+        );
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_c,
+            test_data.entity_data_c,
+        );
+
+        let entity_data_b_alt = MockComponentData::new(2222, 22222);
+
+        test_data
+            .gpu_component_array
+            .set(&mut test_data.buffer, 1, entity_data_b_alt);
+        test_data.check(&[
+            (test_data.entity_a, test_data.entity_data_a),
+            (test_data.entity_b, entity_data_b_alt),
+            (test_data.entity_c, test_data.entity_data_c),
+        ]);
+    }
+
+    // Check removing an element from the end.
+    #[test]
+    fn remove_element_from_end_of_gpu_component_array() {
+        let mut test_data = TestData::new();
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_a,
+            test_data.entity_data_a,
+        );
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_b,
+            test_data.entity_data_b,
+        );
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_c,
+            test_data.entity_data_c,
+        );
+
+        let maybe_displaced_element = test_data
+            .gpu_component_array
+            .remove(&mut test_data.buffer, test_data.entity_c);
+        assert_eq!(maybe_displaced_element, None);
+
+        test_data.check(&[
+            (test_data.entity_a, test_data.entity_data_a),
+            (test_data.entity_b, test_data.entity_data_b),
+        ]);
+    }
+
+    // Check removing an element from the start.
+    #[test]
+    fn remove_element_from_start_of_gpu_component_array() {
+        let mut test_data = TestData::new();
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_a,
+            test_data.entity_data_a,
+        );
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_b,
+            test_data.entity_data_b,
+        );
+        test_data.gpu_component_array.push(
+            &mut test_data.buffer,
+            test_data.entity_c,
+            test_data.entity_data_c,
+        );
+
+        let maybe_displaced_element = test_data
+            .gpu_component_array
+            .remove(&mut test_data.buffer, test_data.entity_a);
+        assert_eq!(maybe_displaced_element, Some((test_data.entity_c, 0)));
+
+        test_data.check(&[
+            (test_data.entity_c, test_data.entity_data_c),
+            (test_data.entity_b, test_data.entity_data_b),
+        ]);
     }
 }
