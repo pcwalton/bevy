@@ -26,7 +26,8 @@ const SHADER_ASSET_PATH: &str = "shaders/gpu_component_array_buffer.wgsl";
 #[derive(Resource)]
 struct AppData {
     mesh: Handle<Mesh>,
-    material: Handle<CustomMaterial>,
+    material_light: Handle<CustomMaterial>,
+    material_dark: Handle<CustomMaterial>,
     rng: ChaCha8Rng,
 }
 
@@ -61,21 +62,26 @@ fn setup(
     commands.insert_resource(component_array);
 
     let mesh = meshes.add(Cuboid::default());
-    let material = materials.add(CustomMaterial {
+    let material_dark = materials.add(CustomMaterial {
+        data: buffer.clone(),
+        color_texture: asset_server.load("branding/bevy_bird_dark.png"),
+    });
+    let material_light = materials.add(CustomMaterial {
         data: buffer,
         color_texture: asset_server.load("branding/icon.png"),
     });
 
     commands.insert_resource(AppData {
         mesh,
-        material,
+        material_dark,
+        material_light,
         rng: ChaCha8Rng::seed_from_u64(12345),
     });
 
     // camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(-2.0, 2.5, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(-2.0, 1.25, 2.5).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }
 
@@ -89,10 +95,15 @@ fn add_cube(mut commands: Commands, mut app_data: ResMut<AppData>) {
         app_data.rng.random_range((0.0)..1.0),
         app_data.rng.random_range((0.0)..1.0),
     );
+    let material = if app_data.rng.random_bool(0.5) {
+        app_data.material_light.clone()
+    } else {
+        app_data.material_dark.clone()
+    };
 
     commands.spawn((
         Mesh3d(app_data.mesh.clone()),
-        MeshMaterial3d(app_data.material.clone()),
+        MeshMaterial3d(material),
         Transform::from_xyz(xz_offset.x, 0.5, xz_offset.y).with_scale(Vec3::splat(0.1)),
         CustomMaterialData { color },
     ));
