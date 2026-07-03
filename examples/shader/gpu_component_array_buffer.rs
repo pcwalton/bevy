@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use argh::FromArgs;
 use bevy::{
     ecs::{query::QueryItem, system::lifetimeless::Read},
     prelude::*,
@@ -22,22 +23,46 @@ use rand::{seq::IndexedRandom, RngExt as _, SeedableRng as _};
 
 /// This example uses a shader source file from the assets subdirectory
 const SHADER_ASSET_PATH: &str = "shaders/gpu_component_array_buffer.wgsl";
+const BINDLESS_SHADER_ASSET_PATH: &str = "shaders/gpu_component_array_buffer_bindless.wgsl";
+
+#[derive(FromArgs, Resource)]
+/// Demonstrates use of `GpuComponentArrayBuffer` to store custom
+/// per-mesh-instance data
+pub struct Args {
+    /// enable bindless
+    #[argh(switch)]
+    bindless: bool,
+}
 
 #[derive(Resource)]
 struct AppData {
     mesh: Handle<Mesh>,
-    material_light: Handle<CustomMaterial>,
-    material_dark: Handle<CustomMaterial>,
+    materials: AppMaterials,
     rng: ChaCha8Rng,
 }
 
+enum AppMaterials {
+    NonBindless {
+        material_light: Handle<CustomMaterial>,
+        material_dark: Handle<CustomMaterial>,
+    },
+    Bindless {
+        material_light: Handle<CustomBindlessMaterial>,
+        material_dark: Handle<CustomBindlessMaterial>,
+    },
+}
+
 fn main() {
+    let args: Args = argh::from_env();
+
     App::new()
         .add_plugins((
             DefaultPlugins,
             MaterialPlugin::<CustomMaterial>::default(),
+            MaterialPlugin::<CustomBindlessMaterial>::default(),
             GpuComponentArrayBufferPlugin::<CustomMaterialData>::default(),
         ))
+        .insert_resource(args)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -54,27 +79,49 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<CustomMaterial>>,
+    mut bindless_materials: ResMut<Assets<CustomBindlessMaterial>>,
     mut shader_buffers: ResMut<Assets<ShaderBuffer>>,
     asset_server: Res<AssetServer>,
+    args: Res<Args>,
 ) {
     let component_array = GpuComponentArray::<CustomMaterialData>::new(&mut shader_buffers);
     let buffer = component_array.buffer.clone();
     commands.insert_resource(component_array);
 
     let mesh = meshes.add(Cuboid::default());
-    let material_dark = materials.add(CustomMaterial {
-        data: buffer.clone(),
-        color_texture: asset_server.load("branding/bevy_bird_dark.png"),
-    });
-    let material_light = materials.add(CustomMaterial {
-        data: buffer,
-        color_texture: asset_server.load("branding/icon.png"),
-    });
+
+    let (texture_dark, texture_light) = (
+        asset_server.load("branding/bevy_bird_dark.png"),
+        asset_server.load("branding/icon.png"),
+    );
+
+    let materials = if args.bindless {
+        AppMaterials::Bindless {
+            material_light: bindless_materials.add(CustomBindlessMaterial {
+                data: buffer.clone(),
+                color_texture: texture_light,
+            }),
+            material_dark: bindless_materials.add(CustomBindlessMaterial {
+                data: buffer.clone(),
+                color_texture: texture_dark,
+            }),
+        }
+    } else {
+        AppMaterials::NonBindless {
+            material_light: materials.add(CustomMaterial {
+                data: buffer.clone(),
+                color_texture: texture_light,
+            }),
+            material_dark: materials.add(CustomMaterial {
+                data: buffer.clone(),
+                color_texture: texture_dark,
+            }),
+        }
+    };
 
     commands.insert_resource(AppData {
         mesh,
-        material_dark,
-        material_light,
+        materials,
         rng: ChaCha8Rng::seed_from_u64(12345),
     });
 
@@ -95,18 +142,49 @@ fn add_cube(mut commands: Commands, mut app_data: ResMut<AppData>) {
         app_data.rng.random_range((0.0)..1.0),
         app_data.rng.random_range((0.0)..1.0),
     );
-    let material = if app_data.rng.random_bool(0.5) {
-        app_data.material_light.clone()
-    } else {
-        app_data.material_dark.clone()
-    };
+    let use_light_material = app_data.rng.random_bool(0.5);
 
-    commands.spawn((
+    let mut entity_commands = commands.spawn((
         Mesh3d(app_data.mesh.clone()),
-        MeshMaterial3d(material),
         Transform::from_xyz(xz_offset.x, 0.5, xz_offset.y).with_scale(Vec3::splat(0.1)),
         CustomMaterialData { color },
     ));
+
+    match (&app_data.materials, use_light_material) {
+        (
+            &AppMaterials::Bindless {
+                material_light: ref material,
+                ..
+            },
+            true,
+        )
+        | (
+            &AppMaterials::Bindless {
+                material_dark: ref material,
+                ..
+            },
+            false,
+        ) => {
+            entity_commands.insert(MeshMaterial3d(material.clone()));
+        }
+        (
+            &AppMaterials::NonBindless {
+                material_light: ref material,
+                ..
+            },
+            true,
+        )
+        | (
+            &AppMaterials::NonBindless {
+                material_dark: ref material,
+                ..
+            },
+            false,
+        ) => {
+            entity_commands.insert(MeshMaterial3d(material.clone()));
+        }
+    }
+
     println!("spawned cube");
 }
 
@@ -121,10 +199,18 @@ fn remove_cube(
     }
 }
 
-// This struct defines the data that will be passed to your shader
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+struct CustomMaterial {
+    #[storage(0, read_only)]
+    data: Handle<ShaderBuffer>,
+    #[texture(1)]
+    #[sampler(2)]
+    color_texture: Handle<Image>,
+}
+
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 #[bindless(index_table(range(0..4)))]
-struct CustomMaterial {
+struct CustomBindlessMaterial {
     #[storage(1, read_only, binding_array(4))]
     data: Handle<ShaderBuffer>,
     #[texture(2)]
@@ -157,11 +243,14 @@ impl GpuComponentArrayBuffer for CustomMaterialData {
     }
 }
 
-// The Material trait is very configurable, but comes with sensible defaults
-// for all methods. You only need to implement functions for features that
-// need non-default behavior. See the Material api docs for details!
 impl Material for CustomMaterial {
     fn fragment_shader() -> ShaderRef {
         SHADER_ASSET_PATH.into()
+    }
+}
+
+impl Material for CustomBindlessMaterial {
+    fn fragment_shader() -> ShaderRef {
+        BINDLESS_SHADER_ASSET_PATH.into()
     }
 }
