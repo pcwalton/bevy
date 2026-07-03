@@ -214,8 +214,11 @@ enum MaterialNonBindlessAllocatedBindGroup {
     /// A bind group that's already been prepared.
     Prepared {
         bind_group: PreparedBindGroup,
+        layout: BindGroupLayoutDescriptor,
         #[expect(dead_code, reason = "These buffers are only referenced by bind groups")]
         uniform_buffers: Vec<Buffer>,
+        #[expect(dead_code, reason = "These buffers are only referenced by bind groups")]
+        fallback_shader_buffers: Vec<Buffer>,
     },
 }
 
@@ -548,6 +551,7 @@ impl MaterialBindGroupAllocator {
     pub fn allocate_prepared(
         &mut self,
         prepared_bind_group: PreparedBindGroup,
+        bind_group_layout: BindGroupLayoutDescriptor,
     ) -> MaterialBindingId {
         match *self {
             MaterialBindGroupAllocator::Bindless(_) => {
@@ -557,7 +561,7 @@ impl MaterialBindGroupAllocator {
                 )
             }
             MaterialBindGroupAllocator::NonBindless(ref mut non_bindless_allocator) => {
-                non_bindless_allocator.allocate_prepared(prepared_bind_group)
+                non_bindless_allocator.allocate_prepared(prepared_bind_group, bind_group_layout)
             }
         }
     }
@@ -600,8 +604,12 @@ impl MaterialBindGroupAllocator {
             ),
             MaterialBindGroupAllocator::NonBindless(
                 ref mut material_bind_group_non_bindless_allocator,
-            ) => material_bind_group_non_bindless_allocator
-                .prepare_bind_groups(render_device, pipeline_cache),
+            ) => material_bind_group_non_bindless_allocator.prepare_bind_groups(
+                render_device,
+                pipeline_cache,
+                shader_buffer_assets,
+                changed_shader_buffers,
+            ),
         }
     }
 
@@ -1398,7 +1406,8 @@ impl MaterialBindlessSlab {
         &mut self,
         changed_shader_buffers: &RenderChangedShaderBuffers,
     ) {
-        if self.bind_group.is_some()
+        if !changed_shader_buffers.is_empty()
+            && self.bind_group.is_some()
             && self.shader_buffers.values().any(|buffer| {
                 matches!(buffer.resource_type, BindlessResourceType::ShaderBuffer)
                     && buffer.resource_to_slot.keys().any(|binding_resource_id| {
@@ -2073,10 +2082,16 @@ impl MaterialBindGroupNonBindlessAllocator {
 
     /// Inserts an prepared bind group into this allocator and returns a
     /// [`MaterialBindingId`].
-    fn allocate_prepared(&mut self, prepared_bind_group: PreparedBindGroup) -> MaterialBindingId {
+    fn allocate_prepared(
+        &mut self,
+        prepared_bind_group: PreparedBindGroup,
+        bind_group_layout: BindGroupLayoutDescriptor,
+    ) -> MaterialBindingId {
         self.allocate(MaterialNonBindlessAllocatedBindGroup::Prepared {
             bind_group: prepared_bind_group,
+            layout: bind_group_layout,
             uniform_buffers: vec![],
+            fallback_shader_buffers: vec![],
         })
     }
 
@@ -2113,7 +2128,11 @@ impl MaterialBindGroupNonBindlessAllocator {
         &mut self,
         render_device: &RenderDevice,
         pipeline_cache: &PipelineCache,
+        shader_buffer_assets: &RenderAssets<GpuShaderBuffer>,
+        changed_shader_buffers: &RenderChangedShaderBuffers,
     ) {
+        self.invalidate_bind_group_for_changed_shader_buffers_if_needed(changed_shader_buffers);
+
         for bind_group_index in mem::take(&mut self.to_prepare) {
             let Some(MaterialNonBindlessAllocatedBindGroup::Unprepared {
                 bind_group: unprepared_bind_group,
@@ -2124,23 +2143,46 @@ impl MaterialBindGroupNonBindlessAllocator {
             };
 
             // Pack any `Data` into uniform buffers.
-            let mut uniform_buffers = vec![];
+            let (mut uniform_buffers, mut fallback_shader_buffers) = (vec![], vec![]);
             for (index, binding) in unprepared_bind_group.bindings.iter() {
-                let OwnedBindingResource::Data(ref owned_data) = *binding else {
-                    continue;
-                };
-                let label = format!("material uniform data {}", *index);
-                let uniform_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-                    label: Some(&label),
-                    contents: &owned_data.0,
-                    usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
-                });
-                uniform_buffers.push(uniform_buffer);
+                match *binding {
+                    OwnedBindingResource::Data(ref owned_data) => {
+                        let label = format!("material uniform data {}", *index);
+                        let uniform_buffer =
+                            render_device.create_buffer_with_data(&BufferInitDescriptor {
+                                label: Some(&label),
+                                contents: &owned_data.0,
+                                usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+                            });
+                        uniform_buffers.push(uniform_buffer);
+                    }
+
+                    OwnedBindingResource::ShaderBuffer(ref shader_buffer)
+                        if shader_buffer_assets.get(shader_buffer.id()).is_none() =>
+                    {
+                        let label = format!("fallback shader buffer {}", *index);
+                        let fallback_shader_buffer =
+                            render_device.create_buffer(&BufferDescriptor {
+                                label: Some(&label),
+                                // This is dubious, but without the shader buffer
+                                // there's really not much we can do here.
+                                size: 1,
+                                usage: BufferUsages::COPY_DST
+                                    | BufferUsages::COPY_SRC
+                                    | BufferUsages::STORAGE,
+                                mapped_at_creation: false,
+                            });
+                        fallback_shader_buffers.push(fallback_shader_buffer);
+                    }
+
+                    _ => {}
+                }
             }
 
             // Create bind group entries.
             let mut bind_group_entries = vec![];
             let mut uniform_buffers_iter = uniform_buffers.iter();
+            let mut fallback_shader_buffers_iter = fallback_shader_buffers.iter();
             for (index, binding) in unprepared_bind_group.bindings.iter() {
                 match *binding {
                     OwnedBindingResource::Data(_) => {
@@ -2152,6 +2194,24 @@ impl MaterialBindGroupNonBindlessAllocator {
                                 .as_entire_binding(),
                         });
                     }
+                    OwnedBindingResource::ShaderBuffer(ref shader_buffer) => bind_group_entries
+                        .push(BindGroupEntry {
+                            binding: *index,
+                            resource: match shader_buffer_assets.get(shader_buffer.id()) {
+                                Some(shader_buffer) => BindingResource::Buffer(BufferBinding {
+                                    buffer: &shader_buffer.buffer,
+                                    offset: 0,
+                                    size: None,
+                                }),
+                                None => BindingResource::Buffer(BufferBinding {
+                                    buffer: fallback_shader_buffers_iter.next().expect(
+                                        "We should have created fallback shader buffers by now",
+                                    ),
+                                    offset: 0,
+                                    size: None,
+                                }),
+                            },
+                        }),
                     _ => bind_group_entries.push(BindGroupEntry {
                         binding: *index,
                         resource: binding.get_binding(),
@@ -2172,8 +2232,57 @@ impl MaterialBindGroupNonBindlessAllocator {
                         bindings: unprepared_bind_group.bindings,
                         bind_group,
                     },
+                    layout: bind_group_layout,
                     uniform_buffers,
+                    fallback_shader_buffers,
                 });
+        }
+    }
+
+    fn invalidate_bind_group_for_changed_shader_buffers_if_needed(
+        &mut self,
+        changed_shader_buffers: &RenderChangedShaderBuffers,
+    ) {
+        if changed_shader_buffers.is_empty() {
+            return;
+        }
+
+        for (allocated_bind_group_index, maybe_allocated_bind_group) in
+            self.bind_groups.iter_mut().enumerate()
+        {
+            let Some(MaterialNonBindlessAllocatedBindGroup::Prepared {
+                bind_group: ref mut prepared_bind_group,
+                ref mut layout,
+                ..
+            }) = *maybe_allocated_bind_group
+            else {
+                continue;
+            };
+            if prepared_bind_group
+                .bindings
+                .iter()
+                .all(|(_, binding_resource)| match *binding_resource {
+                    OwnedBindingResource::ShaderBuffer(ref shader_buffer) => {
+                        !changed_shader_buffers.contains(&shader_buffer.id())
+                    }
+                    _ => true,
+                })
+            {
+                continue;
+            }
+
+            // Un-prepare the bind group.
+            println!("un-preparing bind group: {:?}", allocated_bind_group_index);
+            let resources = mem::take(&mut prepared_bind_group.bindings);
+            let layout = mem::take(layout);
+            *maybe_allocated_bind_group = Some(MaterialNonBindlessAllocatedBindGroup::Unprepared {
+                bind_group: UnpreparedBindGroup {
+                    bindings: resources,
+                },
+                layout,
+            });
+            self.to_prepare
+                .insert(MaterialBindGroupIndex(allocated_bind_group_index as u32));
         }
     }
 }

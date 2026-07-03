@@ -342,7 +342,7 @@ mod tests {
                     Some(&(tag as u32))
                 );
                 assert_eq!(
-                    self.gpu_component_array.tag_to_entity.get(tag as usize),
+                    self.gpu_component_array.tag_to_entity.get(tag),
                     Some(entity)
                 );
                 assert_eq!(self.gpu_component_array.get(&self.buffer, tag as u32), data);

@@ -1677,8 +1677,8 @@ where
                         let bind_group_allocator =
                             bind_group_allocators.get_mut(&TypeId::of::<M>()).unwrap();
                         // Store the resulting bind group directly in the slot.
-                        let material_binding_id =
-                            bind_group_allocator.allocate_prepared(prepared_bind_group);
+                        let material_binding_id = bind_group_allocator
+                            .allocate_prepared(prepared_bind_group, material_layout.clone());
                         render_material_bindings.insert(material_id.into(), material_binding_id);
                         material_binding_id
                     }

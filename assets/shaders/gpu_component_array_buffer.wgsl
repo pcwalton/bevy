@@ -5,7 +5,7 @@ struct CustomMaterialData {
     pad: u32,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<storage> material_data: array<CustomMaterialBindings>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<storage> material_data: array<CustomMaterialData>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var color_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var color_texture_sampler: sampler;
 

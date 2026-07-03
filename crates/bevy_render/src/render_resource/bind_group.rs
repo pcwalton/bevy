@@ -645,7 +645,7 @@ pub struct UnpreparedBindGroup {
 
 /// A pair of binding index and binding resource, used as part of
 /// [`PreparedBindGroup`] and [`UnpreparedBindGroup`].
-#[derive(Deref, DerefMut)]
+#[derive(Default, Deref, DerefMut)]
 pub struct BindingResources(pub Vec<(u32, OwnedBindingResource)>);
 
 /// An owned binding resource of any type (ex: a [`Buffer`], [`TextureView`], etc).
