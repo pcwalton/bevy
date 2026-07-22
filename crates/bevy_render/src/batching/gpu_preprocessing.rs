@@ -1298,17 +1298,21 @@ impl UntypedPhaseIndirectParametersBuffers {
                 indirect_parameters_base: indirect_parameters_range.start,
                 indirect_parameters_count: 0,
             });
-            self.indexed
-                .view_to_indirect_parameters_batch_range
-                .insert(*retained_view_entity, indirect_parameters_range.clone());
+            extend_view_batch_range(
+                &mut self.indexed.view_to_indirect_parameters_batch_range,
+                *retained_view_entity,
+                indirect_parameters_range.clone(),
+            );
         } else {
             self.non_indexed.batch_sets.push(IndirectBatchSet {
                 indirect_parameters_base: indirect_parameters_range.start,
                 indirect_parameters_count: 0,
             });
-            self.non_indexed
-                .view_to_indirect_parameters_batch_range
-                .insert(*retained_view_entity, indirect_parameters_range.clone());
+            extend_view_batch_range(
+                &mut self.non_indexed.view_to_indirect_parameters_batch_range,
+                *retained_view_entity,
+                indirect_parameters_range.clone(),
+            );
         }
     }
 
@@ -2563,13 +2567,26 @@ where
     ) where
         IP: Clone + ShaderSize + WriteInto,
     {
-        indirect_parameters_buffers
-            .view_to_indirect_parameters_batch_range
-            .insert(
-                retained_view_entity,
-                self.initial_indirect_parameters_index..self.indirect_parameters_index,
-            );
+        extend_view_batch_range(
+            &mut indirect_parameters_buffers.view_to_indirect_parameters_batch_range,
+            retained_view_entity,
+            self.initial_indirect_parameters_index..self.indirect_parameters_index,
+        );
     }
+}
+
+/// Widens the view's batch range to include `range`.
+fn extend_view_batch_range(
+    map: &mut HashMap<RetainedViewEntity, Range<u32>>,
+    retained_view_entity: RetainedViewEntity,
+    range: Range<u32>,
+) {
+    map.entry(retained_view_entity)
+        .and_modify(|existing| {
+            existing.start = existing.start.min(range.start);
+            existing.end = existing.end.max(range.end);
+        })
+        .or_insert(range);
 }
 
 /// A system that gathers up the per-phase GPU buffers and inserts them into the
