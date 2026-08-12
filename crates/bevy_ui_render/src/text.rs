@@ -16,6 +16,24 @@ use crate::{
     stack_z_offsets, ExtractedUiItem, ExtractedUiNode, ExtractedUiNodes, NodeType, UiCameraMap,
 };
 
+pub(crate) fn calculate_text_scroll_clip(
+    editable_text: Option<&EditableText>,
+    maybe_clip: Option<&CalculatedClip>,
+    uinode: &ComputedNode,
+    global_transform: &UiGlobalTransform,
+) -> Option<CalculatedClip> {
+    if editable_text.is_some() {
+        Some(
+            maybe_clip
+                .cloned()
+                .unwrap_or_default()
+                .with_rect(uinode.content_box(), global_transform),
+        )
+    } else {
+        maybe_clip.cloned()
+    }
+}
+
 pub fn extract_text_cursor(
     mut commands: Commands,
     extracted_uinodes: ResMut<ExtractedUiNodes>,
@@ -74,16 +92,7 @@ pub fn extract_text_cursor(
                     - editable_text.map_or(Vec2::ZERO, |editor| editor.viewport.offset),
             );
 
-        let clip = if editable_text.is_some() {
-            let content_box = uinode.content_box();
-            let text_clip = Rect::from_center_size(
-                global_transform.affine().translation + content_box.center(),
-                content_box.size(),
-            );
-            Some(maybe_clip.map_or(text_clip, |clip| clip.clip.intersect(text_clip)))
-        } else {
-            maybe_clip.map(|clip| clip.clip)
-        };
+        let clip = calculate_text_scroll_clip(editable_text, maybe_clip, uinode, global_transform);
 
         let mut focused = false;
 
@@ -155,7 +164,7 @@ pub fn extract_text_cursor(
                     extracted_camera_entity,
                     ExtractedUiNode {
                         z_order: stack_index.0 as f32 + stack_z_offsets::TEXT_SELECTION,
-                        clip,
+                        clip: clip.clone(),
                         image: AssetId::default(),
                         transform: transform * Affine2::from_translation(selection.center()),
                         item: ExtractedUiItem::Node {
@@ -187,7 +196,7 @@ pub fn extract_text_cursor(
                 extracted_camera_entity,
                 ExtractedUiNode {
                     z_order: stack_index.0 as f32 + stack_z_offsets::TEXT_CURSOR,
-                    clip,
+                    clip: clip.clone(),
                     image: AssetId::default(),
                     transform: transform * Affine2::from_translation(cursor_rect.center()),
                     item: ExtractedUiItem::Node {
@@ -266,11 +275,8 @@ pub fn extract_preedit_underlines(
         let transform = Affine2::from(global_transform)
             * Affine2::from_translation(uinode.content_box().min - editable_text.viewport.offset);
 
-        let text_clip = Rect::from_center_size(
-            global_transform.affine().translation + uinode.content_box().center(),
-            uinode.content_box().size(),
-        );
-        let clip = Some(maybe_clip.map_or(text_clip, |clip| clip.clip.intersect(text_clip)));
+        let clip =
+            calculate_text_scroll_clip(Some(editable_text), maybe_clip, uinode, global_transform);
 
         let color = text_color.0.to_linear();
 
@@ -281,7 +287,7 @@ pub fn extract_preedit_underlines(
                 extracted_camera_entity,
                 ExtractedUiNode {
                     z_order: stack_index.0 as f32 + stack_z_offsets::TEXT_STRIKETHROUGH,
-                    clip,
+                    clip: clip.clone(),
                     image: AssetId::default(),
                     transform: transform * Affine2::from_translation(rect.center()),
                     item: ExtractedUiItem::Node {
