@@ -2107,7 +2107,6 @@ pub fn queue_ui_items<E>(
     <E::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key: Send + Sync,
 {
     let mut system_param = system_param.into_inner();
-    let draw_function = draw_functions.read().id::<E::DrawFunctions>();
     let local_data = &mut *local_data;
 
     // Save the list of UI objects we need to attempt to re-queue this frame.
@@ -2118,6 +2117,14 @@ pub fn queue_ui_items<E>(
         &mut local_data.ui_objects_to_retry_next_frame,
     );
     local_data.ui_objects_to_retry_next_frame.clear();
+
+    // Quick exit so we don't have to grab the lock on draw functions if there's
+    // nothing to do.
+    if extracted_nodes.changed.is_empty() && local_data.ui_objects_to_retry_this_frame.is_empty() {
+        return;
+    }
+
+    let draw_function = draw_functions.read().id::<E::DrawFunctions>();
 
     // To avoid having to look up information about the camera over and over
     // again for each changed render object, we cache the most recent view we
