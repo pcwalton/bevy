@@ -762,26 +762,32 @@ pub fn extract_uinode_background_colors(
         )>,
     >,
     camera_map: Extract<UiCameraMap>,
-    mut changed_entities: Local<MainEntityHashSet>,
 ) {
     let extracted_uinodes = extracted_uinodes.into_inner();
     let mut camera_mapper = camera_map.get_mapper();
 
-    changed_entities.extend(extracted_uinodes.changed.keys().copied());
-
     for (
-        entity,
-        uinode,
-        stack_index,
-        transform,
-        inherited_visibility,
-        clip,
-        camera,
-        background_color,
-        maybe_outer_color,
-    ) in changed_entities
-        .drain()
-        .filter_map(|main_entity| uinode_query.get(main_entity.entity()).ok())
+        (
+            entity,
+            uinode,
+            stack_index,
+            transform,
+            inherited_visibility,
+            clip,
+            camera,
+            background_color,
+            maybe_outer_color,
+        ),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                uinode_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         // Skip invisible backgrounds
         if !inherited_visibility.get()
@@ -797,7 +803,9 @@ pub fn extract_uinode_background_colors(
         };
 
         if !background_color.is_fully_transparent() {
-            extracted_uinodes.add(
+            UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                changed_objects,
+                &mut extracted_uinodes.objects,
                 &mut commands,
                 entity.into(),
                 extracted_camera_entity,
@@ -826,7 +834,9 @@ pub fn extract_uinode_background_colors(
         if let Some(outer_color) = maybe_outer_color
             && !outer_color.0.is_fully_transparent()
         {
-            extracted_uinodes.add(
+            UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                changed_objects,
+                &mut extracted_uinodes.objects,
                 &mut commands,
                 entity.into(),
                 extracted_camera_entity,
@@ -872,26 +882,32 @@ pub fn extract_uinode_images(
         )>,
     >,
     camera_map: Extract<UiCameraMap>,
-    mut changed_entities: Local<MainEntityHashSet>,
 ) {
     let extracted_uinodes = extracted_uinodes.into_inner();
     let mut camera_mapper = camera_map.get_mapper();
 
-    changed_entities.extend(extracted_uinodes.changed.keys().copied());
-
     for (
-        entity,
-        uinode,
-        stack_index,
-        transform,
-        inherited_visibility,
-        clip,
-        camera,
-        image,
-        image_size,
-    ) in changed_entities
-        .drain()
-        .flat_map(|main_entity| uinode_query.get(main_entity.entity()).ok())
+        (
+            entity,
+            uinode,
+            stack_index,
+            transform,
+            inherited_visibility,
+            clip,
+            camera,
+            image,
+            image_size,
+        ),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                uinode_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         let visual_box = match image.visual_box {
             VisualBox::ContentBox => uinode.content_box(),
@@ -952,7 +968,9 @@ pub fn extract_uinode_images(
             None
         };
 
-        extracted_uinodes.add(
+        UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+            changed_objects,
+            &mut extracted_uinodes.objects,
             &mut commands,
             entity.into(),
             extracted_camera_entity,
@@ -994,27 +1012,33 @@ pub fn extract_uinode_borders(
         )>,
     >,
     camera_map: Extract<UiCameraMap>,
-    mut changed_entities: Local<MainEntityHashSet>,
 ) {
     let extracted_uinodes = extracted_uinodes.into_inner();
     let image = AssetId::<Image>::default();
     let mut camera_mapper = camera_map.get_mapper();
 
-    changed_entities.extend(extracted_uinodes.changed.keys().copied());
-
     for (
-        entity,
-        node,
-        computed_node,
-        stack_index,
-        transform,
-        inherited_visibility,
-        maybe_clip,
-        camera,
-        (maybe_border_color, maybe_outline),
-    ) in changed_entities
-        .drain()
-        .filter_map(|main_entity| uinode_query.get(main_entity.entity()).ok())
+        (
+            entity,
+            node,
+            computed_node,
+            stack_index,
+            transform,
+            inherited_visibility,
+            maybe_clip,
+            camera,
+            (maybe_border_color, maybe_outline),
+        ),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                uinode_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         // Skip invisible borders and removed nodes
         if !inherited_visibility.get() || node.is_some_and(|node| node.display == Display::None) {
@@ -1082,7 +1106,14 @@ pub fn extract_uinode_borders(
                     },
                 };
 
-                extracted_uinodes.add(&mut commands, entity.into(), extracted_camera_entity, node);
+                UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                    changed_objects,
+                    &mut extracted_uinodes.objects,
+                    &mut commands,
+                    entity.into(),
+                    extracted_camera_entity,
+                    node,
+                );
             }
         }
 
@@ -1093,7 +1124,9 @@ pub fn extract_uinode_borders(
         if let Some(outline) = maybe_outline.filter(|outline| !outline.color.is_fully_transparent())
         {
             let outline_size = computed_node.outlined_node_size();
-            extracted_uinodes.add(
+            UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                changed_objects,
+                &mut extracted_uinodes.objects,
                 &mut commands,
                 entity.into(),
                 extracted_camera_entity,
@@ -1368,25 +1401,22 @@ pub fn extract_viewport_nodes(
         )>,
     >,
     camera_map: Extract<UiCameraMap>,
-    mut changed_entities: Local<MainEntityHashSet>,
 ) {
     let extracted_uinodes = extracted_uinodes.into_inner();
     let mut camera_mapper = camera_map.get_mapper();
 
-    changed_entities.extend(extracted_uinodes.changed.keys().copied());
-
     for (
-        entity,
-        uinode,
-        stack_index,
-        transform,
-        inherited_visibility,
-        clip,
-        camera,
-        viewport_node,
-    ) in changed_entities
-        .drain()
-        .filter_map(|main_entity| uinode_query.get(main_entity.entity()).ok())
+        (entity, uinode, stack_index, transform, inherited_visibility, clip, camera, viewport_node),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                uinode_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         // Skip invisible images
         if !inherited_visibility.get() || uinode.is_empty() {
@@ -1408,7 +1438,9 @@ pub fn extract_viewport_nodes(
             continue;
         };
 
-        extracted_uinodes.add(
+        UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+            changed_objects,
+            &mut extracted_uinodes.objects,
             &mut commands,
             entity.into(),
             extracted_camera_entity,
@@ -1456,31 +1488,37 @@ pub fn extract_text_sections(
     >,
     text_styles: Extract<Query<&TextColor>>,
     camera_map: Extract<UiCameraMap>,
-    mut changed_entities: Local<MainEntityHashSet>,
 ) {
     let extracted_uinodes = extracted_uinodes.into_inner();
     let mut camera_mapper = camera_map.get_mapper();
 
-    changed_entities.extend(extracted_uinodes.changed.keys().copied());
-
     let mut glyphs = vec![];
 
     for (
-        entity,
-        uinode,
-        stack_index,
-        global_transform,
-        inherited_visibility,
-        maybe_clip,
-        camera,
-        computed_block,
-        text_color,
-        text_layout_info,
-        editable_text,
-        cursor_style,
-    ) in changed_entities
-        .drain()
-        .filter_map(|main_entity| uinode_query.get(main_entity.entity()).ok())
+        (
+            entity,
+            uinode,
+            stack_index,
+            global_transform,
+            inherited_visibility,
+            maybe_clip,
+            camera,
+            computed_block,
+            text_color,
+            text_layout_info,
+            editable_text,
+            cursor_style,
+        ),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                uinode_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         // Skip if not visible or if size is set to zero (e.g. when a parent is set to `Display::None`)
         if !inherited_visibility.get() || uinode.is_empty() {
@@ -1558,7 +1596,9 @@ pub fn extract_text_sections(
                 .get(i + 1)
                 .is_none_or(|info| info.atlas_info.texture != atlas_info.texture)
             {
-                extracted_uinodes.add(
+                UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                    changed_objects,
+                    &mut extracted_uinodes.objects,
                     &mut commands,
                     entity.into(),
                     extracted_camera_entity,
@@ -1597,30 +1637,36 @@ pub fn extract_text_shadows(
     >,
     text_decoration_query: Extract<Query<(Has<Strikethrough>, Has<Underline>)>>,
     camera_map: Extract<UiCameraMap>,
-    mut changed_entities: Local<MainEntityHashSet>,
 ) {
     let extracted_uinodes = extracted_uinodes.into_inner();
     let mut camera_mapper = camera_map.get_mapper();
 
-    changed_entities.extend(extracted_uinodes.changed.keys().copied());
-
     let mut glyphs = vec![];
 
     for (
-        entity,
-        uinode,
-        stack_index,
-        global_transform,
-        target,
-        inherited_visibility,
-        maybe_clip,
-        text_layout_info,
-        shadow,
-        computed_block,
-        editable_text,
-    ) in changed_entities
-        .drain()
-        .filter_map(|main_entity| uinode_query.get(main_entity.entity()).ok())
+        (
+            entity,
+            uinode,
+            stack_index,
+            global_transform,
+            target,
+            inherited_visibility,
+            maybe_clip,
+            text_layout_info,
+            shadow,
+            computed_block,
+            editable_text,
+        ),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                uinode_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         // Skip if not visible or if size is set to zero (e.g. when a parent is set to `Display::None`)
         if !inherited_visibility.get() || uinode.is_empty() {
@@ -1659,7 +1705,9 @@ pub fn extract_text_shadows(
                 info.section_index != *section_index
                     || info.atlas_info.texture != atlas_info.texture
             }) {
-                extracted_uinodes.add(
+                UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                    changed_objects,
+                    &mut extracted_uinodes.objects,
                     &mut commands,
                     entity.into(),
                     extracted_camera_entity,
@@ -1690,7 +1738,9 @@ pub fn extract_text_shadows(
             };
 
             if has_strikethrough {
-                extracted_uinodes.add(
+                UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                    changed_objects,
+                    &mut extracted_uinodes.objects,
                     &mut commands,
                     entity.into(),
                     extracted_camera_entity,
@@ -1718,7 +1768,9 @@ pub fn extract_text_shadows(
             }
 
             if has_underline {
-                extracted_uinodes.add(
+                UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                    changed_objects,
+                    &mut extracted_uinodes.objects,
                     &mut commands,
                     entity.into(),
                     extracted_camera_entity,
@@ -1774,27 +1826,33 @@ pub fn extract_text_decorations(
         )>,
     >,
     camera_map: Extract<UiCameraMap>,
-    mut changed_entities: Local<MainEntityHashSet>,
 ) {
     let extracted_uinodes = extracted_uinodes.into_inner();
     let mut camera_mapper = camera_map.get_mapper();
 
-    changed_entities.extend(extracted_uinodes.changed.keys().copied());
-
     for (
-        entity,
-        uinode,
-        stack_index,
-        computed_block,
-        global_transform,
-        inherited_visibility,
-        maybe_clip,
-        camera,
-        text_layout_info,
-        editable_text,
-    ) in changed_entities
-        .drain()
-        .filter_map(|main_entity| uinode_query.get(main_entity.entity()).ok())
+        (
+            entity,
+            uinode,
+            stack_index,
+            computed_block,
+            global_transform,
+            inherited_visibility,
+            maybe_clip,
+            camera,
+            text_layout_info,
+            editable_text,
+        ),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                uinode_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         // Skip if not visible or if size is set to zero (e.g. when a parent is set to `Display::None`)
         if !inherited_visibility.get() || uinode.is_empty() {
@@ -1832,7 +1890,9 @@ pub fn extract_text_decorations(
             };
 
             if let Some(text_background_color) = text_background_color {
-                extracted_uinodes.add(
+                UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                    changed_objects,
+                    &mut extracted_uinodes.objects,
                     &mut commands,
                     entity.into(),
                     extracted_camera_entity,
@@ -1864,7 +1924,9 @@ pub fn extract_text_decorations(
                     .unwrap_or(text_color.0)
                     .to_linear();
 
-                extracted_uinodes.add(
+                UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                    changed_objects,
+                    &mut extracted_uinodes.objects,
                     &mut commands,
                     entity.into(),
                     extracted_camera_entity,
@@ -1897,7 +1959,9 @@ pub fn extract_text_decorations(
                     .unwrap_or(text_color.0)
                     .to_linear();
 
-                extracted_uinodes.add(
+                UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                    changed_objects,
+                    &mut extracted_uinodes.objects,
                     &mut commands,
                     entity.into(),
                     extracted_camera_entity,
@@ -2634,6 +2698,31 @@ where
                 render_entity,
                 camera_entity: extracted_camera_entity,
             });
+    }
+
+    pub fn add_render_entity(
+        changed_objects: &mut SmallVec<[ChangedUiObject; 4]>,
+        objects: &mut MainEntityHashMap<(Entity, EntityIndexMap<E>)>,
+        commands: &mut Commands,
+        main_entity: MainEntity,
+        extracted_camera_entity: Entity,
+        object: E,
+    ) {
+        let render_entity = commands.spawn_empty().id();
+
+        // Associate the newly spawned render world entity with the main world
+        // entity and camera.
+        objects
+            .entry(main_entity)
+            .or_insert_with(|| (extracted_camera_entity, Default::default()))
+            .1
+            .insert(render_entity, object);
+
+        // Note that it's changed so that we queue it later.
+        changed_objects.push(ChangedUiObject {
+            render_entity,
+            camera_entity: extracted_camera_entity,
+        });
     }
 }
 

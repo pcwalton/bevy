@@ -4,7 +4,7 @@ use bevy_color::Alpha;
 use bevy_ecs::prelude::*;
 use bevy_input_focus::InputFocus;
 use bevy_math::{Affine2, Rect, Vec2};
-use bevy_render::{sync_world::MainEntityHashSet, Extract};
+use bevy_render::Extract;
 use bevy_sprite::BorderRect;
 use bevy_text::{EditableText, TextColor, TextCursorStyle, TextLayoutInfo, TextReadWriteMode};
 use bevy_ui::{
@@ -14,6 +14,7 @@ use bevy_ui::{
 
 use crate::{
     stack_z_offsets, ExtractedUiItem, ExtractedUiNode, ExtractedUiNodes, NodeType, UiCameraMap,
+    UiRenderObjects,
 };
 
 pub(crate) fn calculate_text_scroll_clip(
@@ -54,28 +55,34 @@ pub fn extract_text_cursor(
     >,
     camera_map: Extract<UiCameraMap>,
     input_focus: Extract<Option<Res<InputFocus>>>,
-    mut changed_entities: Local<MainEntityHashSet>,
 ) {
     let extracted_uinodes = extracted_uinodes.into_inner();
     let mut camera_mapper = camera_map.get_mapper();
 
-    changed_entities.extend(extracted_uinodes.changed.keys().copied());
-
     for (
-        entity,
-        uinode,
-        stack_index,
-        global_transform,
-        inherited_visibility,
-        maybe_clip,
-        target_camera,
-        text_layout_info,
-        cursor_style,
-        rwmode,
-        editable_text,
-    ) in changed_entities
-        .drain()
-        .filter_map(|main_entity| text_node_query.get(main_entity.entity()).ok())
+        (
+            entity,
+            uinode,
+            stack_index,
+            global_transform,
+            inherited_visibility,
+            maybe_clip,
+            target_camera,
+            text_layout_info,
+            cursor_style,
+            rwmode,
+            editable_text,
+        ),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                text_node_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         // Skip if not visible or if size is set to zero (e.g. when a parent is set to `Display::None`)
         if !inherited_visibility.get() || uinode.is_empty() {
@@ -158,7 +165,9 @@ pub fn extract_text_cursor(
                     }
                 }
 
-                extracted_uinodes.add(
+                UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                    changed_objects,
+                    &mut extracted_uinodes.objects,
                     &mut commands,
                     entity.into(),
                     extracted_camera_entity,
@@ -190,7 +199,9 @@ pub fn extract_text_cursor(
             && !cursor_style.color.is_fully_transparent()
             && *rwmode != TextReadWriteMode::Static
         {
-            extracted_uinodes.add(
+            UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                changed_objects,
+                &mut extracted_uinodes.objects,
                 &mut commands,
                 entity.into(),
                 extracted_camera_entity,
@@ -239,27 +250,33 @@ pub fn extract_preedit_underlines(
         >,
     >,
     camera_map: Extract<UiCameraMap>,
-    mut changed_entities: Local<MainEntityHashSet>,
 ) {
     let extracted_uinodes = extracted_uinodes.into_inner();
     let mut camera_mapper = camera_map.get_mapper();
 
-    changed_entities.extend(extracted_uinodes.changed.keys().copied());
-
     for (
-        entity,
-        uinode,
-        text_color,
-        text_layout_info,
-        global_transform,
-        inherited_visibility,
-        maybe_clip,
-        target_camera,
-        stack_index,
-        editable_text,
-    ) in changed_entities
-        .drain()
-        .filter_map(|main_entity| text_node_query.get(main_entity.entity()).ok())
+        (
+            entity,
+            uinode,
+            text_color,
+            text_layout_info,
+            global_transform,
+            inherited_visibility,
+            maybe_clip,
+            target_camera,
+            stack_index,
+            editable_text,
+        ),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                text_node_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         if !inherited_visibility.get()
             || uinode.is_empty()
@@ -281,7 +298,9 @@ pub fn extract_preedit_underlines(
         let color = text_color.0.to_linear();
 
         for rect in text_layout_info.preedit_underline_rects.iter() {
-            extracted_uinodes.add(
+            UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                changed_objects,
+                &mut extracted_uinodes.objects,
                 &mut commands,
                 entity.into(),
                 extracted_camera_entity,

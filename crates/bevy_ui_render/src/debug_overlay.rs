@@ -4,6 +4,7 @@ use super::ExtractedUiNodes;
 use super::NodeType;
 use super::UiCameraMap;
 use crate::shader_flags;
+use crate::UiRenderObjects;
 use bevy_asset::AssetId;
 use bevy_camera::visibility::InheritedVisibility;
 use bevy_color::Hsla;
@@ -15,7 +16,6 @@ use bevy_ecs::prelude::ReflectComponent;
 use bevy_ecs::prelude::ReflectResource;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::system::Commands;
-use bevy_ecs::system::Local;
 use bevy_ecs::system::Query;
 use bevy_ecs::system::Res;
 use bevy_ecs::system::ResMut;
@@ -23,7 +23,6 @@ use bevy_math::Affine2;
 use bevy_math::Rect;
 use bevy_math::Vec2;
 use bevy_reflect::Reflect;
-use bevy_render::sync_world::MainEntityHashSet;
 use bevy_render::Extract;
 use bevy_sprite::BorderRect;
 use bevy_ui::ui_transform::UiGlobalTransform;
@@ -189,17 +188,22 @@ pub fn extract_debug_overlay(
     >,
     ui_stack: Extract<Res<UiStack>>,
     camera_map: Extract<UiCameraMap>,
-    mut changed_entities: Local<MainEntityHashSet>,
 ) {
     let extracted_uinodes = extracted_uinodes.into_inner();
     let mut camera_mapper = camera_map.get_mapper();
 
-    changed_entities.extend(extracted_uinodes.changed.keys().copied());
-
-    for (entity, uinode, stack_index, transform, visibility, maybe_clip, computed_target, debug) in
-        changed_entities
-            .drain()
-            .filter_map(|main_entity| uinode_query.get(main_entity.entity()).ok())
+    for (
+        (entity, uinode, stack_index, transform, visibility, maybe_clip, computed_target, debug),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                uinode_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         let debug_options = debug.copied().unwrap_or((*debug_options.as_ref()).into());
         if !debug_options.enabled {
@@ -225,7 +229,9 @@ pub fn extract_debug_overlay(
                 return;
             }
 
-            extracted_uinodes.add(
+            UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                changed_objects,
+                &mut extracted_uinodes.objects,
                 &mut commands,
                 entity.into(),
                 extracted_camera_entity,
