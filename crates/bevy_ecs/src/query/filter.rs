@@ -91,6 +91,39 @@ pub unsafe trait QueryFilter: WorldQuery {
     /// If this is `true`, then [`QueryFilter::filter_fetch`] must always return true.
     const IS_ARCHETYPAL: bool;
 
+    /// Returns true if and only if this filter allows associated dense queries
+    /// to skip tables that couldn't possibly match.
+    ///
+    /// For `Added` and `Changed` query filters, this is done by examing
+    /// *summary ticks*. Each summary tick stores the timestamp of the most
+    /// recent modification to any row in the column.
+    ///
+    /// # Examples
+    ///
+    /// Suppose that there are three components `A`, `B`, and `C`. `A` and `B`
+    /// have summary ticks while `C` doesn't. The following filters  *can* be
+    /// accelerated via summary ticks:
+    ///
+    /// * `Changed<A>`
+    ///
+    /// * `Added<B>` (because the summary tick is updated when components are
+    ///   added to an entity)
+    ///
+    /// * `Or<(Changed<A>, Added<B>)>` (because both `A` and `B` have summary
+    ///   ticks)
+    ///
+    /// * `(Changed<A>, Changed<C>)` (because `A` must be changed for the query
+    ///   to match, even though `C` has no summary tick)
+    ///
+    /// Conversely, the following filters *can't* be accelerated via summary
+    /// ticks:
+    ///
+    /// * `Changed<C>` (because `C` has no summary tick)
+    ///
+    /// * `Or<(Changed<A>, Changed<C>)>` (because even if `A` wasn't changed, we
+    ///   can match a query if `C` was changed, so we must check every row)
+    const CAN_SKIP_TABLES: bool = false;
+
     /// Returns true if the provided [`Entity`] and [`TableRow`] should be included in the query results.
     /// If false, the entity will be skipped.
     ///
@@ -110,6 +143,29 @@ pub unsafe trait QueryFilter: WorldQuery {
         entity: Entity,
         table_row: TableRow,
     ) -> bool;
+
+    /// Returns true if the filter can prove, either via the `fetch` or the
+    /// summary tick on `table`, that no row of the table could possibly match
+    /// this filter.
+    ///
+    /// If [`Self::CAN_SKIP_TABLES`] is false, then this method must also
+    /// return false.
+    ///
+    /// See [`Self::CAN_SKIP_TABLES`] for examples.
+    ///
+    /// # Safety
+    ///
+    /// Must always be called *after* [`WorldQuery::set_table`]. The query in
+    /// question must be dense.
+    unsafe fn can_skip_table(
+        _state: &Self::State,
+        _fetch: &Self::Fetch<'_>,
+        _table: &Table,
+        _last_run: Tick,
+        _this_run: Tick,
+    ) -> bool {
+        false
+    }
 }
 
 /// Filter that selects entities with a component `T`.
@@ -543,6 +599,8 @@ macro_rules! impl_or_query_filter {
         unsafe impl<$($filter: QueryFilter),*> QueryFilter for Or<($($filter,)*)> {
             const IS_ARCHETYPAL: bool = true $(&& $filter::IS_ARCHETYPAL)*;
 
+            const CAN_SKIP_TABLES: bool = true $(&& $filter::CAN_SKIP_TABLES)*;
+
             #[inline(always)]
             unsafe fn filter_fetch(
                 state: &Self::State,
@@ -561,6 +619,20 @@ macro_rules! impl_or_query_filter {
                     // We must treat those as matching in order to be consistent with `size_hint` for archetypal queries,
                     // so we treat them as matching for non-archetypal queries, as well.
                     || !(false $(|| $filter.matches)*))
+            }
+
+            #[inline(always)]
+            unsafe fn can_skip_table(
+                state: &Self::State,
+                fetch: &Self::Fetch<'_>,
+                table: &Table,
+                last_run: Tick,
+                this_run: Tick
+            ) -> bool {
+                let ($($state,)*) = state;
+                let ($($filter,)*) = fetch;
+                // SAFETY: The invariants are upheld by the caller.
+                true $(&& unsafe { $filter::can_skip_table($state, &$filter.fetch, table, last_run, this_run) })*
             }
         }
     };
@@ -585,6 +657,8 @@ macro_rules! impl_tuple_query_filter {
         unsafe impl<$($name: QueryFilter),*> QueryFilter for ($($name,)*) {
             const IS_ARCHETYPAL: bool = true $(&& $name::IS_ARCHETYPAL)*;
 
+            const CAN_SKIP_TABLES: bool = false $(|| $name::CAN_SKIP_TABLES)*;
+
             #[inline(always)]
             unsafe fn filter_fetch(
                 state: &Self::State,
@@ -596,6 +670,20 @@ macro_rules! impl_tuple_query_filter {
                 let ($($name,)*) = fetch;
                 // SAFETY: The invariants are upheld by the caller.
                 true $(&& unsafe { $name::filter_fetch($state, $name, entity, table_row) })*
+            }
+
+            #[inline(always)]
+            unsafe fn can_skip_table(
+                state: &Self::State,
+                fetch: &Self::Fetch<'_>,
+                table: &Table,
+                last_run: Tick,
+                this_run: Tick
+            ) -> bool {
+                let ($($state,)*) = state;
+                let ($($name,)*) = fetch;
+                // SAFETY: The invariants are upheld by the caller.
+                false $(|| unsafe { $name::can_skip_table($state, $name, table, last_run, this_run) })*
             }
         }
     };
@@ -891,6 +979,10 @@ unsafe impl<T: Component> WorldQuery for Added<T> {
 // SAFETY: WorldQuery impl performs only read access on ticks
 unsafe impl<T: Component> QueryFilter for Added<T> {
     const IS_ARCHETYPAL: bool = false;
+
+    const CAN_SKIP_TABLES: bool =
+        matches!(T::STORAGE_TYPE, StorageType::Table) && T::HAS_SUMMARY_TICK;
+
     #[inline(always)]
     unsafe fn filter_fetch(
         _state: &Self::State,
@@ -920,6 +1012,25 @@ unsafe impl<T: Component> QueryFilter for Added<T> {
                 tick.deref().is_newer_than(fetch.last_run, fetch.this_run)
             },
         )
+    }
+
+    #[inline(always)]
+    unsafe fn can_skip_table(
+        state: &Self::State,
+        _: &Self::Fetch<'_>,
+        table: &Table,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> bool {
+        // If the component has a summary tick, but there is no summary tick in
+        // the table, that means the column isn't present at all. In this case,
+        // we can safely skip the table, because if there aren't any rows with
+        // the column to begin with, none of them will have been added since the
+        // last time this system ran.
+        T::HAS_SUMMARY_TICK
+            && table
+                .get_summary_tick(*state)
+                .is_none_or(|summary_tick| !summary_tick.get().is_newer_than(last_run, this_run))
     }
 }
 
@@ -1129,6 +1240,9 @@ unsafe impl<T: Component> WorldQuery for Changed<T> {
 unsafe impl<T: Component> QueryFilter for Changed<T> {
     const IS_ARCHETYPAL: bool = false;
 
+    const CAN_SKIP_TABLES: bool =
+        matches!(T::STORAGE_TYPE, StorageType::Table) && T::HAS_SUMMARY_TICK;
+
     #[inline(always)]
     unsafe fn filter_fetch(
         _state: &Self::State,
@@ -1158,6 +1272,25 @@ unsafe impl<T: Component> QueryFilter for Changed<T> {
                 tick.deref().is_newer_than(fetch.last_run, fetch.this_run)
             },
         )
+    }
+
+    #[inline(always)]
+    unsafe fn can_skip_table(
+        state: &Self::State,
+        _: &Self::Fetch<'_>,
+        table: &Table,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> bool {
+        // If the component has a summary tick, but there is no summary tick in
+        // the table, that means the column isn't present at all. In this case,
+        // we can safely skip the table, because if there aren't any rows with
+        // the column to begin with, none of them will have been changed since
+        // the last time this system ran.
+        T::HAS_SUMMARY_TICK
+            && table
+                .get_summary_tick(*state)
+                .is_none_or(|summary_tick| !summary_tick.get().is_newer_than(last_run, this_run))
     }
 }
 

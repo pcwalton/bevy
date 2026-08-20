@@ -248,7 +248,21 @@ impl<'w, 's, D: IterQueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
     where
         Func: FnMut(B, D::Item<'w, 's>) -> B,
     {
-        if table.is_empty() {
+        // Skip the table if it's empty or if a filter tells us that we can
+        // based on the summary ticks.
+        if table.is_empty()
+            || (F::CAN_SKIP_TABLES
+                // SAFETY: The caller upholds the invariants.
+                && unsafe {
+                    F::can_skip_table(
+                        &self.query_state.filter_state,
+                        &self.cursor.filter,
+                        table,
+                        self.cursor.last_run,
+                        self.cursor.this_run,
+                    )
+                })
+        {
             return accum;
         }
 
@@ -2995,6 +3009,14 @@ struct QueryIterationCursor<'w, 's, D: QueryData, F: QueryFilter> {
     current_len: u32,
     // either table row or archetype index, depending on whether both `D`'s and `F`'s fetches are dense
     current_row: u32,
+    /// The last time the system ran.
+    ///
+    /// This is used for evaluating summary ticks.
+    last_run: Tick,
+    /// The current timestamp of the system.
+    ///
+    /// This is used for evaluating summary ticks.
+    this_run: Tick,
 }
 
 impl<D: QueryData, F: QueryFilter> Clone for QueryIterationCursor<'_, '_, D, F> {
@@ -3008,6 +3030,8 @@ impl<D: QueryData, F: QueryFilter> Clone for QueryIterationCursor<'_, '_, D, F> 
             filter: self.filter.clone(),
             current_len: self.current_len,
             current_row: self.current_row,
+            last_run: self.last_run,
+            this_run: self.this_run,
         }
     }
 }
@@ -3048,6 +3072,8 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIterationCursor<'w, 's, D, F> {
             is_dense: query_state.is_dense,
             current_len: 0,
             current_row: 0,
+            last_run,
+            this_run,
         }
     }
 
@@ -3061,6 +3087,8 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIterationCursor<'w, 's, D, F> {
             storage_id_iter: self.storage_id_iter.clone(),
             current_len: self.current_len,
             current_row: self.current_row,
+            last_run: self.last_run,
+            this_run: self.this_run,
         }
     }
 
@@ -3155,9 +3183,26 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIterationCursor<'w, 's, D, F> {
                 if self.current_row == self.current_len {
                     let table_id = self.storage_id_iter.next()?.table_id;
                     let table = tables.get(table_id).debug_checked_unwrap();
-                    if table.is_empty() {
+
+                    // Skip the table if it's empty or if a filter tells us that we can
+                    // based on the summary ticks.
+                    if table.is_empty()
+                        || (F::CAN_SKIP_TABLES
+                            // SAFETY: `table` matches `D` and `F`, and the query
+                            // iteration is dense.
+                            && unsafe {
+                                F::can_skip_table(
+                                    &query_state.filter_state,
+                                    &self.filter,
+                                    table,
+                                    self.last_run,
+                                    self.this_run,
+                                )
+                            })
+                    {
                         continue;
                     }
+
                     // SAFETY: `table` is from the world that `fetch/filter` were created for,
                     // `fetch_state`/`filter_state` are the states that `fetch/filter` were initialized with
                     unsafe {
