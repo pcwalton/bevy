@@ -2869,6 +2869,20 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
             this_run: self.this_run,
         }
     }
+
+    /// Returns true if this query can skip tables that can be quickly proven to
+    /// not match the query.
+    ///
+    /// Often, this is done using *summary ticks*. A summary tick stores the
+    /// timestamp of the most recent modification to any row in the column. You
+    /// may wish to use this method in assertions to ensure that a
+    /// performance-critical query can be appropriately accelerated.
+    ///
+    /// See the documentation for [`QueryFilter::CAN_SKIP_TABLES`] for examples
+    /// of filters that can skip tables and filters that can't.
+    pub const fn can_skip_tables(&self) -> bool {
+        self.state.is_dense() && F::CAN_SKIP_TABLES
+    }
 }
 
 impl<'w, 's, D: IterQueryData, F: QueryFilter> IntoIterator for Query<'w, 's, D, F> {

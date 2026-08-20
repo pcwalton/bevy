@@ -117,8 +117,8 @@ mod tests {
         component::Component,
         prelude::{AnyOf, Changed, Entity, Or, QueryState, With, Without},
         query::{
-            ArchetypeFilter, ArchetypeQueryData, Has, QueryCombinationIter, QueryData, QueryFilter,
-            ReadOnlyQueryData,
+            Added, ArchetypeFilter, ArchetypeQueryData, Has, QueryCombinationIter, QueryData,
+            QueryFilter, ReadOnlyQueryData, WorldQuery,
         },
         schedule::{IntoScheduleConfigs, Schedule},
         system::{IntoSystem, Query, System, SystemState},
@@ -126,7 +126,7 @@ mod tests {
     };
     use alloc::{vec, vec::Vec};
     use core::{any::type_name, fmt::Debug, hash::Hash};
-    use std::{collections::HashSet, println};
+    use std::{collections::HashSet, println, sync::Mutex};
 
     #[derive(Component, Debug, Hash, Eq, PartialEq, Clone, Copy, PartialOrd, Ord)]
     struct A(usize);
@@ -976,6 +976,110 @@ mod tests {
         assert_eq!(values.len(), 2);
         // One entity has changed, so the summary tick is changed.
         assert_eq!(ticks.summary_tick_is_changed(), Some(true));
+    }
+
+    /// Ensure that a variety of filter and filter combinations can use summary
+    /// ticks.
+    #[test]
+    fn summary_ticks_can_be_used_for_appropriate_filters() {
+        const {
+            assert!(<Changed<SA> as QueryFilter>::CAN_SKIP_TABLES);
+            assert!(<Added<SA> as QueryFilter>::CAN_SKIP_TABLES);
+            assert!(<(Changed<SA>, Changed<SB>) as QueryFilter>::CAN_SKIP_TABLES);
+            assert!(<(Changed<SA>, Changed<C>) as QueryFilter>::CAN_SKIP_TABLES);
+            assert!(<Or<(Changed<SA>, Changed<SB>)> as QueryFilter>::CAN_SKIP_TABLES);
+            assert!(<(Changed<SA>, With<SB>) as QueryFilter>::CAN_SKIP_TABLES);
+            assert!(
+                <(Or<(Changed<SA>, Changed<C>)>, Changed<SB>) as QueryFilter>::CAN_SKIP_TABLES
+            );
+        }
+    }
+
+    /// Ensure that a variety of filter and filter combinations *can't* use
+    /// summary ticks.
+    #[test]
+    fn summary_ticks_cant_be_used_for_inappropriate_filters() {
+        const {
+            assert!(!<Changed<A> as QueryFilter>::CAN_SKIP_TABLES);
+            assert!(!<(Changed<A>, Changed<C>) as QueryFilter>::CAN_SKIP_TABLES);
+            assert!(!<With<SA> as QueryFilter>::CAN_SKIP_TABLES);
+            assert!(!<Or<(Changed<SA>, Changed<C>)> as QueryFilter>::CAN_SKIP_TABLES);
+            assert!(!<Or<(Changed<SA>, With<C>)> as QueryFilter>::CAN_SKIP_TABLES);
+        }
+    }
+
+    // Ensure that, for any component C, `can_skip_table` returns true for
+    // `Changed<C>` for tables that don't contain columns for that component C.
+    #[test]
+    fn tables_without_matching_columns_are_considered_skippable() {
+        let mut world = World::new();
+        world.spawn((SA(1), SB(1)));
+        let entity_b = world.spawn(SA(2)).id();
+
+        let last_run = world.change_tick();
+        world.clear_trackers();
+        let this_run = world.change_tick();
+
+        let sb_component_id = world.component_id::<SB>().unwrap();
+        // SAFETY: `fetch` doesn't mutably alias anything that we access in
+        // `can_skip_table` or the two lines preceding that call.
+        unsafe {
+            let world = world.as_unsafe_world_cell();
+            let fetch = <Changed<SB> as WorldQuery>::init_fetch(
+                world,
+                &sb_component_id,
+                last_run,
+                this_run,
+            );
+
+            // Fetch the table containing `entity_b`, which has no `SB` column.
+            let entity_b_location = world.entities().get(entity_b).unwrap().unwrap();
+            let entity_b_table = &world.storages().tables[entity_b_location.table_id];
+            assert!(<Changed<SB> as QueryFilter>::can_skip_table(
+                &sb_component_id,
+                &fetch,
+                entity_b_table,
+                last_run,
+                this_run,
+            ));
+        }
+    }
+
+    // Ensure that calling `iter` on a query yields the proper rows when one of
+    // the tables is skipped due to summary ticks.
+    #[test]
+    fn query_iter_uses_summary_ticks() {
+        let mut world = World::new();
+        world.spawn(SA(1));
+        let changed_entity = world.spawn(SA(2)).id();
+
+        world.clear_trackers();
+        world.get_mut::<SA>(changed_entity).unwrap().0 += 1;
+
+        let mut query = world.query_filtered::<Entity, Changed<SA>>();
+        let matched_entities: Vec<_> = query.iter(&world).collect();
+        assert_eq!(&matched_entities[..], &[changed_entity]);
+    }
+
+    // Ensure that calling `par_iter` on a query yields the proper rows when one
+    // of the tables is skipped due to summary ticks.
+    #[test]
+    fn query_par_iter_uses_summary_ticks() {
+        bevy_tasks::ComputeTaskPool::get_or_init(bevy_tasks::TaskPool::new);
+
+        let mut world = World::new();
+        world.spawn(SA(1));
+        let changed_entity = world.spawn(SA(2)).id();
+
+        world.clear_trackers();
+        world.get_mut::<SA>(changed_entity).unwrap().0 += 1;
+
+        let mut query = world.query_filtered::<Entity, Changed<SA>>();
+        let matched_entities: Mutex<Vec<_>> = Mutex::new(vec![]);
+        query.par_iter(&world).for_each(|entity| {
+            matched_entities.lock().unwrap().push(entity);
+        });
+        assert_eq!(&matched_entities.lock().unwrap()[..], &[changed_entity]);
     }
 
     // regression test for https://github.com/bevyengine/bevy/pull/23394

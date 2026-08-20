@@ -1873,6 +1873,14 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             }
         });
     }
+
+    /// Returns true if the query described by this [`QueryState`] is *dense*.
+    ///
+    /// Dense queries are ones that only examine table components and not sparse
+    /// set components.
+    pub const fn is_dense(&self) -> bool {
+        self.is_dense
+    }
 }
 
 impl<D: ReadOnlyQueryData, F: QueryFilter> QueryState<D, F> {
