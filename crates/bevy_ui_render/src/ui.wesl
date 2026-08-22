@@ -10,6 +10,7 @@ const BORDER_RIGHT: u32 = 1024u;
 const BORDER_BOTTOM: u32 = 2048u;
 const BORDER_ANY: u32 = BORDER_LEFT + BORDER_TOP + BORDER_RIGHT + BORDER_BOTTOM;
 const INVERT: u32 = 4096u;
+const TEXT: u32 = 8192u;
 
 fn enabled(flags: u32, mask: u32) -> bool {
     return (flags & mask) != 0u;
@@ -34,30 +35,34 @@ struct VertexOutput {
 
 @vertex
 fn vertex(
-    @location(0) vertex_position: vec3<f32>,
-    @location(1) vertex_uv: vec2<f32>,
+    @location(0) vertex_position: vec2<f32>,
+    @location(1) world_from_local: vec4<f32>,
     @location(2) vertex_color: vec4<f32>,
-    @location(3) flags: u32,
+    // x: left, y: top, z: right, w: bottom.
+    @location(3) border: vec4<f32>,
 
     // x: top left, y: top right, z: bottom right, w: bottom left.
     @location(4) radius_x: vec4<f32>,
     @location(5) radius_y: vec4<f32>,
 
-    // x: left, y: top, z: right, w: bottom.
-    @location(6) border: vec4<f32>,
-    @location(7) size: vec2<f32>,
-    @location(8) point: vec2<f32>,
+    @location(6) uv_scale: vec2<f32>,
+    @location(7) uv_offset: vec2<f32>,
+    @location(8) translation: vec2<f32>,
+    @location(9) size: vec2<f32>,
+    @location(10) flags: u32,
 ) -> VertexOutput {
     var out: VertexOutput;
-    out.uv = vertex_uv;
-    out.position = view.clip_from_world * vec4(vertex_position, 1.0);
+    let world_position = mat2x2<f32>(world_from_local.xy, world_from_local.zw) * vertex_position +
+        translation;
+    out.uv = uv_offset + (vertex_position + vec2(0.5)) * uv_scale;
+    out.position = view.clip_from_world * vec4(world_position, 0.0, 1.0);
     out.color = vertex_color;
     out.flags = flags;
     out.radius_x = radius_x;
     out.radius_y = radius_y;
     out.size = size;
     out.border = border;
-    out.point = point;
+    out.point = select(vertex_position * size, vec2(0.0), enabled(flags, TEXT));
 
     return out;
 }
