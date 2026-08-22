@@ -4,6 +4,7 @@ use super::ExtractedUiNodes;
 use super::NodeType;
 use super::UiCameraMap;
 use crate::shader_flags;
+use crate::UiRenderObjects;
 use bevy_asset::AssetId;
 use bevy_camera::visibility::InheritedVisibility;
 use bevy_color::Hsla;
@@ -191,11 +192,18 @@ pub fn extract_debug_overlay(
     let extracted_uinodes = extracted_uinodes.into_inner();
     let mut camera_mapper = camera_map.get_mapper();
 
-    for (entity, uinode, stack_index, transform, visibility, maybe_clip, computed_target, debug) in
-        extracted_uinodes
-            .changed
-            .iter()
-            .flat_map(|main_entity| uinode_query.get(main_entity.entity()).ok())
+    for (
+        (entity, uinode, stack_index, transform, visibility, maybe_clip, computed_target, debug),
+        changed_objects,
+    ) in extracted_uinodes
+        .changed
+        .iter_mut()
+        .filter_map(|(main_entity, changed_objects)| {
+            Some((
+                uinode_query.get(main_entity.entity()).ok()?,
+                changed_objects,
+            ))
+        })
     {
         let debug_options = debug.copied().unwrap_or((*debug_options.as_ref()).into());
         if !debug_options.enabled {
@@ -221,34 +229,33 @@ pub fn extract_debug_overlay(
                 return;
             }
 
-            extracted_uinodes
-                .uinodes
-                .entry(entity.into())
-                .or_insert_with(|| (extracted_camera_entity, Default::default()))
-                .1
-                .insert(
-                    commands.spawn_empty().id(),
-                    ExtractedUiNode {
-                        // Keep all overlays above UI, and nudge each type slightly in Z so ordering is stable.
-                        z_order,
-                        clip: maybe_clip.filter(|_| !debug_options.show_clipped).cloned(),
-                        image: AssetId::default(),
-                        transform: transform * Affine2::from_translation(rect.center()),
-                        item: ExtractedUiItem::Node {
-                            color,
-                            rect: Rect {
-                                min: Vec2::ZERO,
-                                max: rect.size(),
-                            },
-                            atlas_scaling: None,
-                            flip_x: false,
-                            flip_y: false,
-                            border,
-                            border_radius: radius,
-                            node_type: NodeType::Border(shader_flags::BORDER_ALL),
+            UiRenderObjects::<ExtractedUiNode>::add_render_entity(
+                changed_objects,
+                &mut extracted_uinodes.objects,
+                &mut commands,
+                entity.into(),
+                extracted_camera_entity,
+                ExtractedUiNode {
+                    // Keep all overlays above UI, and nudge each type slightly in Z so ordering is stable.
+                    z_order,
+                    clip: maybe_clip.filter(|_| !debug_options.show_clipped).cloned(),
+                    image: AssetId::default(),
+                    transform: transform * Affine2::from_translation(rect.center()),
+                    item: ExtractedUiItem::Node {
+                        color,
+                        rect: Rect {
+                            min: Vec2::ZERO,
+                            max: rect.size(),
                         },
+                        atlas_scaling: None,
+                        flip_x: false,
+                        flip_y: false,
+                        border,
+                        border_radius: radius,
+                        node_type: NodeType::Border(shader_flags::BORDER_ALL),
                     },
-                );
+                },
+            );
         };
 
         let border_box = Rect::from_center_size(Vec2::ZERO, uinode.size);
