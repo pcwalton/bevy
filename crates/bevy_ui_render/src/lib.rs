@@ -12,6 +12,7 @@ pub mod clipping;
 mod gradient;
 mod image;
 use bevy_ecs::query::QueryData;
+use bevy_ecs::system::lifetimeless::SRes;
 use bevy_render::batching::gpu_preprocessing::IndirectParametersIndexed;
 use bevy_render::render_phase::DrawFunctionId;
 use bevy_render::render_resource::SpecializedRenderPipeline;
@@ -30,7 +31,7 @@ mod debug_overlay;
 use bevy_a11y::AccessibilitySystems;
 use bevy_camera::visibility::InheritedVisibility;
 use bevy_camera::{Camera, Camera2d, Camera3d, RenderTarget};
-use bevy_ecs::entity::{EntityHashSet, EntityIndexMap};
+use bevy_ecs::entity::{EntityHashMap, EntityHashSet, EntityIndexMap};
 use bevy_reflect::prelude::ReflectDefault;
 use bevy_reflect::Reflect;
 use bevy_render::camera::{extract_cameras, CameraMainPassTextureFormats};
@@ -375,7 +376,7 @@ impl UiRenderObject for ExtractedUiNode {
     type ViewPipelineKeyBuilder = UiNodePipelineKeyBuilder;
     type ViewQueryData = Option<&'static UiAntiAlias>;
     type SpecializedRenderPipeline = UiPipeline;
-    type PipelineKeySystemParam = ();
+    type PipelineKeySystemParam = SRes<UiMeta>;
 
     fn get_sort_key(&self) -> FloatOrd {
         FloatOrd(self.z_order)
@@ -392,7 +393,7 @@ impl UiRenderObject for ExtractedUiNode {
     fn create_pipeline_key(
         &self,
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
-        _: &mut SystemParamItem<Self::PipelineKeySystemParam>,
+        ui_meta: &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key> {
         Some(UiPipelineKey {
             target_format: cached_camera_view.extracted_view.target_format,
@@ -400,6 +401,7 @@ impl UiRenderObject for ExtractedUiNode {
                 cached_camera_view.pipeline_key_builder.anti_alias,
                 None | Some(UiAntiAlias::On)
             ),
+            retained: matches!(ui_meta.instances, UiInstances::Retained { .. }),
         })
     }
 }
@@ -2021,7 +2023,7 @@ struct UiVertex {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 struct UiInstance {
     pub world_from_local: Vec4,
     pub color: [f32; 4],
@@ -2046,16 +2048,116 @@ struct UiInstance {
 pub struct UiMeta {
     vertices: RawBufferVec<UiVertex>,
     indices: RawBufferVec<u32>,
-    instances: RawBufferVec<UiInstance>,
+    instances: UiInstances,
     view_bind_group: Option<BindGroup>,
 }
 
-impl Default for UiMeta {
-    fn default() -> Self {
+#[expect(clippy::large_enum_variant, reason = "it only ever wastes stack space")]
+enum UiInstances {
+    Retained {
+        instances: SparseBufferVec<UiInstance>,
+        instances_free_list: Vec<u32>,
+        entity_to_instance_index: EntityHashMap<SmallVec<[u32; 1]>>,
+        instance_index_buffer: RawBufferVec<u32>,
+        bind_group: Option<BindGroup>,
+    },
+    Immediate {
+        instances: RawBufferVec<UiInstance>,
+    },
+}
+
+impl UiInstances {
+    fn get_entity_mut(&mut self, entity: Entity) -> UiEntityInstances<'_> {
+        match *self {
+            UiInstances::Retained {
+                ref mut instances,
+                ref mut instances_free_list,
+                ref mut entity_to_instance_index,
+                ref mut instance_index_buffer,
+                ..
+            } => UiEntityInstances::Retained {
+                instances,
+                instances_free_list,
+                entity_instance_indices: entity_to_instance_index.entry(entity).or_default(),
+                instance_index_buffer,
+            },
+            UiInstances::Immediate { ref mut instances } => {
+                UiEntityInstances::Immediate { instances }
+            }
+        }
+    }
+}
+
+enum UiEntityInstances<'a> {
+    Retained {
+        instances: &'a mut SparseBufferVec<UiInstance>,
+        instances_free_list: &'a mut Vec<u32>,
+        entity_instance_indices: &'a mut SmallVec<[u32; 1]>,
+        instance_index_buffer: &'a mut RawBufferVec<u32>,
+    },
+    Immediate {
+        instances: &'a mut RawBufferVec<UiInstance>,
+    },
+}
+
+impl<'a> UiEntityInstances<'a> {
+    fn get_or_insert_instance(
+        &mut self,
+        entity_index: usize,
+        create_instance: impl FnOnce() -> UiInstance,
+    ) -> u32 {
+        match *self {
+            UiEntityInstances::Immediate { ref mut instances } => {
+                instances.push(create_instance()) as u32
+            }
+            UiEntityInstances::Retained {
+                ref mut instances,
+                ref mut instances_free_list,
+                ref mut entity_instance_indices,
+                ref mut instance_index_buffer,
+            } => {
+                if let Some(instance_index) = entity_instance_indices.get_mut(entity_index) {
+                    return instance_index_buffer.push(*instance_index) as u32;
+                }
+
+                let instance_index = match instances_free_list.pop() {
+                    Some(instance_index) => {
+                        instances.set(instance_index, create_instance());
+                        instance_index
+                    }
+                    None => instances.push(create_instance()),
+                };
+                debug_assert_eq!(entity_instance_indices.len(), entity_index);
+                entity_instance_indices.push(instance_index);
+                instance_index_buffer.push(instance_index) as u32
+            }
+        }
+    }
+}
+
+impl FromWorld for UiMeta {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
             indices: RawBufferVec::new(BufferUsages::INDEX),
-            instances: RawBufferVec::new(BufferUsages::VERTEX),
+            instances: if render_device.limits().max_storage_buffers_per_shader_stage > 0 {
+                UiInstances::Retained {
+                    instances: SparseBufferVec::new(
+                        BufferUsages::STORAGE,
+                        "UI retained instances".into(),
+                    ),
+                    instances_free_list: vec![],
+                    entity_to_instance_index: default(),
+                    instance_index_buffer: RawBufferVec::new(BufferUsages::VERTEX),
+                    bind_group: None,
+                }
+            } else {
+                UiInstances::Immediate {
+                    instances: RawBufferVec::new(BufferUsages::VERTEX | BufferUsages::COPY_DST),
+                }
+            },
             view_bind_group: None,
         }
     }
@@ -2377,7 +2479,7 @@ pub fn prepare_uinodes(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     pipeline_cache: Res<PipelineCache>,
-    mut ui_meta: ResMut<UiMeta>,
+    ui_meta: ResMut<UiMeta>,
     extracted_uinodes: Res<ExtractedUiNodes>,
     view_uniforms: Res<ViewUniforms>,
     ui_pipeline: Res<UiPipeline>,
@@ -2385,8 +2487,13 @@ pub fn prepare_uinodes(
     gpu_images: Res<RenderAssets<GpuImage>>,
     mut phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
     events: Res<SpriteAssetEvents>,
+    mut sparse_buffer_update_jobs: ResMut<SparseBufferUpdateJobs>,
+    mut sparse_buffer_update_bind_groups: ResMut<SparseBufferUpdateBindGroups>,
+    sparse_buffer_update_pipelines: Res<SparseBufferUpdatePipelines>,
     mut previous_len: Local<usize>,
 ) {
+    let ui_meta = ui_meta.into_inner();
+
     // If an image has changed, the GpuImage has (probably) changed
     for event in &events.images {
         match event {
@@ -2405,7 +2512,13 @@ pub fn prepare_uinodes(
 
         ui_meta.vertices.clear();
         ui_meta.indices.clear();
-        ui_meta.instances.clear();
+        match ui_meta.instances {
+            UiInstances::Immediate { ref mut instances } => instances.clear(),
+            UiInstances::Retained {
+                ref mut instance_index_buffer,
+                ..
+            } => instance_index_buffer.clear(),
+        }
         ui_meta.view_bind_group = Some(render_device.create_bind_group(
             "ui_view_bind_group",
             &pipeline_cache.get_bind_group_layout(&ui_pipeline.view_layout),
@@ -2509,6 +2622,8 @@ pub fn prepare_uinodes(
 
                 let batch = &mut existing_batch.unwrap().1;
 
+                let mut entity_instances = ui_meta.instances.get_entity_mut(item.entity());
+
                 match &extracted_uinode.item {
                     ExtractedUiItem::Node {
                         atlas_scaling,
@@ -2567,27 +2682,27 @@ pub fn prepare_uinodes(
                             _ => {}
                         }
 
-                        let instance = UiInstance {
-                            world_from_local: pack_transform(transform, rect_size),
-                            color,
-                            border: [
-                                border.min_inset.x,
-                                border.min_inset.y,
-                                border.max_inset.x,
-                                border.max_inset.y,
-                            ],
-                            radius: (*border_radius).into(),
-                            uv_scale: uvs[2] - uvs[0],
-                            uv_offset: uvs[0],
-                            translation: transform.translation,
-                            size: rect_size,
-                            flags,
-                            pad: default(),
-                        };
+                        let retained_instance_index =
+                            entity_instances.get_or_insert_instance(0, || UiInstance {
+                                world_from_local: pack_transform(transform, rect_size),
+                                color,
+                                border: [
+                                    border.min_inset.x,
+                                    border.min_inset.y,
+                                    border.max_inset.x,
+                                    border.max_inset.y,
+                                ],
+                                radius: (*border_radius).into(),
+                                uv_scale: uvs[2] - uvs[0],
+                                uv_offset: uvs[0],
+                                translation: transform.translation,
+                                size: rect_size,
+                                flags,
+                                pad: default(),
+                            });
 
                         if extracted_uinode.clip.is_none() {
-                            let instance_index = ui_meta.instances.push(instance);
-                            batch.push_simple_quad(instance_index as u32);
+                            batch.push_simple_quad(retained_instance_index);
                             continue;
                         }
 
@@ -2608,7 +2723,6 @@ pub fn prepare_uinodes(
                             continue;
                         }
 
-                        let instance_index = ui_meta.instances.push(instance) as u32;
                         let base_vertex = vertices_index;
                         let first_index = indices_index;
                         for &(_, position) in &vertices {
@@ -2625,7 +2739,7 @@ pub fn prepare_uinodes(
                         batch.push(
                             base_vertex,
                             first_index..(first_index + index_count),
-                            instance_index,
+                            retained_instance_index,
                         );
 
                         vertices_index += vertices.len() as u32;
@@ -2638,32 +2752,35 @@ pub fn prepare_uinodes(
 
                         let atlas_extent = image.size_2d().as_vec2();
 
-                        for glyph in glyphs {
-                            let color = glyph.color.to_f32_array();
+                        for (glyph_index, glyph) in glyphs.iter().enumerate() {
                             let glyph_rect = glyph.rect;
-                            let rect_size = glyph_rect.size();
 
-                            let instance = UiInstance {
-                                world_from_local: pack_transform(
-                                    extracted_uinode.transform,
-                                    rect_size,
-                                ),
-                                color,
-                                uv_scale: glyph_rect.size() / atlas_extent,
-                                uv_offset: glyph_rect.min / atlas_extent,
-                                translation: extracted_uinode
-                                    .transform
-                                    .transform_point2(glyph.translation),
-                                size: rect_size,
-                                flags: shader_flags::TEXTURED | shader_flags::TEXT,
-                                border: default(),
-                                radius: default(),
-                                pad: default(),
-                            };
+                            let retained_instance_index =
+                                entity_instances.get_or_insert_instance(glyph_index, || {
+                                    let color = glyph.color.to_f32_array();
+                                    let rect_size = glyph_rect.size();
+
+                                    UiInstance {
+                                        world_from_local: pack_transform(
+                                            extracted_uinode.transform,
+                                            rect_size,
+                                        ),
+                                        color,
+                                        uv_scale: glyph_rect.size() / atlas_extent,
+                                        uv_offset: glyph_rect.min / atlas_extent,
+                                        translation: extracted_uinode
+                                            .transform
+                                            .transform_point2(glyph.translation),
+                                        size: rect_size,
+                                        flags: shader_flags::TEXTURED | shader_flags::TEXT,
+                                        border: default(),
+                                        radius: default(),
+                                        pad: default(),
+                                    }
+                                });
 
                             if extracted_uinode.clip.is_none() {
-                                let instance_index = ui_meta.instances.push(instance);
-                                batch.push_simple_quad(instance_index as u32);
+                                batch.push_simple_quad(retained_instance_index);
                                 continue;
                             }
 
@@ -2694,7 +2811,6 @@ pub fn prepare_uinodes(
                                 ui_meta.indices.push(i + 1);
                             }
 
-                            let instance_index = ui_meta.instances.push(instance) as u32;
                             let base_vertex = vertices_index;
                             let first_index = indices_index;
 
@@ -2702,7 +2818,7 @@ pub fn prepare_uinodes(
                             batch.push(
                                 base_vertex,
                                 first_index..(first_index + index_count),
-                                instance_index,
+                                retained_instance_index,
                             );
 
                             vertices_index += vertices.len() as u32;
@@ -2716,9 +2832,38 @@ pub fn prepare_uinodes(
 
         ui_meta.vertices.write_buffer(&render_device, &render_queue);
         ui_meta.indices.write_buffer(&render_device, &render_queue);
-        ui_meta
-            .instances
-            .write_buffer(&render_device, &render_queue);
+
+        match ui_meta.instances {
+            UiInstances::Immediate { ref mut instances } => {
+                instances.write_buffer(&render_device, &render_queue);
+            }
+            UiInstances::Retained {
+                ref mut instances,
+                ref mut instance_index_buffer,
+                ref mut bind_group,
+                ..
+            } => {
+                instances.write_buffers(&render_device, &render_queue);
+                instances.prepare_to_populate_buffers(
+                    &render_device,
+                    &pipeline_cache,
+                    &mut sparse_buffer_update_jobs,
+                    &mut sparse_buffer_update_bind_groups,
+                    &sparse_buffer_update_pipelines,
+                );
+                instance_index_buffer.write_buffer(&render_device, &render_queue);
+                *bind_group = instances.buffer().map(|instances_buffer| {
+                    let bind_group_layout =
+                        pipeline_cache.get_bind_group_layout(&ui_pipeline.instances_layout);
+                    render_device.create_bind_group(
+                        "UI instances bind group",
+                        &bind_group_layout,
+                        &BindGroupEntries::single(instances_buffer.as_entire_binding()),
+                    )
+                });
+            }
+        }
+
         *previous_len = batches.len();
         commands.try_insert_batch(batches);
     }

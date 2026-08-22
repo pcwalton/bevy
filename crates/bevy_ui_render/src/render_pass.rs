@@ -2,7 +2,7 @@ use core::ops::Range;
 
 use super::{ImageNodeBindGroups, UiBatch, UiMeta, UiViewTarget};
 
-use crate::UiCameraView;
+use crate::{UiCameraView, UiInstances};
 use bevy_ecs::{
     entity::EntityHash,
     prelude::*,
@@ -229,13 +229,37 @@ impl<P: PhaseItem> RenderCommand<P> for DrawUiNode {
         let Some(indices) = ui_meta.indices.buffer() else {
             return RenderCommandResult::Failure("missing indices to draw ui");
         };
-        let Some(instances) = ui_meta.instances.buffer() else {
-            return RenderCommandResult::Failure("missing instances to draw ui");
-        };
 
         // Store the vertices
         pass.set_vertex_buffer(0, vertices.slice(..));
-        pass.set_vertex_buffer(1, instances.slice(..));
+
+        match ui_meta.instances {
+            UiInstances::Retained {
+                ref instance_index_buffer,
+                ref bind_group,
+                ..
+            } => {
+                let Some(instance_index_buffer) = instance_index_buffer.buffer() else {
+                    return RenderCommandResult::Failure(
+                        "missing instance index buffer to draw ui",
+                    );
+                };
+                let Some(bind_group) = bind_group.as_ref() else {
+                    return RenderCommandResult::Failure(
+                        "missing retained instance bind group to draw ui",
+                    );
+                };
+                pass.set_vertex_buffer(1, instance_index_buffer.slice(..));
+                pass.set_bind_group(2, bind_group, &[]);
+            }
+            UiInstances::Immediate { ref instances } => {
+                let Some(instances) = instances.buffer() else {
+                    return RenderCommandResult::Failure("missing instances to draw ui");
+                };
+                pass.set_vertex_buffer(1, instances.slice(..));
+            }
+        }
+
         // Define how to "connect" the vertices
         pass.set_index_buffer(
             indices.slice(..),
@@ -246,7 +270,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawUiNode {
                 params.first_index..(params.first_index + params.index_count),
                 params.base_vertex as i32,
                 params.first_instance..(params.first_instance + params.instance_count),
-            )
+            );
         }
         RenderCommandResult::Success
     }
