@@ -1,4 +1,8 @@
 import bevy_render::view::View;
+import bevy_render::bindless::{bindless_samplers_filtering, bindless_textures_2d};
+
+@if(BINDLESS)
+    enable wgpu_binding_array;
 
 const TEXTURED = 1u;
 const RIGHT_VERTEX = 2u;
@@ -26,16 +30,25 @@ struct UiInstance {
     uv_offset: vec2<f32>,
     translation: vec2<f32>,
     size: vec2<f32>,
+    image_bind_group_slot: u32,
     flags: u32,
     pad_a: u32,
     pad_b: u32,
-    pad_c: u32,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
 
-@group(1) @binding(0) var sprite_texture: texture_2d<f32>;
-@group(1) @binding(1) var sprite_sampler: sampler;
+@if(BINDLESS) {
+    struct UiBindlessSpriteIndices {
+        sprite_texture: u32,
+        sprite_sampler: u32,
+    }
+
+    @group(1) @binding(0) var<storage> sprite_bindless_indices: array<UiBindlessSpriteIndices>;
+} @else {
+    @group(1) @binding(0) var sprite_texture: texture_2d<f32>;
+    @group(1) @binding(1) var sprite_sampler: sampler;
+}
 
 @if(RETAINED_INSTANCES)
 @group(2) @binding(0) var<storage, read> instances: array<UiInstance>;
@@ -52,6 +65,10 @@ struct VertexOutput {
 
     // Position relative to the center of the rectangle.
     @location(7) point: vec2<f32>,
+
+    @if(BINDLESS)
+    @location(8) @interpolate(flat) image_bind_group_slot: u32,
+
     @builtin(position) position: vec4<f32>,
 };
 
@@ -68,6 +85,8 @@ fn compute_vertex(vertex_position: vec2<f32>, instance: UiInstance) -> VertexOut
     out.size = instance.size;
     out.border = instance.border;
     out.point = select(vertex_position * instance.size, vec2(0.0), enabled(instance.flags, TEXT));
+    @if(BINDLESS)
+    out.image_bind_group_slot = instance.image_bind_group_slot;
     return out;
 }
 
@@ -109,6 +128,8 @@ fn vertex(
     instance.translation = translation;
     instance.size = size;
     instance.flags = flags;
+    // There's no platform that supports bindless but not storage buffers, so we
+    // don't have to handle bindless here.
     return compute_vertex(vertex_position, instance);
 }
 
@@ -299,7 +320,16 @@ fn draw_uinode_background(
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let texture_color = textureSample(sprite_texture, sprite_sampler, in.uv);
+    @if(BINDLESS) {
+        let slot = in.image_bind_group_slot;
+        let texture_color = textureSample(
+            bindless_textures_2d[sprite_bindless_indices[slot].sprite_texture],
+            bindless_samplers_filtering[sprite_bindless_indices[slot].sprite_sampler],
+            in.uv
+        );
+    } @else {
+        let texture_color = textureSample(sprite_texture, sprite_sampler, in.uv);
+    }
 
     // Only use the color sampled from the texture if the `TEXTURED` flag is enabled. 
     // This allows us to draw both textured and untextured shapes together in the same batch.

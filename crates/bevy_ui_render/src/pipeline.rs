@@ -1,3 +1,4 @@
+use alloc::borrow::Cow;
 use bevy_asset::{load_embedded_asset, AssetServer, Handle};
 use bevy_ecs::prelude::*;
 use bevy_mesh::VertexBufferLayout;
@@ -8,18 +9,48 @@ use bevy_render::{
     },
     view::ViewUniform,
 };
-use bevy_shader::Shader;
+use bevy_shader::{Shader, ShaderDefVal};
 use bevy_utils::default;
+use bitflags::bitflags;
+
+use crate::UiMeta;
 
 #[derive(Resource)]
 pub struct UiPipeline {
     pub view_layout: BindGroupLayoutDescriptor,
-    pub image_layout: BindGroupLayoutDescriptor,
+    pub image_bindless_layout: BindGroupLayoutDescriptor,
+    pub image_non_bindless_layout: BindGroupLayoutDescriptor,
     pub instances_layout: BindGroupLayoutDescriptor,
     pub shader: Handle<Shader>,
 }
 
-pub fn init_ui_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
+impl UiPipeline {
+    pub fn image_bind_group_layout(&self, bindless: bool) -> &BindGroupLayoutDescriptor {
+        if bindless {
+            &self.image_bindless_layout
+        } else {
+            &self.image_non_bindless_layout
+        }
+    }
+}
+
+pub(crate) static IMAGE_BINDLESS_DESCRIPTOR: BindlessDescriptor = BindlessDescriptor {
+    resources: Cow::Borrowed(&[
+        BindlessResourceType::Texture2d,
+        BindlessResourceType::SamplerFiltering,
+    ]),
+    buffers: Cow::Borrowed(&[]),
+    index_tables: Cow::Borrowed(&[BindlessIndexTableDescriptor {
+        indices: BindlessIndex(0)..BindlessIndex(2),
+        binding_number: BindingNumber(0),
+    }]),
+};
+
+pub fn init_ui_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    ui_meta: Res<UiMeta>,
+) {
     let view_layout = BindGroupLayoutDescriptor::new(
         "ui_view_layout",
         &BindGroupLayoutEntries::single(
@@ -28,8 +59,8 @@ pub fn init_ui_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) 
         ),
     );
 
-    let image_layout = BindGroupLayoutDescriptor::new(
-        "ui_image_layout",
+    let image_non_bindless_layout = BindGroupLayoutDescriptor::new(
+        "ui_image_non_bindless_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::FRAGMENT,
             (
@@ -49,7 +80,8 @@ pub fn init_ui_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) 
 
     commands.insert_resource(UiPipeline {
         view_layout,
-        image_layout,
+        image_bindless_layout: ui_meta.image_bindless_bind_group_layout_descriptor.clone(),
+        image_non_bindless_layout,
         instances_layout,
         shader: load_embedded_asset!(asset_server.as_ref(), "ui.wesl"),
     });
@@ -58,8 +90,16 @@ pub fn init_ui_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct UiPipelineKey {
     pub target_format: TextureFormat,
-    pub anti_alias: bool,
-    pub retained: bool,
+    pub flags: UiPipelineKeyFlags,
+}
+
+bitflags! {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct UiPipelineKeyFlags: u8 {
+        const ANTI_ALIAS = 1 << 0;
+        const RETAINED = 1 << 1;
+        const BINDLESS = 1 << 2;
+    }
 }
 
 impl SpecializedRenderPipeline for UiPipeline {
@@ -73,7 +113,7 @@ impl SpecializedRenderPipeline for UiPipeline {
                 VertexFormat::Float32x2,
             ],
         );
-        let instance_vertex_format = if key.retained {
+        let instance_vertex_format = if key.flags.contains(UiPipelineKeyFlags::RETAINED) {
             vec![
                 // instance index
                 VertexFormat::Uint32,
@@ -111,15 +151,26 @@ impl SpecializedRenderPipeline for UiPipeline {
         .offset_locations_by(1);
 
         let mut shader_defs = vec![];
-        if key.anti_alias {
+        if key.flags.contains(UiPipelineKeyFlags::ANTI_ALIAS) {
             shader_defs.push("ANTI_ALIAS".into());
         }
-        if key.retained {
+        if key.flags.contains(UiPipelineKeyFlags::RETAINED) {
             shader_defs.push("RETAINED_INSTANCES".into());
         }
+        if key.flags.contains(UiPipelineKeyFlags::BINDLESS) {
+            shader_defs.push("BINDLESS".into());
+            shader_defs.push(ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 1));
+        }
 
-        let mut layout = vec![self.view_layout.clone(), self.image_layout.clone()];
-        if key.retained {
+        let mut layout = vec![
+            self.view_layout.clone(),
+            if key.flags.contains(UiPipelineKeyFlags::BINDLESS) {
+                self.image_bindless_layout.clone()
+            } else {
+                self.image_non_bindless_layout.clone()
+            },
+        ];
+        if key.flags.contains(UiPipelineKeyFlags::RETAINED) {
             layout.push(self.instances_layout.clone());
         }
 

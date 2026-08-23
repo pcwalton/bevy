@@ -7,6 +7,8 @@
 
 //! Provides rendering functionality for `bevy_ui`.
 
+extern crate alloc;
+
 pub mod box_shadow;
 pub mod clipping;
 mod gradient;
@@ -14,9 +16,16 @@ mod image;
 use bevy_ecs::query::QueryData;
 use bevy_ecs::system::lifetimeless::SRes;
 use bevy_render::batching::gpu_preprocessing::IndirectParametersIndexed;
+use bevy_render::init_gpu_resource;
+use bevy_render::material_bind_groups::{
+    FallbackBindlessResources, FallbackBuffer, MaterialBindGroupAllocator, MaterialBindGroupIndex,
+    MaterialBindingId,
+};
 use bevy_render::render_phase::DrawFunctionId;
 use bevy_render::render_resource::SpecializedRenderPipeline;
 use bevy_render::renderer::RenderAdapter;
+use bevy_render::storage::{GpuShaderBuffer, RenderChangedShaderBuffers};
+use bevy_render::texture::FallbackImage;
 use bevy_utils::default;
 pub use image::ImageNodeAssetChangedSystems;
 mod pipeline;
@@ -38,7 +47,6 @@ use bevy_reflect::Reflect;
 use bevy_render::camera::{extract_cameras, CameraMainPassTextureFormats};
 use bevy_render::sync_world::{MainEntityHashMap, MainEntityHashSet};
 use bevy_shader::load_shader_library;
-use bevy_sprite_render::SpriteAssetEvents;
 use bevy_ui::widget::{ImageNode, ImageNodeSize, NodeImageMode, Text, TextShadow, ViewportNode};
 use bevy_ui::{
     BackgroundColor, BackgroundGradient, BorderColor, BorderGradient, BoxShadow, CalculatedClip,
@@ -47,7 +55,7 @@ use bevy_ui::{
 };
 
 use bevy_app::prelude::*;
-use bevy_asset::{AssetEvent, AssetEventSystems, AssetId, Assets};
+use bevy_asset::{AssetEventSystems, AssetId, Assets};
 use bevy_color::{Alpha, ColorToComponents, LinearRgba};
 use bevy_core_pipeline::schedule::{Core2d, Core2dSystems, Core3d, Core3dSystems};
 use bevy_core_pipeline::upscaling::upscaling;
@@ -75,7 +83,7 @@ pub use debug_overlay::{GlobalUiDebugOptions, UiDebugOptions};
 
 use gradient::GradientPlugin;
 
-use bevy_platform::collections::{HashMap, HashSet};
+use bevy_platform::collections::HashSet;
 use bevy_text::{
     ComputedTextBlock, EditableText, PositionedGlyph, Strikethrough, StrikethroughColor,
     TextBackgroundColor, TextColor, TextCursorStyle, TextLayoutInfo, TextSpan, Underline,
@@ -241,7 +249,6 @@ impl Plugin for UiRenderPlugin {
 
         render_app
             .init_gpu_resource::<SpecializedRenderPipelines<UiPipeline>>()
-            .init_gpu_resource::<ImageNodeBindGroups>()
             .init_gpu_resource::<UiMeta>()
             .init_resource::<ExtractedUiNodes>()
             .allow_ambiguous_resource::<ExtractedUiNodes>()
@@ -270,7 +277,10 @@ impl Plugin for UiRenderPlugin {
                 )
                     .chain_weak(),
             )
-            .add_systems(RenderStartup, init_ui_pipeline)
+            .add_systems(
+                RenderStartup,
+                init_ui_pipeline.after(init_gpu_resource::<UiMeta>),
+            )
             .add_systems(
                 ExtractSchedule,
                 (
@@ -396,13 +406,23 @@ impl UiRenderObject for ExtractedUiNode {
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
         ui_meta: &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key> {
+        let mut flags = UiPipelineKeyFlags::empty();
+        if matches!(
+            cached_camera_view.pipeline_key_builder.anti_alias,
+            None | Some(UiAntiAlias::On)
+        ) {
+            flags.insert(UiPipelineKeyFlags::ANTI_ALIAS);
+        }
+        if matches!(ui_meta.instances, UiInstances::Retained { .. }) {
+            flags.insert(UiPipelineKeyFlags::RETAINED);
+        }
+        if ui_meta.is_bindless() {
+            flags.insert(UiPipelineKeyFlags::BINDLESS);
+        }
+
         Some(UiPipelineKey {
             target_format: cached_camera_view.extracted_view.target_format,
-            anti_alias: matches!(
-                cached_camera_view.pipeline_key_builder.anti_alias,
-                None | Some(UiAntiAlias::On)
-            ),
-            retained: matches!(ui_meta.instances, UiInstances::Retained { .. }),
+            flags,
         })
     }
 }
@@ -479,6 +499,7 @@ type UiNodeQueryFilter = (
 pub fn extract_uinode_changes(
     mut commands: Commands,
     mut extracted_uinodes: ResMut<ExtractedUiNodes>,
+    mut ui_meta: ResMut<UiMeta>,
     all_uinodes_query: Extract<Query<Entity, UiNodeQueryFilter>>,
     changed_uinodes_query: Extract<
         Query<
@@ -627,6 +648,7 @@ pub fn extract_uinode_changes(
                 &text_span_parent_query,
                 &text_query,
                 &mut extracted_uinodes,
+                &mut ui_meta,
                 Some(&mut extra_nodes_to_invalidate),
             );
         }
@@ -669,6 +691,7 @@ pub fn extract_uinode_changes(
                 &text_span_parent_query,
                 &text_query,
                 &mut extracted_uinodes,
+                &mut ui_meta,
                 Some(&mut extra_nodes_to_invalidate),
             );
         }
@@ -686,6 +709,7 @@ pub fn extract_uinode_changes(
                 &text_span_parent_query,
                 &text_query,
                 &mut extracted_uinodes,
+                &mut ui_meta,
                 Some(&mut extra_nodes_to_invalidate),
             );
         }
@@ -698,6 +722,7 @@ pub fn extract_uinode_changes(
             &text_span_parent_query,
             &text_query,
             &mut extracted_uinodes,
+            &mut ui_meta,
             None,
         );
     }
@@ -708,6 +733,7 @@ pub fn extract_uinode_changes(
         text_span_parent_query: &Query<&ChildOf, With<TextSpan>>,
         text_query: &Query<Entity, With<Text>>,
         extracted_uinodes: &mut ExtractedUiNodes,
+        ui_meta: &mut UiMeta,
         maybe_extra_nodes_to_invalidate: Option<&mut MainEntityHashSet>,
     ) {
         // Mark the node as changed so that the other `extract_` systems will
@@ -719,6 +745,7 @@ pub fn extract_uinode_changes(
         {
             for (render_entity, _) in render_entities.drain(..) {
                 commands.entity(render_entity).despawn();
+                ui_meta.free_material_binding(render_entity);
                 changed_ui_nodes.push(ChangedUiObject {
                     render_entity,
                     camera_entity: prev_camera_entity,
@@ -2039,10 +2066,11 @@ struct UiInstance {
     pub translation: Vec2,
     /// Size of the UI node.
     pub size: Vec2,
+    pub image_bind_group_slot: u32,
     /// Shader flags to determine how to render the UI node.
     /// See [`shader_flags`] for possible values.
     pub flags: u32,
-    pub pad: [u32; 3],
+    pub pad: [u32; 2],
 }
 
 #[derive(Resource)]
@@ -2052,6 +2080,10 @@ pub struct UiMeta {
     instances: UiInstances,
     view_bind_group: Option<BindGroup>,
     draw_args: UiMetaDrawArgs,
+    image_bind_group_allocator: MaterialBindGroupAllocator,
+    image_bind_group_builder: BindGroupBuilder,
+    image_bindless_bind_group_layout_descriptor: BindGroupLayoutDescriptor,
+    entity_to_material_binding_id: EntityHashMap<MaterialBindingId>,
 }
 
 #[expect(clippy::large_enum_variant, reason = "it only ever wastes stack space")]
@@ -2092,6 +2124,52 @@ impl UiInstances {
                 UiEntityInstances::Immediate { instances }
             }
         }
+    }
+}
+
+impl UiMeta {
+    fn get_or_insert_material_binding(
+        &mut self,
+        entity: Entity,
+        image: &GpuImage,
+        image_bind_group_layout: &BindGroupLayoutDescriptor,
+    ) -> MaterialBindingId {
+        *self
+            .entity_to_material_binding_id
+            .entry(entity)
+            .or_insert_with(|| {
+                self.image_bind_group_builder.binding_resources.push((
+                    0,
+                    UnpreparedBindingResource::TextureView(
+                        TextureViewDimension::D2,
+                        image.texture_view.clone(),
+                    ),
+                ));
+                self.image_bind_group_builder.binding_resources.push((
+                    1,
+                    UnpreparedBindingResource::Sampler(
+                        SamplerBindingType::Filtering,
+                        image.sampler.clone(),
+                    ),
+                ));
+
+                let binding_id = self.image_bind_group_allocator.allocate_unprepared(
+                    &mut self.image_bind_group_builder,
+                    image_bind_group_layout,
+                );
+                self.image_bind_group_builder.clear();
+                binding_id
+            })
+    }
+
+    fn free_material_binding(&mut self, entity: Entity) {
+        if let Some(binding_id) = self.entity_to_material_binding_id.remove(&entity) {
+            self.image_bind_group_allocator.free(binding_id);
+        }
+    }
+
+    fn is_bindless(&self) -> bool {
+        self.image_bind_group_allocator.is_bindless()
     }
 }
 
@@ -2179,6 +2257,16 @@ impl FromWorld for UiMeta {
         let render_device = world.resource::<RenderDevice>();
         let render_adapter = world.resource::<RenderAdapter>();
 
+        let image_bindless_bind_group_layout_descriptor = BindGroupLayoutDescriptor::new(
+            "ui_image_bindless_layout",
+            &create_bindless_bind_group_layout_entries(
+                2,
+                AUTO_BINDLESS_SLAB_RESOURCE_LIMIT,
+                (*IMAGE_BINDLESS_DESCRIPTOR.index_tables)[0].binding_number,
+                &IMAGE_BINDLESS_DESCRIPTOR.resources[..],
+            ),
+        );
+
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
             indices: RawBufferVec::new(BufferUsages::INDEX),
@@ -2208,6 +2296,23 @@ impl FromWorld for UiMeta {
                 UiMetaDrawArgs::Direct(vec![])
             },
             view_bind_group: None,
+            image_bind_group_allocator: MaterialBindGroupAllocator::new(
+                render_device,
+                "UI",
+                if render_device
+                    .features()
+                    .contains(WgpuFeatures::TEXTURE_BINDING_ARRAY)
+                {
+                    Some(IMAGE_BINDLESS_DESCRIPTOR.clone())
+                } else {
+                    None
+                },
+                image_bindless_bind_group_layout_descriptor.clone(),
+                Some(BindlessSlabResourceLimit::Auto),
+            ),
+            image_bindless_bind_group_layout_descriptor,
+            image_bind_group_builder: BindGroupBuilder::default(),
+            entity_to_material_binding_id: EntityHashMap::default(),
         }
     }
 }
@@ -2221,10 +2326,10 @@ pub(crate) const QUAD_VERTEX_POSITIONS: [Vec2; 4] = [
 
 pub(crate) const QUAD_VERTEX_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
 
-#[derive(Component, Debug)]
+#[derive(Component, Default, Debug)]
 pub struct UiBatch {
     pub params_range: Option<Range<u32>>,
-    pub image: AssetId<Image>,
+    pub image_bind_group_index: MaterialBindGroupIndex,
 }
 
 impl UiBatch {
@@ -2541,11 +2646,6 @@ pub struct UiNodePipelineKeyBuilder {
     anti_alias: Option<UiAntiAlias>,
 }
 
-#[derive(Resource, Default)]
-pub struct ImageNodeBindGroups {
-    pub values: HashMap<AssetId<Image>, BindGroup>,
-}
-
 pub fn prepare_uinodes(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
@@ -2555,29 +2655,27 @@ pub fn prepare_uinodes(
     extracted_uinodes: Res<ExtractedUiNodes>,
     view_uniforms: Res<ViewUniforms>,
     ui_pipeline: Res<UiPipeline>,
-    mut image_bind_groups: ResMut<ImageNodeBindGroups>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     mut phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
-    events: Res<SpriteAssetEvents>,
-    mut sparse_buffer_update_jobs: ResMut<SparseBufferUpdateJobs>,
-    mut sparse_buffer_update_bind_groups: ResMut<SparseBufferUpdateBindGroups>,
-    sparse_buffer_update_pipelines: Res<SparseBufferUpdatePipelines>,
+    (
+        mut sparse_buffer_update_jobs,
+        mut sparse_buffer_update_bind_groups,
+        sparse_buffer_update_pipelines,
+    ): (
+        ResMut<SparseBufferUpdateJobs>,
+        ResMut<SparseBufferUpdateBindGroups>,
+        Res<SparseBufferUpdatePipelines>,
+    ),
+    (fallback_image, fallback_bindless_resources, fallback_buffer): (
+        Res<FallbackImage>,
+        Res<FallbackBindlessResources>,
+        Res<FallbackBuffer>,
+    ),
+    shader_buffer_assets: Res<RenderAssets<GpuShaderBuffer>>,
+    changed_shader_buffers: Res<RenderChangedShaderBuffers>,
     mut previous_len: Local<usize>,
 ) {
     let ui_meta = ui_meta.into_inner();
-
-    // If an image has changed, the GpuImage has (probably) changed
-    for event in &events.images {
-        match event {
-            AssetEvent::Added { .. } |
-            AssetEvent::Unused { .. } |
-            // Images don't have dependencies
-            AssetEvent::LoadedWithDependencies { .. } => {}
-            AssetEvent::Modified { id } | AssetEvent::Removed { id } => {
-                image_bind_groups.values.remove(id);
-            }
-        };
-    }
 
     if let Some(view_binding) = view_uniforms.uniforms.binding() {
         let mut batches: Vec<(Entity, UiBatch)> = Vec::with_capacity(*previous_len);
@@ -2610,9 +2708,6 @@ pub fn prepare_uinodes(
         let mut indices_index = QUAD_VERTEX_INDICES.len() as u32;
 
         for ui_phase in phases.values_mut() {
-            let mut batch_item_index = 0;
-            let mut batch_image_handle = None;
-
             for item_index in 0..ui_phase.items.len() {
                 let item = &mut ui_phase.items[item_index];
                 let Some(extracted_uinode) = extracted_uinodes
@@ -2620,80 +2715,39 @@ pub fn prepare_uinodes(
                     .get(&item.main_entity())
                     .and_then(|(_, sub_uinodes)| sub_uinodes.get(&item.entity()))
                 else {
-                    batch_image_handle = None;
                     continue;
+                };
+
+                let mut maybe_image_binding_id = None;
+                if extracted_uinode.image != AssetId::default() {
+                    let Some(gpu_image) = gpu_images.get(extracted_uinode.image) else {
+                        continue;
+                    };
+                    maybe_image_binding_id = Some(ui_meta.get_or_insert_material_binding(
+                        item.entity(),
+                        gpu_image,
+                        ui_pipeline.image_bind_group_layout(ui_meta.is_bindless()),
+                    ));
                 };
 
                 // Initialize the batch range to be zero-length initially.
                 // We'll extend it as we accumulate items into this batch.
                 item.batch_range = (item_index as u32)..(item_index as u32);
 
-                let mut existing_batch = batches.last_mut();
-
-                if batch_image_handle.is_none()
-                    || existing_batch.is_none()
-                    || (batch_image_handle != Some(AssetId::default())
-                        && extracted_uinode.image != AssetId::default()
-                        && batch_image_handle != Some(extracted_uinode.image))
-                {
-                    if let Some(gpu_image) = gpu_images.get(extracted_uinode.image) {
-                        batch_item_index = item_index;
-                        batch_image_handle = Some(extracted_uinode.image);
-
-                        let new_batch = UiBatch {
-                            params_range: None,
-                            image: extracted_uinode.image,
-                        };
-                        batches.push((item.entity(), new_batch));
-
-                        image_bind_groups
-                            .values
-                            .entry(extracted_uinode.image)
-                            .or_insert_with(|| {
-                                render_device.create_bind_group(
-                                    "ui_material_bind_group",
-                                    &pipeline_cache
-                                        .get_bind_group_layout(&ui_pipeline.image_layout),
-                                    &BindGroupEntries::sequential((
-                                        &gpu_image.texture_view,
-                                        &gpu_image.sampler,
-                                    )),
-                                )
-                            });
-
-                        existing_batch = batches.last_mut();
-                    } else {
-                        continue;
-                    }
-                } else if batch_image_handle == Some(AssetId::default())
-                    && extracted_uinode.image != AssetId::default()
-                {
-                    if let Some(ref mut existing_batch) = existing_batch
-                        && let Some(gpu_image) = gpu_images.get(extracted_uinode.image)
-                    {
-                        batch_image_handle = Some(extracted_uinode.image);
-                        existing_batch.1.image = extracted_uinode.image;
-
-                        image_bind_groups
-                            .values
-                            .entry(extracted_uinode.image)
-                            .or_insert_with(|| {
-                                render_device.create_bind_group(
-                                    "ui_material_bind_group",
-                                    &pipeline_cache
-                                        .get_bind_group_layout(&ui_pipeline.image_layout),
-                                    &BindGroupEntries::sequential((
-                                        &gpu_image.texture_view,
-                                        &gpu_image.sampler,
-                                    )),
-                                )
-                            });
-                    } else {
-                        continue;
-                    }
+                // Start a new batch if necessary.
+                if batches.last().is_none_or(|(_, last_batch)| {
+                    maybe_image_binding_id.as_ref().is_some_and(|binding_id| {
+                        binding_id.group != last_batch.image_bind_group_index
+                    })
+                }) {
+                    batches.push((item.entity(), UiBatch::default()));
                 }
 
-                let batch = &mut existing_batch.unwrap().1;
+                if let Some(image_binding_id) = maybe_image_binding_id {
+                    batches.last_mut().unwrap().1.image_bind_group_index = image_binding_id.group;
+                }
+
+                let (_, batch) = batches.last_mut().unwrap();
 
                 let mut entity_instances = ui_meta.instances.get_entity_mut(item.entity());
 
@@ -2770,6 +2824,10 @@ pub fn prepare_uinodes(
                                 uv_offset: uvs[0],
                                 translation: transform.translation,
                                 size: rect_size,
+                                image_bind_group_slot: match maybe_image_binding_id {
+                                    Some(image_binding_id) => *image_binding_id.slot,
+                                    None => 0,
+                                },
                                 flags,
                                 pad: default(),
                             });
@@ -2849,6 +2907,10 @@ pub fn prepare_uinodes(
                                             .transform
                                             .transform_point2(glyph.translation),
                                         size: rect_size,
+                                        image_bind_group_slot: match maybe_image_binding_id {
+                                            None => 0,
+                                            Some(binding_id) => *binding_id.slot,
+                                        },
                                         flags: shader_flags::TEXTURED | shader_flags::TEXT,
                                         border: default(),
                                         radius: default(),
@@ -2907,7 +2969,9 @@ pub fn prepare_uinodes(
                         }
                     }
                 }
-                ui_phase.items[batch_item_index].batch_range_mut().end += 1;
+
+                // We always have at most one item per node in the batch.
+                ui_phase.items[0].batch_range_mut().end += 1;
             }
         }
 
@@ -2951,6 +3015,19 @@ pub fn prepare_uinodes(
             }
             UiMetaDrawArgs::Direct(_) => {}
         }
+
+        ui_meta.image_bind_group_allocator.prepare_bind_groups(
+            &render_device,
+            &pipeline_cache,
+            &fallback_bindless_resources,
+            &fallback_image,
+            &fallback_buffer,
+            &shader_buffer_assets,
+            &changed_shader_buffers,
+        );
+        ui_meta
+            .image_bind_group_allocator
+            .write_buffers(&render_device, &render_queue);
 
         *previous_len = batches.len();
         commands.try_insert_batch(batches);
