@@ -57,7 +57,7 @@ impl<A: Asset> Default for AssetChanges<A> {
 struct AssetChangeCheck<'w, A: AsAssetId> {
     // This should never be `None` in practice, but we need to handle the case
     // where the `AssetChanges` resource was removed.
-    change_ticks: Option<&'w HashMap<AssetId<A::Asset>, Tick>>,
+    changes: Option<&'w AssetChanges<A::Asset>>,
     last_run: Tick,
     this_run: Tick,
 }
@@ -73,7 +73,7 @@ impl<A: AsAssetId> Copy for AssetChangeCheck<'_, A> {}
 impl<'w, A: AsAssetId> AssetChangeCheck<'w, A> {
     fn new(changes: &'w AssetChanges<A::Asset>, last_run: Tick, this_run: Tick) -> Self {
         Self {
-            change_ticks: Some(&changes.change_ticks),
+            changes: Some(changes),
             last_run,
             this_run,
         }
@@ -84,8 +84,8 @@ impl<'w, A: AsAssetId> AssetChangeCheck<'w, A> {
         let is_newer = |tick: &Tick| tick.is_newer_than(self.last_run, self.this_run);
         let id = handle.as_asset_id();
 
-        self.change_ticks
-            .is_some_and(|change_ticks| change_ticks.get(&id).is_some_and(is_newer))
+        self.changes
+            .is_some_and(|change_ticks| change_ticks.change_ticks.get(&id).is_some_and(is_newer))
     }
 }
 
@@ -186,7 +186,7 @@ unsafe impl<A: AsAssetId> WorldQuery for AssetChanged<A> {
             return AssetChangedFetch {
                 inner: None,
                 check: AssetChangeCheck {
-                    change_ticks: None,
+                    changes: None,
                     last_run,
                     this_run,
                 },
@@ -293,6 +293,8 @@ unsafe impl<A: AsAssetId> WorldQuery for AssetChanged<A> {
 unsafe impl<A: AsAssetId> QueryFilter for AssetChanged<A> {
     const IS_ARCHETYPAL: bool = false;
 
+    const CAN_SKIP_TABLES: bool = true;
+
     #[inline]
     unsafe fn filter_fetch(
         state: &Self::State,
@@ -307,6 +309,19 @@ unsafe impl<A: AsAssetId> QueryFilter for AssetChanged<A> {
                 handle.is_some_and(|handle| fetch.check.has_changed(handle))
             }
         })
+    }
+
+    unsafe fn can_skip_table(
+        _state: &Self::State,
+        fetch: &Self::Fetch<'_>,
+        _table: &Table,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> bool {
+        fetch
+            .check
+            .changes
+            .is_some_and(|changes| !changes.last_change_tick.is_newer_than(last_run, this_run))
     }
 }
 
