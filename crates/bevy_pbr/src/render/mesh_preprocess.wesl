@@ -29,6 +29,7 @@ import package::render::view_transformations::{
     position_world_to_prev_ndc, position_world_to_prev_view, prev_view_z_to_depth_ndc
 };
 import bevy_render::maths;
+import bevy_render::utils::get_extended_instance_index;
 import bevy_render::view::View;
 
 // Information about each mesh instance needed to cull it on GPU.
@@ -161,10 +162,15 @@ fn view_frustum_intersects_obb(
 
 @compute
 @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
+fn main(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>,
+    @builtin(local_invocation_id) local_invocation_id: vec3<u32>,
+) {
     // Figure out our instance index. If this thread doesn't correspond to any
     // index, bail.
-    let instance_index = global_invocation_id.x;
+    let instance_index =
+        get_extended_instance_index(workgroup_id, num_workgroups, local_invocation_id, 64u);
 
 @if(LATE_PHASE)
     if (instance_index >= late_preprocess_work_item_indirect_parameters[

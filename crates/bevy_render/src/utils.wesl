@@ -47,3 +47,13 @@ fn octahedral_decode(v: vec2<f32>) -> vec3<f32> {
     let f = v * 2.0 - 1.0;
     return octahedral_decode_signed(f);
 }
+
+fn get_extended_instance_index(
+    workgroup_id: vec3<u32>,
+    num_workgroups: vec3<u32>,
+    local_invocation_id: vec3<u32>,
+    workgroup_size: u32,
+) -> u32 {
+    let workgroup_index = workgroup_id.y * num_workgroups.x + workgroup_id.x;
+    return workgroup_index * workgroup_size + local_invocation_id.x;
+}

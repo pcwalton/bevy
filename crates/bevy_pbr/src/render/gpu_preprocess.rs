@@ -60,7 +60,7 @@ use bevy_render::{
         SpecializedComputePipeline, SpecializedComputePipelines, TextureSampleType,
         UninitBufferVec,
     },
-    renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
+    renderer::{dispatch_workgroups_extended, RenderContext, RenderDevice, RenderQueue, ViewQuery},
     settings::WgpuFeatures,
     view::{
         ExtractedView, NoIndirectDrawing, RenderVisibilityRanges, RetainedViewEntity, ViewUniform,
@@ -724,6 +724,11 @@ pub fn unpack_bins(
     let diagnostics = render_context.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
 
+    let max_compute_workgroups_per_dimension = render_context
+        .render_device()
+        .limits()
+        .max_compute_workgroups_per_dimension;
+
     let command_encoder = render_context.command_encoder();
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("bin unpacking"),
@@ -776,9 +781,11 @@ pub fn unpack_bins(
                     compute_pass.set_bind_group(0, &bin_unpacking_bind_group.bind_group, &[]);
                     let workgroup_count = (bin_unpacking_bind_group.mesh_instance_count as usize)
                         .div_ceil(WORKGROUP_SIZE);
-                    if workgroup_count > 0 {
-                        compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-                    }
+                    dispatch_workgroups_extended(
+                        &mut compute_pass,
+                        workgroup_count as u32,
+                        max_compute_workgroups_per_dimension,
+                    );
                 }
             }
         }
@@ -807,6 +814,11 @@ pub fn early_gpu_preprocess(
 ) {
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
+
+    let max_compute_workgroups_per_dimension = ctx
+        .render_device()
+        .limits()
+        .max_compute_workgroups_per_dimension;
 
     let command_encoder = ctx.command_encoder();
 
@@ -898,9 +910,11 @@ pub fn early_gpu_preprocess(
                     };
                     compute_pass.set_bind_group(0, bind_group, &dynamic_offsets);
                     let workgroup_count = work_item_buffer.len().div_ceil(WORKGROUP_SIZE);
-                    if workgroup_count > 0 {
-                        compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-                    }
+                    dispatch_workgroups_extended(
+                        &mut compute_pass,
+                        workgroup_count as u32,
+                        max_compute_workgroups_per_dimension,
+                    );
                 }
 
                 PhasePreprocessBindGroups::IndirectFrustumCulling {
@@ -942,9 +956,11 @@ pub fn early_gpu_preprocess(
 
                         compute_pass.set_bind_group(0, indexed_bind_group, &dynamic_offsets);
                         let workgroup_count = indexed_buffer.len().div_ceil(WORKGROUP_SIZE);
-                        if workgroup_count > 0 {
-                            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-                        }
+                        dispatch_workgroups_extended(
+                            &mut compute_pass,
+                            workgroup_count as u32,
+                            max_compute_workgroups_per_dimension,
+                        );
                     }
 
                     // Transform and cull non-indexed meshes if there are any.
@@ -966,9 +982,11 @@ pub fn early_gpu_preprocess(
 
                         compute_pass.set_bind_group(0, non_indexed_bind_group, &dynamic_offsets);
                         let workgroup_count = non_indexed_buffer.len().div_ceil(WORKGROUP_SIZE);
-                        if workgroup_count > 0 {
-                            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-                        }
+                        dispatch_workgroups_extended(
+                            &mut compute_pass,
+                            workgroup_count as u32,
+                            max_compute_workgroups_per_dimension,
+                        );
                     }
                 }
             }
@@ -1238,6 +1256,11 @@ pub(crate) fn run_build_indirect_parameters(
         return;
     };
 
+    let max_compute_workgroups_per_dimension = ctx
+        .render_device()
+        .limits()
+        .max_compute_workgroups_per_dimension;
+
     let command_encoder = ctx.command_encoder();
 
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -1309,9 +1332,11 @@ pub(crate) fn run_build_indirect_parameters(
             let workgroup_count = phase_indirect_parameters_buffers
                 .batch_set_count(true)
                 .div_ceil(WORKGROUP_SIZE);
-            if workgroup_count > 0 {
-                compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-            }
+            dispatch_workgroups_extended(
+                &mut compute_pass,
+                workgroup_count as u32,
+                max_compute_workgroups_per_dimension,
+            );
 
             compute_pass.set_pipeline(build_indexed_indirect_params_pipeline);
 
@@ -1326,9 +1351,11 @@ pub(crate) fn run_build_indirect_parameters(
                 let workgroup_count = indexed_build_indirect_parameters_metadata
                     .batch_count
                     .div_ceil(WORKGROUP_SIZE as u32);
-                if workgroup_count > 0 {
-                    compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
-                }
+                dispatch_workgroups_extended(
+                    &mut compute_pass,
+                    workgroup_count,
+                    max_compute_workgroups_per_dimension,
+                );
             }
         }
 
@@ -1345,9 +1372,11 @@ pub(crate) fn run_build_indirect_parameters(
             let workgroup_count = phase_indirect_parameters_buffers
                 .batch_set_count(false)
                 .div_ceil(WORKGROUP_SIZE);
-            if workgroup_count > 0 {
-                compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
-            }
+            dispatch_workgroups_extended(
+                &mut compute_pass,
+                workgroup_count as u32,
+                max_compute_workgroups_per_dimension,
+            );
 
             compute_pass.set_pipeline(build_non_indexed_indirect_params_pipeline);
 
@@ -1362,9 +1391,11 @@ pub(crate) fn run_build_indirect_parameters(
                 let workgroup_count = non_indexed_build_indirect_parameters_metadata
                     .batch_count
                     .div_ceil(WORKGROUP_SIZE as u32);
-                if workgroup_count > 0 {
-                    compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
-                }
+                dispatch_workgroups_extended(
+                    &mut compute_pass,
+                    workgroup_count,
+                    max_compute_workgroups_per_dimension,
+                );
             }
         }
     }
