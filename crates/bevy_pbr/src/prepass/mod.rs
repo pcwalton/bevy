@@ -217,6 +217,7 @@ pub fn update_previous_view_data(
 }
 
 #[derive(Component, PartialEq, Clone, Default)]
+#[component(summary_tick)]
 pub struct PreviousGlobalTransform(pub Affine3A);
 
 #[cfg(not(feature = "meshlet"))]
@@ -231,8 +232,13 @@ pub fn update_mesh_previous_global_transforms(
         (Entity, &GlobalTransform),
         (PreviousMeshFilter, Without<PreviousGlobalTransform>),
     >,
-    mut meshes: Query<(Ref<GlobalTransform>, &mut PreviousGlobalTransform), PreviousMeshFilter>,
+    mut meshes: Query<
+        (Ref<GlobalTransform>, &mut PreviousGlobalTransform),
+        (PreviousMeshFilter, Changed<GlobalTransform>),
+    >,
 ) {
+    debug_assert!(meshes.can_skip_tables());
+
     if !views.iter().any(|camera| camera.is_active) {
         return;
     }
@@ -242,9 +248,7 @@ pub fn update_mesh_previous_global_transforms(
         commands.entity(entity).try_insert(new_previous_transform);
     }
     meshes.par_iter_mut().for_each(|(transform, mut previous)| {
-        if transform.is_changed_after(previous.last_changed()) {
-            *previous = PreviousGlobalTransform(transform.affine());
-        }
+        *previous = PreviousGlobalTransform(transform.affine());
     });
 }
 

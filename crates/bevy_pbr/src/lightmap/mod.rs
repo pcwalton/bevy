@@ -85,6 +85,7 @@ pub struct LightmapPlugin;
 /// then the lightmap will render using those UVs.
 #[derive(Component, Clone, Reflect, FromTemplate)]
 #[reflect(Component, Default, Clone)]
+#[component(summary_tick)]
 pub struct Lightmap {
     /// The lightmap texture.
     pub image: Handle<Image>,

@@ -740,6 +740,7 @@ fn mark_meshes_as_changed_if_their_materials_changed<M>(
 ) where
     M: Material,
 {
+    debug_assert!(changed_meshes_query.can_skip_tables());
     changed_meshes_query.par_iter_mut().for_each(|mut mesh| {
         mesh.set_changed();
     });
@@ -929,6 +930,8 @@ pub fn check_entities_needing_specialization<M>(
 ) where
     M: Material,
 {
+    debug_assert!(needs_specialization.can_skip_tables());
+
     entities_needing_specialization.changed.clear();
     entities_needing_specialization.removed.clear();
 

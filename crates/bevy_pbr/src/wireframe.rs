@@ -851,6 +851,7 @@ pub struct WireframeColor {
 /// Overrides [`WireframeConfig::default_line_width`].
 #[derive(Component, Debug, Clone, Reflect)]
 #[reflect(Component, Default, Debug)]
+#[component(summary_tick)]
 pub struct WireframeLineWidth {
     pub width: f32,
 }
@@ -872,6 +873,7 @@ pub struct NoWireframe;
 /// Controls whether wireframe edges follow triangle or quad topology.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Reflect)]
 #[reflect(Component, Default, Debug)]
+#[component(summary_tick)]
 pub enum WireframeTopology {
     #[default]
     Triangles,
@@ -936,6 +938,7 @@ pub struct RenderWireframeMaterial {
     Component, FromTemplate, Clone, Debug, Default, Deref, DerefMut, Reflect, PartialEq, Eq,
 )]
 #[reflect(Component, Default, Clone, PartialEq)]
+#[component(summary_tick)]
 pub struct Mesh3dWireframe(pub Handle<WireframeMaterial>);
 
 impl AsAssetId for Mesh3dWireframe {
@@ -1324,6 +1327,8 @@ pub fn check_wireframe_entities_needing_specialization(
     mut removed_mesh_3d_components: RemovedComponents<Mesh3d>,
     mut removed_mesh_3d_wireframe_components: RemovedComponents<Mesh3dWireframe>,
 ) {
+    debug_assert!(needs_specialization.can_skip_tables());
+
     entities_needing_specialization.changed.clear();
     entities_needing_specialization.removed.clear();
 

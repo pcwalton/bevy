@@ -77,6 +77,7 @@ impl Plugin for VisibilityRangePlugin {
 /// effect to function properly.
 #[derive(Component, Clone, PartialEq, Default, Reflect)]
 #[reflect(Component, PartialEq, Hash, Clone)]
+#[component(summary_tick)]
 pub struct VisibilityRange {
     /// The range of distances, in world units, between which this entity will
     /// smoothly fade into view as the camera zooms out.

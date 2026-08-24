@@ -72,7 +72,8 @@ fn assert_is_normalized(message: &str, length_squared: f32) {
 #[cfg_attr(
     feature = "bevy-support",
     derive(Component),
-    require(GlobalTransform, TransformTreeChanged)
+    require(GlobalTransform, TransformTreeChanged),
+    component(summary_tick)
 )]
 #[cfg_attr(
     feature = "bevy_reflect",
@@ -692,7 +693,7 @@ impl Mul<Vec3> for Transform {
 /// `Transform`. If this component is *not* marked `is_changed()`, propagation will halt.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "bevy-support", derive(Component))]
+#[cfg_attr(feature = "bevy-support", derive(Component), component(summary_tick))]
 #[cfg_attr(
     feature = "bevy_reflect",
     derive(Reflect),

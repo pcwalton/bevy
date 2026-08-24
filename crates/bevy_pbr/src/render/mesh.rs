@@ -1994,6 +1994,8 @@ pub fn extract_meshes_for_gpu_building(
     mut potential_reextraction_set: Local<IndexSet<Entity, EntityHash>>,
     mut potential_reextraction_bitfield: Local<Vec<AtomicU64>>,
 ) {
+    debug_assert!(changed_meshes_query.can_skip_tables());
+
     reextract_entities.clear();
 
     // Initialize the queues.

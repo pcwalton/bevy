@@ -53,6 +53,8 @@ pub fn sync_simple_transforms(
     )>,
     mut orphaned: RemovedComponents<ChildOf>,
 ) {
+    debug_assert!(query.p0().can_skip_tables());
+
     // Update changed entities.
     #[cfg(feature = "multi_threaded")]
     query
@@ -128,6 +130,8 @@ pub fn mark_dirty_trees(
         bevy_utils::BufferedChannel<Entity>,
     >,
 ) {
+    debug_assert!(changed.can_skip_tables());
+
     if !static_optimizations.is_enabled() {
         return;
     }

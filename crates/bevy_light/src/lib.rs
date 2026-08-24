@@ -261,6 +261,7 @@ pub type WithLight = Or<(
 /// Add this component to make a [`Mesh3d`] not cast shadows.
 #[derive(Debug, Component, Reflect, Default, Clone, PartialEq)]
 #[reflect(Component, Default, Debug, Clone, PartialEq)]
+#[component(summary_tick)]
 pub struct NotShadowCaster;
 /// Add this component to make a [`Mesh3d`] not receive shadows.
 ///
@@ -269,6 +270,7 @@ pub struct NotShadowCaster;
 /// even when [`TransmittedShadowReceiver`] is being used.
 #[derive(Debug, Component, Reflect, Default, Clone)]
 #[reflect(Component, Default, Debug)]
+#[component(summary_tick)]
 pub struct NotShadowReceiver;
 /// Add this component to make a [`Mesh3d`] using a PBR material with `StandardMaterial::diffuse_transmission > 0.0`
 /// receive shadows on its diffuse transmission lobe. (i.e. its “backside”)
@@ -279,6 +281,7 @@ pub struct NotShadowReceiver;
 /// **Note:** Using [`NotShadowReceiver`] overrides this component.
 #[derive(Debug, Component, Reflect, Default, Clone)]
 #[reflect(Component, Default, Debug)]
+#[component(summary_tick)]
 pub struct TransmittedShadowReceiver;
 
 /// Add this component to a [`Camera3d`]

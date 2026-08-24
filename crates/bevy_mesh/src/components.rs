@@ -100,6 +100,7 @@ impl AsAssetId for Mesh2d {
 )]
 #[reflect(Component, Default, Clone, PartialEq)]
 #[require(Transform)]
+#[component(summary_tick)]
 pub struct Mesh3d(pub Handle<Mesh>);
 
 impl From<Mesh3d> for AssetId<Mesh> {
@@ -202,6 +203,7 @@ pub fn mark_3d_meshes_as_changed_if_their_assets_changed(
 /// backed by `GpuComponentArrayBuffer`s on the same mesh.
 #[derive(Component, Clone, Debug, Default, Deref, DerefMut, Reflect, PartialEq, Eq)]
 #[reflect(Component, Default, Clone, PartialEq)]
+#[component(summary_tick)]
 pub struct MeshTag {
     /// The value made available to the shader.
     #[deref]

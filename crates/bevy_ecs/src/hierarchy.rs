@@ -103,6 +103,7 @@ use core::slice;
     reflect(Serialize, Deserialize)
 )]
 #[relationship(relationship_target = Children)]
+#[component(summary_tick)]
 #[doc(alias = "IsChild", alias = "Parent")]
 pub struct ChildOf(#[entities] pub Entity);
 
@@ -146,6 +147,7 @@ impl FromWorld for ChildOf {
 /// [`RelationshipTarget`]: crate::relationship::RelationshipTarget
 #[derive(Component, Default, Debug, PartialEq, Eq)]
 #[relationship_target(relationship = ChildOf, linked_spawn)]
+#[component(summary_tick)]
 #[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
 #[cfg_attr(feature = "bevy_reflect", reflect(Component, FromWorld, Default))]
 #[doc(alias = "IsParent")]
