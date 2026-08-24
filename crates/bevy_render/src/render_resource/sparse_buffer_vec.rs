@@ -477,6 +477,19 @@ macro_rules! impl_sparse_buffer_common_methods {
                 push_impl(&mut self.values, &mut self.state.summary, &mut self.state.dirty_bits, value)
             }
 
+            pub fn pop(&mut self) -> Option<T> {
+                pop_impl(&mut self.values, &mut self.state.summary, &mut self.state.dirty_bits)
+            }
+
+            pub fn swap_remove(&mut self, index: u32) -> T {
+                swap_remove_impl(
+                    &mut self.values,
+                    &mut self.state.summary,
+                    &mut self.state.dirty_bits,
+                    index
+                )
+            }
+
             /// Ensures that the backing buffer for this buffer vector is present
             /// and appropriately sized on the GPU.
             pub fn reserve(&mut self, new_capacity: usize, render_device: &RenderDevice) {
@@ -701,8 +714,10 @@ trait SparseBufferValues<T> {
     /// Reads the element at the given index, or `None` if the index is out of
     /// range.
     fn get(&self, index: usize) -> Option<T>;
+    fn set(&mut self, index: usize, value: T);
     /// Appends the given element, returning its index.
     fn push(&mut self, value: T) -> usize;
+    fn pop(&mut self) -> Option<T>;
     /// Removes all elements.
     fn clear(&mut self);
     /// Grows the storage to `new_len` elements, filling any new elements with
@@ -724,11 +739,19 @@ impl<T: AtomicPod> SparseBufferValues<T> for AtomicValues<T> {
         self.0.get(index).map(|blob| T::read_from_blob(blob))
     }
 
+    fn set(&mut self, index: usize, value: T) {
+        value.write_to_blob_mut(&mut self.0[index]);
+    }
+
     fn push(&mut self, value: T) -> usize {
         let index = self.0.len();
         self.0.push(T::Blob::default());
         value.write_to_blob_mut(&mut self.0[index]);
         index
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        self.0.pop().map(|blob| T::read_from_blob(&blob))
     }
 
     fn clear(&mut self) {
@@ -753,10 +776,18 @@ impl<T: Pod + Default> SparseBufferValues<T> for PlainValues<T> {
         self.0.get(index).copied()
     }
 
+    fn set(&mut self, index: usize, value: T) {
+        self.0[index] = value;
+    }
+
     fn push(&mut self, value: T) -> usize {
         let index = self.0.len();
         self.0.push(value);
         index
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        self.0.pop()
     }
 
     fn clear(&mut self) {
@@ -1124,6 +1155,43 @@ fn grow_impl<T, V>(
     set_dirty_bits_for_vector_growth(old_len, new_len, summary, dirty_bits);
 }
 
+fn pop_impl<T, V>(
+    values: &mut V,
+    summary: &mut Vec<AtomicU64>,
+    dirty_bits: &mut Vec<AtomicU64>,
+) -> Option<T>
+where
+    V: SparseBufferValues<T>,
+{
+    let value = values.pop()?;
+    shrink_dirty_bits(values.len() as u32, summary, dirty_bits);
+    Some(value)
+}
+
+fn swap_remove_impl<T, V>(
+    values: &mut V,
+    summary: &mut Vec<AtomicU64>,
+    dirty_bits: &mut Vec<AtomicU64>,
+    index: u32,
+) -> T
+where
+    V: SparseBufferValues<T>,
+{
+    let old_len = values.len();
+    if index as usize + 1 == old_len {
+        return pop_impl(values, summary, dirty_bits)
+            .expect("`swap_remove()` called on an out-of-bounds index");
+    }
+
+    let removed_value = values
+        .get(index as usize)
+        .expect("`swap_remove()` called on an out-of-bounds index");
+    let last_value = pop_impl(values, summary, dirty_bits).unwrap();
+    values.set(index as usize, last_value);
+    note_changed_index_mut(index, summary, dirty_bits);
+    removed_value
+}
+
 /// Clears all dirty-tracking bits.
 ///
 /// Only called with exclusive access; the words are mutated through
@@ -1134,6 +1202,31 @@ fn clear_dirty_bits(summary: &mut [AtomicU64], dirty_bits: &mut [AtomicU64]) {
     }
     for word in dirty_bits {
         *word.get_mut() = 0;
+    }
+}
+
+fn shrink_dirty_bits(new_len: u32, summary: &mut Vec<AtomicU64>, dirty_bits: &mut Vec<AtomicU64>) {
+    let new_dirty_word_count = (new_len as usize).div_ceil(BITS_PER_WORD as usize);
+    let new_summary_word_count = new_dirty_word_count.div_ceil(BITS_PER_WORD as usize);
+
+    debug_assert!(new_dirty_word_count <= dirty_bits.len());
+    debug_assert!(new_summary_word_count <= summary.len());
+
+    dirty_bits.truncate(new_dirty_word_count);
+    summary.truncate(new_summary_word_count);
+
+    let index_in_last_dirty_word = new_len % BITS_PER_WORD;
+    if index_in_last_dirty_word != 0
+        && let Some(last_dirty_word) = dirty_bits.last_mut()
+    {
+        *last_dirty_word.get_mut() &= (1 << index_in_last_dirty_word) - 1;
+    }
+
+    let index_in_last_summary_word = new_dirty_word_count % BITS_PER_WORD as usize;
+    if index_in_last_summary_word != 0
+        && let Some(last_summary_word) = summary.last_mut()
+    {
+        *last_summary_word.get_mut() &= (1 << index_in_last_summary_word) - 1;
     }
 }
 
@@ -1330,6 +1423,7 @@ mod tests {
         SparseBufferVec, BITS_PER_WORD,
     };
     use crate::impl_atomic_pod;
+    use crate::render_resource::sparse_buffer_vec::clear_dirty_bits;
     use crate::render_resource::{AtomicPod, BufferUsages};
     use bytemuck::{Pod, Zeroable};
     use core::{
@@ -1442,35 +1536,6 @@ mod tests {
                     check_block_dirty(padding_block_index as u32, &summary, false);
                 }
             }
-
-            // Asserts that the dirty status of the element at `element_index`
-            // matches the expected dirty status.
-            fn check_element_dirty(
-                element_index: u32,
-                dirty_bits: &[AtomicU64],
-                expect_dirty: bool
-            ) {
-                let expected = if expect_dirty { 1 } else { 0 };
-
-                let dirty_word_index = element_index / BITS_PER_WORD;
-                let dirty_bit_offset = element_index % BITS_PER_WORD;
-                let dirty_word = dirty_bits[dirty_word_index as usize].load(Ordering::Relaxed);
-                assert_eq!((dirty_word >> dirty_bit_offset) & 1, expected);
-            }
-
-            // Asserts that the dirty status of the block at `block_index`
-            // matches the expected dirty status in the summary.
-            //
-            // This is actually the same code as `ensure_elements_dirty`, but is
-            // duplicated for clarity.
-            fn check_block_dirty(block_index: u32, summary: &[AtomicU64], expect_dirty: bool) {
-                let expected = if expect_dirty { 1 } else { 0 };
-
-                let summary_word_index = block_index / BITS_PER_WORD;
-                let summary_bit_offset = block_index % BITS_PER_WORD;
-                let summary_word = summary[summary_word_index as usize].load(Ordering::Relaxed);
-                assert_eq!((summary_word >> summary_bit_offset) & 1, expected);
-            }
         }
 
         // Ensures that the population-count-based `count_dirty_elements` code
@@ -1498,6 +1563,31 @@ mod tests {
             let calculated_dirty_element_count = count_dirty_elements(&mut summary, &mut dirty_bits);
             assert_eq!(calculated_dirty_element_count, true_dirty_element_count);
         }
+    }
+
+    // Asserts that the dirty status of the element at `element_index`
+    // matches the expected dirty status.
+    fn check_element_dirty(element_index: u32, dirty_bits: &[AtomicU64], expect_dirty: bool) {
+        let expected = if expect_dirty { 1 } else { 0 };
+
+        let dirty_word_index = element_index / BITS_PER_WORD;
+        let dirty_bit_offset = element_index % BITS_PER_WORD;
+        let dirty_word = dirty_bits[dirty_word_index as usize].load(Ordering::Relaxed);
+        assert_eq!((dirty_word >> dirty_bit_offset) & 1, expected);
+    }
+
+    // Asserts that the dirty status of the block at `block_index`
+    // matches the expected dirty status in the summary.
+    //
+    // This is actually the same code as `ensure_elements_dirty`, but is
+    // duplicated for clarity.
+    fn check_block_dirty(block_index: u32, summary: &[AtomicU64], expect_dirty: bool) {
+        let expected = if expect_dirty { 1 } else { 0 };
+
+        let summary_word_index = block_index / BITS_PER_WORD;
+        let summary_bit_offset = block_index % BITS_PER_WORD;
+        let summary_word = summary[summary_word_index as usize].load(Ordering::Relaxed);
+        assert_eq!((summary_word >> summary_bit_offset) & 1, expected);
     }
 
     /// The non-atomic variant must store and retrieve elements, and track
@@ -1574,5 +1664,86 @@ mod tests {
             count_dirty_elements(&mut buffer.state.summary, &mut buffer.state.dirty_bits),
             1
         );
+    }
+
+    #[test]
+    fn pop_resizes_dirty_bit_vectors() {
+        let mut buffer = SparseBufferVec::new(
+            BufferUsages::STORAGE,
+            Arc::from("`pop_maintains_dirty_bit_vectors` test buffer"),
+        );
+        for i in 0..5000 {
+            buffer.push(test_element(i));
+        }
+
+        assert_eq!(buffer.state.dirty_bits.len(), 79);
+        assert_eq!(buffer.state.summary.len(), 2);
+
+        buffer.pop();
+        assert_eq!(buffer.state.dirty_bits.len(), 79);
+        assert_eq!(buffer.state.summary.len(), 2);
+
+        while buffer.len() > 4096 {
+            buffer.pop();
+        }
+        assert_eq!(buffer.state.dirty_bits.len(), 64);
+        assert_eq!(buffer.state.summary.len(), 1);
+
+        while buffer.len() > 128 {
+            buffer.pop();
+        }
+        assert_eq!(buffer.state.dirty_bits.len(), 2);
+        assert_eq!(buffer.state.summary.len(), 1);
+
+        while !buffer.is_empty() {
+            buffer.pop();
+        }
+        assert_eq!(buffer.state.dirty_bits.len(), 0);
+        assert_eq!(buffer.state.summary.len(), 0);
+    }
+
+    #[test]
+    fn swap_remove_maintains_dirty_bits() {
+        let mut buffer = SparseBufferVec::new(
+            BufferUsages::STORAGE,
+            Arc::from("`swap_remove_maintains_dirty_bits` test buffer"),
+        );
+        for i in 0..5000 {
+            buffer.push(test_element(i));
+        }
+        clear_dirty_bits(&mut buffer.state.summary, &mut buffer.state.dirty_bits);
+
+        assert_eq!(buffer.state.dirty_bits.len(), 79);
+        assert_eq!(buffer.state.summary.len(), 2);
+
+        let value = buffer.swap_remove(1234);
+        assert_eq!(value.0[0], 1234.0);
+        assert_eq!(buffer.get(1234).0[0], 4999.0);
+        assert_eq!(
+            count_dirty_elements(&mut buffer.state.summary, &mut buffer.state.dirty_bits),
+            1
+        );
+        check_element_dirty(1234, &buffer.state.dirty_bits, true);
+        check_block_dirty(19, &buffer.state.summary, true);
+        assert_eq!(buffer.state.dirty_bits.len(), 79);
+        assert_eq!(buffer.state.summary.len(), 2);
+
+        while buffer.len() > 4096 {
+            buffer.swap_remove(0);
+        }
+        assert_eq!(buffer.state.dirty_bits.len(), 64);
+        assert_eq!(buffer.state.summary.len(), 1);
+
+        while buffer.len() > 128 {
+            buffer.swap_remove(0);
+        }
+        assert_eq!(buffer.state.dirty_bits.len(), 2);
+        assert_eq!(buffer.state.summary.len(), 1);
+
+        while !buffer.is_empty() {
+            buffer.swap_remove(0);
+        }
+        assert_eq!(buffer.state.dirty_bits.len(), 0);
+        assert_eq!(buffer.state.summary.len(), 0);
     }
 }
