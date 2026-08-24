@@ -28,6 +28,7 @@ mod draw;
 mod draw_state;
 mod rangefinder;
 
+use alloc::sync::Arc;
 use bevy_app::{App, Plugin};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::entity::EntityHash;
@@ -48,7 +49,7 @@ use crate::batching::gpu_preprocessing::{
     GpuBinMetadata, GpuPreprocessingMode, GpuPreprocessingSupport, PhaseBatchedInstanceBuffers,
     PhaseIndirectParametersBuffers,
 };
-use crate::render_resource::{RawBufferVec, UninitBufferVec};
+use crate::render_resource::{RawBufferVec, SparseBufferVec, UninitBufferVec};
 use crate::renderer::RenderDevice;
 use crate::sync_world::{MainEntity, MainEntityHashMap};
 use crate::view::{ExtractedView, RetainedViewEntity};
@@ -229,7 +230,7 @@ pub struct RenderMultidrawableBatchSetGpuBuffers {
     /// A mapping from each binned mesh instance
     /// (`RenderBinnedMeshInstanceIndex`) to its input uniform index
     /// ([`InputUniformIndex`]) and bin index (`RenderBinIndex`).
-    pub render_binned_mesh_instance_buffer: RawBufferVec<GpuRenderBinnedMeshInstance>,
+    pub render_binned_mesh_instance_buffer: SparseBufferVec<GpuRenderBinnedMeshInstance>,
 
     /// A mapping from each `RenderBinMetadataIndex` to the offset of its indirect draw
     /// parameters.
@@ -249,8 +250,8 @@ pub struct RenderMultidrawableBatchSetGpuBuffers {
 impl RenderMultidrawableBatchSetGpuBuffers {
     /// Creates a new set of GPU buffers for a multidrawable batch set.
     fn new() -> RenderMultidrawableBatchSetGpuBuffers {
-        let mut render_bin_entry_buffer = RawBufferVec::new(BufferUsages::STORAGE);
-        render_bin_entry_buffer.set_label(Some("render bin entry buffer"));
+        let render_bin_entry_buffer =
+            SparseBufferVec::new(BufferUsages::STORAGE, Arc::from("render bin entry buffer"));
         let mut bin_metadata_buffer = RawBufferVec::new(BufferUsages::STORAGE);
         bin_metadata_buffer.set_label(Some("bin metadata buffer"));
         let mut bin_index_to_bin_metadata_index_buffer = RawBufferVec::new(BufferUsages::STORAGE);
@@ -301,8 +302,10 @@ impl RenderMultidrawableBatchSetGpuBuffers {
         }
 
         // Place the entry in the instance buffer at the proper spot.
-        self.render_binned_mesh_instance_buffer.values_mut()
-            [render_binned_mesh_instance_buffer_index.0 as usize] = gpu_render_bin_entry;
+        self.render_binned_mesh_instance_buffer.set(
+            render_binned_mesh_instance_buffer_index.0,
+            gpu_render_bin_entry,
+        );
 
         let bin_metadata_index =
             self.bin_index_to_bin_metadata_index_buffer.values()[bin_index.0 as usize];
@@ -357,25 +360,24 @@ impl RenderMultidrawableBatchSetGpuBuffers {
         // Because binned mesh instance indices must be contiguous, this
         // requires use of `swap_remove`.
         self.render_binned_mesh_instance_buffer
-            .swap_remove(removed_instance_index.0 as usize);
+            .swap_remove(removed_instance_index.0);
 
         // If an entity was displaced (i.e. has a new binned mesh instance index
         // now), then return that to the caller so that they can perform
         // whatever bookkeeping is necessary.
         RenderMultidrawableBatchSetGpuInstanceRemovalResult {
             removed_instance_index,
-            displaced_instance: self
-                .render_binned_mesh_instance_buffer
-                .values()
-                .get(removed_instance_index.0 as usize)
-                .map(|displaced_instance| {
-                    (
-                        RenderBinnedMeshInstanceIndex(
-                            self.render_binned_mesh_instance_buffer.len() as u32,
-                        ),
-                        *displaced_instance,
-                    )
-                }),
+            displaced_instance: if removed_instance_index.0
+                < self.render_binned_mesh_instance_buffer.len()
+            {
+                Some((
+                    RenderBinnedMeshInstanceIndex(self.render_binned_mesh_instance_buffer.len()),
+                    self.render_binned_mesh_instance_buffer
+                        .get(removed_instance_index.0),
+                ))
+            } else {
+                None
+            },
         }
     }
 }
@@ -2676,7 +2678,7 @@ mod tests {
                     let render_bin_entry = batch_set
                         .gpu_buffers
                         .render_binned_mesh_instance_buffer
-                        .values()[render_bin_buffer_index.0 as usize];
+                        .get(render_bin_buffer_index.0);
                     assert_eq!(render_bin_entry.bin_index, **render_bin_index);
                     assert_eq!(render_bin_entry.input_uniform_index, *input_uniform_index);
                 }
@@ -2694,17 +2696,20 @@ mod tests {
                 batch_set
                     .gpu_buffers
                     .render_binned_mesh_instance_buffer
-                    .len(),
+                    .len() as usize,
                 batch_set.binned_mesh_instance_index_to_entity.len()
             );
 
-            for (render_bin_buffer_index, gpu_render_binned_mesh_instance) in batch_set
+            for render_bin_buffer_index in 0..batch_set
                 .gpu_buffers
                 .render_binned_mesh_instance_buffer
-                .values()
-                .iter()
-                .enumerate()
+                .len()
             {
+                let gpu_render_binned_mesh_instance = batch_set
+                    .gpu_buffers
+                    .render_binned_mesh_instance_buffer
+                    .get(render_bin_buffer_index);
+
                 let render_bin_buffer_index =
                     RenderBinnedMeshInstanceIndex(render_bin_buffer_index as u32);
 

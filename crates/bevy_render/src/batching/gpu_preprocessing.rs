@@ -2849,6 +2849,10 @@ pub fn write_binned_instance_buffers<BPI, GFBD>(
     mut views: Query<&ExtractedView>,
     mut view_binned_render_phases: ResMut<ViewBinnedRenderPhases<BPI>>,
     bin_unpacking_buffers: ResMut<SceneUnpackingBuffers>,
+    pipeline_cache: Res<PipelineCache>,
+    mut sparse_buffer_update_jobs: ResMut<SparseBufferUpdateJobs>,
+    mut sparse_buffer_update_bind_groups: ResMut<SparseBufferUpdateBindGroups>,
+    sparse_buffer_update_pipelines: Res<SparseBufferUpdatePipelines>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
 ) where
@@ -2955,7 +2959,18 @@ pub fn write_binned_instance_buffers<BPI, GFBD>(
             batch_set
                 .gpu_buffers
                 .render_binned_mesh_instance_buffer
-                .write_buffer(&render_device, &render_queue);
+                .write_buffers(&render_device, &render_queue);
+            batch_set
+                .gpu_buffers
+                .render_binned_mesh_instance_buffer
+                .prepare_to_populate_buffers(
+                    &render_device,
+                    &pipeline_cache,
+                    &mut sparse_buffer_update_jobs,
+                    &mut sparse_buffer_update_bind_groups,
+                    &sparse_buffer_update_pipelines,
+                );
+
             batch_set
                 .gpu_buffers
                 .bin_metadata_buffer
