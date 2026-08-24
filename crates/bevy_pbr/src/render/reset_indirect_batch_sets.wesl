@@ -7,15 +7,21 @@
 // value to 0.
 
 import bevy_render::occlusion_culling::mesh_preprocess_types::IndirectBatchSet;
+import bevy_render::utils::get_extended_instance_index;
 
 @group(0) @binding(0) var<storage, read_write> indirect_batch_sets: array<IndirectBatchSet>;
 
 @compute
 @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
+fn main(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>,
+    @builtin(local_invocation_id) local_invocation_id: vec3<u32>,
+) {
     // Figure out our instance index. If this thread doesn't correspond to any
     // index, bail.
-    let instance_index = global_invocation_id.x;
+    let instance_index =
+        get_extended_instance_index(workgroup_id, num_workgroups, local_invocation_id, 64u);
     if (instance_index >= arrayLength(&indirect_batch_sets)) {
         return;
     }

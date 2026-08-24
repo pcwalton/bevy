@@ -9,6 +9,7 @@
 // that entity.
 
 import bevy_render::occlusion_culling::mesh_preprocess_types::{BinMetadata, PreprocessWorkItem};
+import bevy_render::utils::get_extended_instance_index;
 
 // Information needed to unpack bins belonging to a single batch set.
 struct BinUnpackingMetadata {
@@ -66,9 +67,14 @@ struct BinnedMeshInstance {
 
 @compute
 @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
+fn main(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>,
+    @builtin(local_invocation_id) local_invocation_id: vec3<u32>,
+) {
     // Figure out which instance we're looking at.
-    let global_id = global_invocation_id.x;
+    let global_id =
+        get_extended_instance_index(workgroup_id, num_workgroups, local_invocation_id, 64u);
     if (global_id >= bin_unpacking_metadata.binned_mesh_instance_count) {
         return;
     }

@@ -26,8 +26,8 @@ use bevy_log::{debug, info, warn};
 use bevy_render::camera::ExtractedCamera;
 use bevy_window::RawHandleWrapperHolder;
 use wgpu::{
-    Adapter, AdapterInfo, Backends, DeviceType, ForceShaderModelToken, Instance, Queue,
-    RequestAdapterOptions, Trace,
+    Adapter, AdapterInfo, Backends, ComputePass, DeviceType, ForceShaderModelToken, Instance,
+    Queue, RequestAdapterOptions, Trace,
 };
 
 /// Schedule label for the root render graph schedule. This schedule runs once per frame
@@ -384,4 +384,20 @@ pub async fn initialize_renderer(
         #[cfg(feature = "raw_vulkan_init")]
         additional_vulkan_features,
     )
+}
+
+pub fn dispatch_workgroups_extended(
+    compute_pass: &mut ComputePass,
+    workgroup_count: u32,
+    max_compute_workgroups_per_dimension: u32,
+) {
+    if workgroup_count == 0 {
+        return;
+    }
+    if workgroup_count <= max_compute_workgroups_per_dimension {
+        compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
+        return;
+    }
+    let workgroup_count_1d = f64::ceil(f64::sqrt(workgroup_count as f64)) as u32;
+    compute_pass.dispatch_workgroups(workgroup_count_1d, workgroup_count_1d, 1);
 }
