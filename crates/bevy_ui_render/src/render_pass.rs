@@ -1,7 +1,7 @@
 use core::ops::Range;
 use std::marker::PhantomData;
 
-use super::{ImageNodeBindGroups, UiBatch, UiMeta, UiViewTarget};
+use super::{UiBatch, UiMeta, UiTexturedBindGroups, UiViewTarget};
 
 use crate::{ExtractedUiNode, UiCameraView, UiInstances, UiMetaDrawArgs, UiPrepareRenderObject};
 use bevy_ecs::{
@@ -195,7 +195,7 @@ impl<E, P: PhaseItem, const I: usize> RenderCommand<P> for SetUiTextureBindGroup
 where
     E: UiPrepareRenderObject,
 {
-    type Param = SRes<ImageNodeBindGroups<E>>;
+    type Param = SRes<UiTexturedBindGroups<E>>;
     type ViewQuery = ();
     type ItemQuery = Read<UiBatch<E>>;
 
@@ -204,15 +204,25 @@ where
         _item: &P,
         _view: (),
         batch: Option<&'w UiBatch<E>>,
-        image_bind_groups: SystemParamItem<'w, '_, Self::Param>,
+        textured_bind_groups: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let image_bind_groups = image_bind_groups.into_inner();
         let Some(batch) = batch else {
             return RenderCommandResult::Skip;
         };
 
-        pass.set_bind_group(I, image_bind_groups.values.get(&batch.image).unwrap(), &[]);
+        let Some(slab) = textured_bind_groups
+            .into_inner()
+            .allocator
+            .get(batch.textured_bind_group_index)
+        else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(bind_group) = slab.bind_group() else {
+            return RenderCommandResult::Skip;
+        };
+
+        pass.set_bind_group(I, bind_group, &[]);
         RenderCommandResult::Success
     }
 }

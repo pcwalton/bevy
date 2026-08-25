@@ -7,6 +7,8 @@
 
 //! Provides rendering functionality for `bevy_ui`.
 
+extern crate alloc;
+
 pub mod box_shadow;
 pub mod clipping;
 mod gradient;
@@ -14,8 +16,15 @@ mod image;
 use bevy_ecs::query::QueryData;
 use bevy_ecs::system::lifetimeless::SRes;
 use bevy_render::batching::gpu_preprocessing::IndirectParametersIndexed;
+use bevy_render::init_gpu_resource;
+use bevy_render::material_bind_groups::{
+    FallbackBindlessResources, FallbackBuffer, MaterialBindGroupAllocator, MaterialBindGroupIndex,
+    MaterialBindingId,
+};
 use bevy_render::render_phase::DrawFunctionId;
 use bevy_render::render_resource::SpecializedRenderPipeline;
+use bevy_render::storage::{GpuShaderBuffer, RenderChangedShaderBuffers};
+use bevy_render::texture::FallbackImage;
 use bevy_utils::default;
 pub use image::ImageNodeAssetChangedSystems;
 mod pipeline;
@@ -37,7 +46,6 @@ use bevy_reflect::Reflect;
 use bevy_render::camera::{extract_cameras, CameraMainPassTextureFormats};
 use bevy_render::sync_world::{MainEntityHashMap, MainEntityHashSet};
 use bevy_shader::load_shader_library;
-use bevy_sprite_render::SpriteAssetEvents;
 use bevy_ui::widget::{ImageNode, ImageNodeSize, NodeImageMode, Text, TextShadow, ViewportNode};
 use bevy_ui::{
     BackgroundColor, BackgroundGradient, BorderColor, BorderGradient, BoxShadow, CalculatedClip,
@@ -46,7 +54,7 @@ use bevy_ui::{
 };
 
 use bevy_app::prelude::*;
-use bevy_asset::{AssetEvent, AssetEventSystems, AssetId, Assets};
+use bevy_asset::{AssetEventSystems, AssetId, Assets};
 use bevy_color::{Alpha, ColorToComponents, LinearRgba};
 use bevy_core_pipeline::schedule::{Core2d, Core2dSystems, Core3d, Core3dSystems};
 use bevy_core_pipeline::upscaling::upscaling;
@@ -74,7 +82,8 @@ pub use debug_overlay::{GlobalUiDebugOptions, UiDebugOptions};
 
 use gradient::GradientPlugin;
 
-use bevy_platform::collections::{HashMap, HashSet};
+use alloc::borrow::Cow;
+use bevy_platform::collections::HashSet;
 use bevy_text::{
     ComputedTextBlock, EditableText, PositionedGlyph, Strikethrough, StrikethroughColor,
     TextBackgroundColor, TextColor, TextCursorStyle, TextLayoutInfo, TextSpan, Underline,
@@ -240,7 +249,7 @@ impl Plugin for UiRenderPlugin {
 
         render_app
             .init_gpu_resource::<SpecializedRenderPipelines<UiPipeline>>()
-            .init_gpu_resource::<ImageNodeBindGroups<ExtractedUiNode>>()
+            .init_gpu_resource::<UiTexturedBindGroups<ExtractedUiNode>>()
             .init_gpu_resource::<UiMeta<ExtractedUiNode>>()
             .init_resource::<ExtractedUiNodes>()
             .allow_ambiguous_resource::<ExtractedUiNodes>()
@@ -269,7 +278,10 @@ impl Plugin for UiRenderPlugin {
                 )
                     .chain_weak(),
             )
-            .add_systems(RenderStartup, init_ui_pipeline)
+            .add_systems(
+                RenderStartup,
+                init_ui_pipeline.after(init_gpu_resource::<UiTexturedBindGroups<ExtractedUiNode>>),
+            )
             .add_systems(
                 ExtractSchedule,
                 (
@@ -382,8 +394,9 @@ pub struct ExtractedUiNodeInstanceData {
     uv_offset: Vec2,
     translation: Vec2,
     size: Vec2,
+    textured_bind_group_slot: u32,
     flags: u32,
-    pad: [u32; 3],
+    pad: [u32; 2],
 }
 
 impl UiRenderObject for ExtractedUiNode {
@@ -391,7 +404,10 @@ impl UiRenderObject for ExtractedUiNode {
     type ViewPipelineKeyBuilder = UiNodePipelineKeyBuilder;
     type ViewQueryData = Option<&'static UiAntiAlias>;
     type SpecializedRenderPipeline = UiPipeline;
-    type PipelineKeySystemParam = SRes<UiMeta<ExtractedUiNode>>;
+    type PipelineKeySystemParam = (
+        SRes<UiMeta<ExtractedUiNode>>,
+        SRes<UiTexturedBindGroups<ExtractedUiNode>>,
+    );
 
     fn get_sort_key(&self) -> FloatOrd {
         FloatOrd(self.z_order)
@@ -408,7 +424,7 @@ impl UiRenderObject for ExtractedUiNode {
     fn create_pipeline_key(
         &self,
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
-        ui_meta: &mut SystemParamItem<Self::PipelineKeySystemParam>,
+        (ui_meta, textured_bind_groups): &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key> {
         let mut flags = UiPipelineKeyFlags::empty();
         if matches!(
@@ -419,6 +435,9 @@ impl UiRenderObject for ExtractedUiNode {
         }
         if matches!(ui_meta.instances, UiInstances::Retained { .. }) {
             flags.insert(UiPipelineKeyFlags::RETAINED_INSTANCES);
+        }
+        if textured_bind_groups.is_bindless() {
+            flags.insert(UiPipelineKeyFlags::BINDLESS);
         }
 
         Some(UiPipelineKey {
@@ -446,10 +465,11 @@ impl UiPrepareRenderObject for ExtractedUiNode {
         self.image
     }
 
-    fn image_bind_group_layout(
+    fn textured_bind_group_layout(
         pipeline: &Self::SpecializedRenderPipeline,
+        is_bindless: bool,
     ) -> Option<&BindGroupLayoutDescriptor> {
-        Some(&pipeline.image_layout)
+        Some(pipeline.textured_bind_group_layout(is_bindless))
     }
 
     fn clip(&self) -> Option<&CalculatedClip> {
@@ -468,6 +488,7 @@ impl UiPrepareRenderObject for ExtractedUiNode {
         out_quad: &mut UiQuad<Self::InstanceData>,
         index: usize,
         gpu_image: Option<&GpuImage>,
+        textured_bind_group_slot: u32,
     ) {
         let positions;
 
@@ -549,6 +570,7 @@ impl UiPrepareRenderObject for ExtractedUiNode {
                     uv_scale: uvs[2] - uvs[0],
                     uv_offset: uvs[0],
                     translation: transform.translation,
+                    textured_bind_group_slot,
                     pad: default(),
                 };
             }
@@ -586,6 +608,7 @@ impl UiPrepareRenderObject for ExtractedUiNode {
                     uv_scale: uvs[2] - uvs[0],
                     uv_offset: uvs[0],
                     translation: self.transform.transform_point2(glyph.translation),
+                    textured_bind_group_slot,
                     pad: default(),
                 };
             }
@@ -667,6 +690,7 @@ type UiNodeQueryFilter = (
 pub fn extract_uinode_changes(
     mut commands: Commands,
     mut extracted_uinodes: ResMut<ExtractedUiNodes>,
+    mut textured_bind_groups: ResMut<UiTexturedBindGroups<ExtractedUiNode>>,
     all_uinodes_query: Extract<Query<Entity, UiNodeQueryFilter>>,
     changed_uinodes_query: Extract<
         Query<
@@ -815,6 +839,7 @@ pub fn extract_uinode_changes(
                 &text_span_parent_query,
                 &text_query,
                 &mut extracted_uinodes,
+                &mut textured_bind_groups,
                 Some(&mut extra_nodes_to_invalidate),
             );
         }
@@ -857,6 +882,7 @@ pub fn extract_uinode_changes(
                 &text_span_parent_query,
                 &text_query,
                 &mut extracted_uinodes,
+                &mut textured_bind_groups,
                 Some(&mut extra_nodes_to_invalidate),
             );
         }
@@ -874,6 +900,7 @@ pub fn extract_uinode_changes(
                 &text_span_parent_query,
                 &text_query,
                 &mut extracted_uinodes,
+                &mut textured_bind_groups,
                 Some(&mut extra_nodes_to_invalidate),
             );
         }
@@ -886,6 +913,7 @@ pub fn extract_uinode_changes(
             &text_span_parent_query,
             &text_query,
             &mut extracted_uinodes,
+            &mut textured_bind_groups,
             None,
         );
     }
@@ -896,6 +924,7 @@ pub fn extract_uinode_changes(
         text_span_parent_query: &Query<&ChildOf, With<TextSpan>>,
         text_query: &Query<Entity, With<Text>>,
         extracted_uinodes: &mut ExtractedUiNodes,
+        textured_bind_groups: &mut UiTexturedBindGroups<ExtractedUiNode>,
         maybe_extra_nodes_to_invalidate: Option<&mut MainEntityHashSet>,
     ) {
         // Mark the node as changed so that the other `extract_` systems will
@@ -907,6 +936,7 @@ pub fn extract_uinode_changes(
         {
             for (render_entity, _) in render_entities.drain(..) {
                 commands.entity(render_entity).despawn();
+                textured_bind_groups.free_material_binding(render_entity);
                 changed_ui_nodes.push(ChangedUiObject {
                     render_entity,
                     camera_entity: prev_camera_entity,
@@ -2410,8 +2440,21 @@ where
     E: UiPrepareRenderObject,
 {
     pub params_range: Option<Range<u32>>,
-    pub image: AssetId<Image>,
+    pub textured_bind_group_index: MaterialBindGroupIndex,
     phantom: PhantomData<E>,
+}
+
+impl<E> Default for UiBatch<E>
+where
+    E: UiPrepareRenderObject,
+{
+    fn default() -> Self {
+        UiBatch {
+            params_range: None,
+            textured_bind_group_index: MaterialBindGroupIndex::default(),
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl<E> UiBatch<E>
@@ -2731,24 +2774,119 @@ pub struct UiNodePipelineKeyBuilder {
     anti_alias: Option<UiAntiAlias>,
 }
 
+pub(crate) static UI_TEXTURED_BINDLESS_DESCRIPTOR: BindlessDescriptor = BindlessDescriptor {
+    resources: Cow::Borrowed(&[
+        BindlessResourceType::Texture2d,
+        BindlessResourceType::SamplerFiltering,
+    ]),
+    buffers: Cow::Borrowed(&[]),
+    index_tables: Cow::Borrowed(&[BindlessIndexTableDescriptor {
+        indices: BindlessIndex(0)..BindlessIndex(2),
+        binding_number: BindingNumber(0),
+    }]),
+};
+
 #[derive(Resource)]
-pub struct ImageNodeBindGroups<E>
+pub struct UiTexturedBindGroups<E>
 where
     E: UiPrepareRenderObject,
 {
-    pub values: HashMap<AssetId<Image>, BindGroup>,
+    allocator: MaterialBindGroupAllocator,
+    builder: BindGroupBuilder,
+    bindless_layout_descriptor: BindGroupLayoutDescriptor,
+    entity_to_material_binding_id: EntityHashMap<MaterialBindingId>,
     phantom: PhantomData<E>,
 }
 
-impl<E> Default for ImageNodeBindGroups<E>
+impl<E> FromWorld for UiTexturedBindGroups<E>
 where
     E: UiPrepareRenderObject,
 {
-    fn default() -> Self {
-        ImageNodeBindGroups {
-            values: HashMap::default(),
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+
+        let bindless_layout_descriptor = BindGroupLayoutDescriptor::new(
+            "ui_bindless_layout",
+            &create_bindless_bind_group_layout_entries(
+                2,
+                AUTO_BINDLESS_SLAB_RESOURCE_LIMIT,
+                (*UI_TEXTURED_BINDLESS_DESCRIPTOR.index_tables)[0].binding_number,
+                &UI_TEXTURED_BINDLESS_DESCRIPTOR.resources[..],
+            ),
+        );
+
+        Self {
+            allocator: MaterialBindGroupAllocator::new(
+                render_device,
+                "UI",
+                if render_device
+                    .features()
+                    .contains(WgpuFeatures::TEXTURE_BINDING_ARRAY)
+                {
+                    Some(UI_TEXTURED_BINDLESS_DESCRIPTOR.clone())
+                } else {
+                    None
+                },
+                bindless_layout_descriptor.clone(),
+                Some(BindlessSlabResourceLimit::Auto),
+            ),
+            bindless_layout_descriptor,
+            builder: BindGroupBuilder::default(),
+            entity_to_material_binding_id: EntityHashMap::default(),
             phantom: PhantomData,
         }
+    }
+}
+
+impl<E> UiTexturedBindGroups<E>
+where
+    E: UiPrepareRenderObject,
+{
+    pub(crate) fn get_or_insert_material_binding(
+        &mut self,
+        entity: Entity,
+        image: &GpuImage,
+        textured_bind_group_layout: &BindGroupLayoutDescriptor,
+    ) -> MaterialBindingId {
+        *self
+            .entity_to_material_binding_id
+            .entry(entity)
+            .or_insert_with(|| {
+                self.builder.binding_resources.push((
+                    0,
+                    UnpreparedBindingResource::TextureView(
+                        TextureViewDimension::D2,
+                        image.texture_view.clone(),
+                    ),
+                ));
+                self.builder.binding_resources.push((
+                    1,
+                    UnpreparedBindingResource::Sampler(
+                        SamplerBindingType::Filtering,
+                        image.sampler.clone(),
+                    ),
+                ));
+
+                let binding_id = self
+                    .allocator
+                    .allocate_unprepared(&mut self.builder, textured_bind_group_layout);
+                self.builder.clear();
+                binding_id
+            })
+    }
+
+    pub(crate) fn free_material_binding(&mut self, entity: Entity) {
+        if let Some(binding_id) = self.entity_to_material_binding_id.remove(&entity) {
+            self.allocator.free(binding_id);
+        }
+    }
+
+    pub(crate) fn is_bindless(&self) -> bool {
+        self.allocator.is_bindless()
+    }
+
+    pub(crate) fn bindless_layout_descriptor(&self) -> &BindGroupLayoutDescriptor {
+        &self.bindless_layout_descriptor
     }
 }
 
@@ -2761,10 +2899,22 @@ pub fn prepare_uinodes<E>(
     extracted_uinodes: Res<UiRenderObjects<E>>,
     view_uniforms: Res<ViewUniforms>,
     ui_pipeline: Res<E::SpecializedRenderPipeline>,
-    mut maybe_image_bind_groups: Option<ResMut<ImageNodeBindGroups<E>>>,
+    mut maybe_textured_bind_groups: Option<ResMut<UiTexturedBindGroups<E>>>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     mut phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
-    events: Res<SpriteAssetEvents>,
+    (
+        fallback_image,
+        fallback_bindless_resources,
+        fallback_buffer,
+        shader_buffer_assets,
+        changed_shader_buffers,
+    ): (
+        Res<FallbackImage>,
+        Res<FallbackBindlessResources>,
+        Res<FallbackBuffer>,
+        Res<RenderAssets<GpuShaderBuffer>>,
+        Res<RenderChangedShaderBuffers>,
+    ),
     (
         mut sparse_buffer_update_jobs,
         mut sparse_buffer_update_bind_groups,
@@ -2779,22 +2929,6 @@ pub fn prepare_uinodes<E>(
     E: UiPrepareRenderObject,
 {
     let ui_meta = ui_meta.into_inner();
-
-    // If an image has changed, the GpuImage has (probably) changed
-    if E::TEXTURED {
-        let image_bind_groups = maybe_image_bind_groups.as_mut().unwrap();
-        for event in &events.images {
-            match event {
-                AssetEvent::Added { .. } |
-                AssetEvent::Unused { .. } |
-                // Images don't have dependencies
-                AssetEvent::LoadedWithDependencies { .. } => {}
-                AssetEvent::Modified { id } | AssetEvent::Removed { id } => {
-                    image_bind_groups.values.remove(id);
-                }
-            };
-        }
-    }
 
     if let Some(view_binding) = view_uniforms.uniforms.binding() {
         let mut batches: Vec<(Entity, UiBatch<E>)> = Vec::with_capacity(*previous_len);
@@ -2832,7 +2966,7 @@ pub fn prepare_uinodes<E>(
 
         for ui_phase in phases.values_mut() {
             let mut batch_item_index = 0;
-            let mut batch_image_handle = None;
+            let mut last_drawn_item_index_of_this_type: Option<usize> = None;
 
             for item_index in 0..ui_phase.items.len() {
                 let item = &mut ui_phase.items[item_index];
@@ -2841,105 +2975,73 @@ pub fn prepare_uinodes<E>(
                     .get(&item.main_entity())
                     .and_then(|(_, sub_uinodes)| sub_uinodes.get(&item.entity()))
                 else {
-                    batch_image_handle = None;
                     continue;
                 };
+
+                let image = extracted_uinode.image();
+
+                let mut maybe_textured_binding_id = None;
+                if E::TEXTURED && image != AssetId::default() {
+                    let Some(gpu_image) = gpu_images.get(image) else {
+                        continue;
+                    };
+                    let textured_bind_groups = maybe_textured_bind_groups.as_mut().unwrap();
+                    let is_bindless = textured_bind_groups.is_bindless();
+                    let textured_bind_group_layout =
+                        E::textured_bind_group_layout(&ui_pipeline, is_bindless).expect(
+                            "Textured UI render objects must have textured bind group layouts",
+                        );
+                    maybe_textured_binding_id =
+                        Some(textured_bind_groups.get_or_insert_material_binding(
+                            item.entity(),
+                            gpu_image,
+                            textured_bind_group_layout,
+                        ));
+                }
 
                 // Initialize the batch range to be zero-length initially.
                 // We'll extend it as we accumulate items into this batch.
                 item.batch_range = (item_index as u32)..(item_index as u32);
 
-                let image = extracted_uinode.image();
+                // Start a new batch if necessary.
+                if !last_drawn_item_index_of_this_type
+                    .is_some_and(|last_drawn_item_index| last_drawn_item_index + 1 == item_index)
+                    || batches.last().is_none_or(|(_, last_batch)| {
+                        maybe_textured_binding_id
+                            .as_ref()
+                            .is_some_and(|binding_id| {
+                                binding_id.group != last_batch.textured_bind_group_index
+                            })
+                    })
+                {
+                    batch_item_index = item_index;
+                    batches.push((item.entity(), UiBatch::default()));
+                }
+
+                if let Some(textured_binding_id) = maybe_textured_binding_id {
+                    batches.last_mut().unwrap().1.textured_bind_group_index =
+                        textured_binding_id.group;
+                }
+
+                let (_, batch) = batches.last_mut().unwrap();
+
                 let gpu_image = if E::TEXTURED {
                     gpu_images.get(image)
                 } else {
                     None
                 };
+                let textured_bind_group_slot =
+                    maybe_textured_binding_id.map_or(0, |binding_id| *binding_id.slot);
 
-                let mut existing_batch = batches.last_mut();
-
-                if batch_image_handle.is_none()
-                    || existing_batch.is_none()
-                    || (batch_image_handle != Some(AssetId::default())
-                        && image != AssetId::default()
-                        && batch_image_handle != Some(image))
-                {
-                    if E::TEXTURED && gpu_image.is_none() {
-                        continue;
-                    }
-
-                    batch_item_index = item_index;
-                    batch_image_handle = Some(image);
-
-                    let new_batch = UiBatch {
-                        params_range: None,
-                        image,
-                        phantom: PhantomData,
-                    };
-                    batches.push((item.entity(), new_batch));
-
-                    if let Some(gpu_image) = gpu_image {
-                        maybe_image_bind_groups
-                            .as_mut()
-                            .unwrap()
-                            .values
-                            .entry(image)
-                            .or_insert_with(|| {
-                                render_device.create_bind_group(
-                                    "ui_material_bind_group",
-                                    &pipeline_cache.get_bind_group_layout(
-                                        E::image_bind_group_layout(&ui_pipeline).expect(
-                                            "Textured UI render objects must have image bind group layouts"
-                                        )
-                                    ),
-                                    &BindGroupEntries::sequential((
-                                        &gpu_image.texture_view,
-                                        &gpu_image.sampler,
-                                    )),
-                                )
-                            });
-                    }
-
-                    existing_batch = batches.last_mut();
-                } else if E::TEXTURED
-                    && batch_image_handle == Some(AssetId::default())
-                    && image != AssetId::default()
-                {
-                    if let Some(ref mut existing_batch) = existing_batch
-                        && let Some(gpu_image) = gpu_image
-                    {
-                        batch_image_handle = Some(image);
-                        existing_batch.1.image = image;
-
-                        maybe_image_bind_groups
-                            .as_mut()
-                            .unwrap()
-                            .values
-                            .entry(image)
-                            .or_insert_with(|| {
-                                render_device.create_bind_group(
-                                    "ui_material_bind_group",
-                                    &pipeline_cache.get_bind_group_layout(
-                                        E::image_bind_group_layout(&ui_pipeline).expect(
-                                            "Textured UI render objects must have image bind group layouts"
-                                        )
-                                    ),
-                                    &BindGroupEntries::sequential((
-                                        &gpu_image.texture_view,
-                                        &gpu_image.sampler,
-                                    )),
-                                )
-                            });
-                    } else {
-                        continue;
-                    }
-                }
-
-                let batch = &mut existing_batch.expect("We should have a batch").1;
                 let mut entity_instances = ui_meta.instances.get_entity_mut(item.entity());
                 let (mut quad, mut is_invisible) = (UiQuad::default(), true);
                 for quad_index in 0..extracted_uinode.quad_count() {
-                    extracted_uinode.populate_quad(&mut quad, quad_index, gpu_image);
+                    extracted_uinode.populate_quad(
+                        &mut quad,
+                        quad_index,
+                        gpu_image,
+                        textured_bind_group_slot,
+                    );
 
                     if extracted_uinode.clip().is_none() {
                         let instance_index = entity_instances
@@ -2988,6 +3090,7 @@ pub fn prepare_uinodes<E>(
                     continue;
                 }
 
+                last_drawn_item_index_of_this_type = Some(item_index);
                 ui_phase.items[batch_item_index].batch_range_mut().end += 1;
             }
         }
@@ -3031,6 +3134,21 @@ pub fn prepare_uinodes<E>(
                 draw_args.write_buffer(&render_device, &render_queue);
             }
             UiMetaDrawArgs::Direct(_) => {}
+        }
+
+        if let Some(textured_bind_groups) = maybe_textured_bind_groups.as_deref_mut() {
+            textured_bind_groups.allocator.prepare_bind_groups(
+                &render_device,
+                &pipeline_cache,
+                &fallback_bindless_resources,
+                &fallback_image,
+                &fallback_buffer,
+                &shader_buffer_assets,
+                &changed_shader_buffers,
+            );
+            textured_bind_groups
+                .allocator
+                .write_buffers(&render_device, &render_queue);
         }
 
         *previous_len = batches.len();
@@ -3213,8 +3331,9 @@ pub trait UiPrepareRenderObject: UiRenderObject {
         AssetId::default()
     }
 
-    fn image_bind_group_layout(
+    fn textured_bind_group_layout(
         _pipeline: &Self::SpecializedRenderPipeline,
+        _is_bindless: bool,
     ) -> Option<&BindGroupLayoutDescriptor> {
         None
     }
@@ -3230,6 +3349,7 @@ pub trait UiPrepareRenderObject: UiRenderObject {
         out_quad: &mut UiQuad<Self::InstanceData>,
         index: usize,
         gpu_image: Option<&GpuImage>,
+        textured_bind_group_slot: u32,
     );
 }
 

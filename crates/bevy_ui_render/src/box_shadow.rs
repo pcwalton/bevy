@@ -286,6 +286,7 @@ impl UiPrepareRenderObject for ExtractedBoxShadow {
         out_quad: &mut crate::UiQuad<Self::InstanceData>,
         index: usize,
         _: Option<&bevy_render::texture::GpuImage>,
+        _: u32,
     ) {
         debug_assert_eq!(index, 0);
 
