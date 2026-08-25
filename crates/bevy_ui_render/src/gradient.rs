@@ -128,37 +128,43 @@ impl SpecializedRenderPipeline for GradientPipeline {
             VertexStepMode::Vertex,
             vec![
                 // position
-                VertexFormat::Float32x3,
-                // uv
                 VertexFormat::Float32x2,
-                // flags
-                VertexFormat::Uint32,
+            ],
+        );
+        let instance_layout = VertexBufferLayout::from_vertex_formats(
+            VertexStepMode::Instance,
+            vec![
+                // transform
+                VertexFormat::Float32x4,
                 // border radius x values (top left, top right, bottom right, bottom left)
                 VertexFormat::Float32x4,
                 // border radius y values (top left, top right, bottom right, bottom left)
                 VertexFormat::Float32x4,
                 // border
                 VertexFormat::Float32x4,
-                // size
+                // start color
+                VertexFormat::Float32x4,
+                // end color
+                VertexFormat::Float32x4,
+                // transform translation
                 VertexFormat::Float32x2,
-                // point
+                // size
                 VertexFormat::Float32x2,
                 // start_point
                 VertexFormat::Float32x2,
                 // dir
                 VertexFormat::Float32x2,
-                // start_color
-                VertexFormat::Float32x4,
                 // start_len
                 VertexFormat::Float32,
                 // end_len
                 VertexFormat::Float32,
-                // end color
-                VertexFormat::Float32x4,
                 // hint
                 VertexFormat::Float32,
+                // flags
+                VertexFormat::Uint32,
             ],
-        );
+        )
+        .offset_locations_by(1);
         let color_space = match key.color_space {
             InterpolationColorSpace::Oklaba => "IN_OKLAB",
             InterpolationColorSpace::Oklcha => "IN_OKLCH",
@@ -183,7 +189,7 @@ impl SpecializedRenderPipeline for GradientPipeline {
             vertex: VertexState {
                 shader: self.shader.clone(),
                 shader_defs: shader_defs.clone(),
-                buffers: vec![vertex_layout],
+                buffers: vec![vertex_layout, instance_layout],
                 ..default()
             },
             fragment: Some(FragmentState {
@@ -225,21 +231,6 @@ pub struct ExtractedGradient {
     pub resolved_gradient: ResolvedGradient,
     pub color_space: InterpolationColorSpace,
     pub rendered_stop_indices: Vec<u32>,
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct UiGradientInstanceData {
-    flags: u32,
-    radius: [Vec4; 2],
-    border: Vec4,
-    size: Vec2,
-    g_start: Vec2,
-    g_dir: Vec2,
-    start_color: Vec4,
-    start_len: f32,
-    end_color: Vec4,
-    end_len: f32,
-    hint: f32,
 }
 
 impl UiRenderObject for ExtractedGradient {
@@ -284,7 +275,6 @@ impl UiRenderObject for ExtractedGradient {
 }
 
 impl UiPrepareRenderObject for ExtractedGradient {
-    type Vertex = UiGradientVertex;
     type InstanceData = UiGradientInstanceData;
     type TexturedGpuAsset = GpuImage;
 
@@ -314,9 +304,7 @@ impl UiPrepareRenderObject for ExtractedGradient {
 
         // Specify the corners of the node
         let corner_points = QUAD_VERTEX_POSITIONS.map(|pos| pos * rect_size);
-        let positions = corner_points.map(|pos| self.transform.transform_point2(pos));
-
-        let uvs = { [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y] };
+        out_quad.positions = corner_points.map(|pos| self.transform.transform_point2(pos));
 
         let mut flags = if let NodeType::Border(borders) = self.node_type {
             borders
@@ -363,6 +351,7 @@ impl UiPrepareRenderObject for ExtractedGradient {
         }
 
         out_quad.instance_data = UiGradientInstanceData {
+            world_from_local: pack_transform(self.transform, rect_size),
             flags: stop_flags,
             radius: self.border_radius.into(),
             border: vec4(
@@ -379,40 +368,8 @@ impl UiPrepareRenderObject for ExtractedGradient {
             end_len: end_stop.1,
             end_color: end_color.into(),
             hint: start_stop.2,
+            translation: self.transform.translation,
         };
-
-        for (&mut (ref mut out_position, ref mut out_uvs), (position, (uv_a, uv_b))) in out_quad
-            .vertices
-            .iter_mut()
-            .zip(positions.iter().zip(uvs.iter().zip(corner_points.iter())))
-        {
-            *out_position = *position;
-            out_uvs.uv_a = *uv_a;
-            out_uvs.uv_b = *uv_b;
-        }
-    }
-
-    fn create_vertex(
-        quad: &UiQuad<Self::InstanceData>,
-        position: Vec2,
-        uvs: &UiQuadUvs,
-    ) -> Self::Vertex {
-        UiGradientVertex {
-            position: position.extend(0.0).into(),
-            uv: uvs.uv_a.to_array(),
-            flags: quad.instance_data.flags,
-            radius: quad.instance_data.radius.map(Into::into),
-            border: quad.instance_data.border.into(),
-            size: quad.instance_data.size.into(),
-            point: uvs.uv_b.to_array(),
-            g_start: quad.instance_data.g_start.into(),
-            g_dir: quad.instance_data.g_dir.into(),
-            start_color: quad.instance_data.start_color.into(),
-            start_len: quad.instance_data.start_len,
-            end_len: quad.instance_data.end_len,
-            end_color: quad.instance_data.end_color.into(),
-            hint: quad.instance_data.hint,
-        }
     }
 }
 
@@ -899,6 +856,24 @@ pub struct UiGradientVertex {
     end_len: f32,
     end_color: [f32; 4],
     hint: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
+pub struct UiGradientInstanceData {
+    world_from_local: Vec4,
+    radius: [Vec4; 2],
+    border: Vec4,
+    start_color: Vec4,
+    end_color: Vec4,
+    translation: Vec2,
+    size: Vec2,
+    g_start: Vec2,
+    g_dir: Vec2,
+    start_len: f32,
+    end_len: f32,
+    hint: f32,
+    flags: u32,
 }
 
 fn convert_color_to_space(color: LinearRgba, space: InterpolationColorSpace) -> [f32; 4] {
