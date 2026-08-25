@@ -245,16 +245,26 @@ where
         let Some(indices) = ui_meta.indices.buffer() else {
             return RenderCommandResult::Failure("missing indices to draw ui");
         };
+        let Some(instances) = ui_meta.instances.buffer() else {
+            return RenderCommandResult::Failure("missing instances to draw ui");
+        };
 
         // Store the vertices
         pass.set_vertex_buffer(0, vertices.slice(..));
+        // Store the per-instance data
+        pass.set_vertex_buffer(1, instances.slice(..));
         // Define how to "connect" the vertices
         pass.set_index_buffer(
             indices.slice(..),
             bevy_render::render_resource::IndexFormat::Uint32,
         );
-        // Draw the vertices
-        pass.draw_indexed(batch.range.clone(), 0, 0..1);
+        for params in &batch.params {
+            pass.draw_indexed(
+                params.first_index..(params.first_index + params.index_count),
+                params.base_vertex as i32,
+                params.first_instance..(params.first_instance + params.instance_count),
+            );
+        }
         RenderCommandResult::Success
     }
 }
