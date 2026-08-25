@@ -59,25 +59,40 @@ impl SpecializedRenderPipeline for UiPipeline {
             VertexStepMode::Vertex,
             vec![
                 // position
-                VertexFormat::Float32x3,
-                // uv
                 VertexFormat::Float32x2,
+            ],
+        );
+
+        // Specify the layout of a single quad (`UiNodeInstanceData`).
+        let mut instance_layout = VertexBufferLayout::from_vertex_formats(
+            VertexStepMode::Instance,
+            vec![
+                // transform
+                VertexFormat::Float32x4,
                 // color
                 VertexFormat::Float32x4,
-                // mode
-                VertexFormat::Uint32,
+                // border
+                VertexFormat::Float32x4,
                 // border radius x values (top left, top right, bottom right, bottom left)
                 VertexFormat::Float32x4,
                 // border radius y values (top left, top right, bottom right, bottom left)
                 VertexFormat::Float32x4,
-                // border thickness
-                VertexFormat::Float32x4,
-                // border size
+                // uv_scale
                 VertexFormat::Float32x2,
-                // position relative to the center
+                // uv_offset
                 VertexFormat::Float32x2,
+                // translation
+                VertexFormat::Float32x2,
+                // size
+                VertexFormat::Float32x2,
+                // flags
+                VertexFormat::Uint32,
             ],
-        );
+        )
+        .offset_locations_by(1);
+        // Account for padding.
+        instance_layout.array_stride += 12;
+
         let shader_defs = if key.anti_alias {
             vec!["ANTI_ALIAS".into()]
         } else {
@@ -88,7 +103,7 @@ impl SpecializedRenderPipeline for UiPipeline {
             vertex: VertexState {
                 shader: self.shader.clone(),
                 shader_defs: shader_defs.clone(),
-                buffers: vec![vertex_layout],
+                buffers: vec![vertex_layout, instance_layout],
                 ..default()
             },
             fragment: Some(FragmentState {

@@ -29,7 +29,7 @@ use bevy_utils::default;
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
-    prepare_uinodes, queue_ui_items, wipe_phase_items_if_camera_component_changed,
+    pack_transform, prepare_uinodes, queue_ui_items, wipe_phase_items_if_camera_component_changed,
     BoxShadowSamples, CachedCameraView, ChangedUiObject, DrawUiRenderObject, RenderUiSystems,
     SetUiViewBindGroup, TransparentUi, UiCameraMap, UiMeta, UiRenderObject, UiRenderObjects,
 };
@@ -75,33 +75,24 @@ impl Plugin for BoxShadowPlugin {
     }
 }
 
-/// A single vertex of a box shadow quad.
+/// GPU data specific to a single box shadow quad that's constant across the quad.
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct BoxShadowVertex {
-    position: [f32; 3],
-    uvs: [f32; 2],
-    vertex_color: [f32; 4],
-    size: [f32; 2],
-    radius: [[f32; 4]; 2],
+#[derive(Copy, Clone, Default, Pod, Zeroable)]
+pub struct BoxShadowInstanceData {
+    world_from_local: Vec4,
+    color: Vec4,
+    radius: [Vec4; 2],
+    translation: Vec2,
+    size: Vec2,
+    bounds: Vec2,
     blur: f32,
-    bounds: [f32; 2],
+    pad: f32,
 }
 
 #[derive(Component)]
 pub struct UiShadowsBatch {
     pub range: Range<u32>,
     pub camera: Entity,
-}
-
-/// Data specific to a single box shadow quad that's constant across the quad.
-#[derive(Clone, Default)]
-pub struct BoxShadowInstanceData {
-    color: Vec4,
-    size: Vec2,
-    radius: [Vec4; 2],
-    blur: f32,
-    bounds: Vec2,
 }
 
 #[derive(Resource)]
@@ -140,30 +131,43 @@ impl SpecializedRenderPipeline for BoxShadowPipeline {
             VertexStepMode::Vertex,
             vec![
                 // position
-                VertexFormat::Float32x3,
-                // uv
                 VertexFormat::Float32x2,
+            ],
+        );
+
+        // Specify the layout of a single quad (`BoxShadowInstanceData`).
+        let mut instance_layout = VertexBufferLayout::from_vertex_formats(
+            VertexStepMode::Instance,
+            vec![
+                // transform
+                VertexFormat::Float32x4,
                 // color
                 VertexFormat::Float32x4,
-                // target rect size
-                VertexFormat::Float32x2,
                 // corner radius x values (top left, top right, bottom right, bottom left)
                 VertexFormat::Float32x4,
                 // corner radius y values (top left, top right, bottom right, bottom left)
                 VertexFormat::Float32x4,
+                // translation
+                VertexFormat::Float32x2,
+                // inner size
+                VertexFormat::Float32x2,
+                // outer bounds
+                VertexFormat::Float32x2,
                 // blur radius
                 VertexFormat::Float32,
-                // outer size
-                VertexFormat::Float32x2,
             ],
-        );
+        )
+        .offset_locations_by(1);
+        // Account for padding.
+        instance_layout.array_stride += 4;
+
         let shader_defs = vec![ShaderDefVal::UInt("SHADOW_SAMPLES".into(), key.samples)];
 
         RenderPipelineDescriptor {
             vertex: VertexState {
                 shader: self.shader.clone(),
                 shader_defs: shader_defs.clone(),
-                buffers: vec![vertex_layout],
+                buffers: vec![vertex_layout, instance_layout],
                 ..default()
             },
             fragment: Some(FragmentState {
@@ -201,7 +205,6 @@ impl UiRenderObject for ExtractedBoxShadow {
     type ViewQueryData = Option<&'static BoxShadowSamples>;
     type SpecializedRenderPipeline = BoxShadowPipeline;
     type PipelineKeySystemParam = ();
-    type Vertex = BoxShadowVertex;
     type InstanceData = BoxShadowInstanceData;
     type TexturedGpuAsset = GpuImage;
 
@@ -254,52 +257,19 @@ impl UiRenderObject for ExtractedBoxShadow {
         let rect_size = self.bounds;
 
         // Specify the corners of the node
-        let positions =
+        out_quad.positions =
             QUAD_VERTEX_POSITIONS.map(|pos| self.transform.transform_point2(pos * rect_size));
 
-        // Interpolate UVs.
-        let uvs = [
-            Vec2::ZERO,
-            Vec2::new(self.bounds.x, 0.),
-            self.bounds,
-            Vec2::new(0., self.bounds.y),
-        ]
-        .map(|pos| pos / self.bounds);
-
         out_quad.instance_data = BoxShadowInstanceData {
+            world_from_local: pack_transform(self.transform.matrix2, rect_size),
             color: self.color.to_vec4(),
-            size: self.size,
             radius: self.radius.into(),
-            blur: self.blur_radius,
+            translation: self.transform.translation,
+            size: self.size,
             bounds: rect_size,
+            blur: self.blur_radius,
+            pad: default(),
         };
-
-        // Write out the quad data.
-        for (&mut (ref mut out_position, ref mut out_interpolants), (position, uv)) in out_quad
-            .vertices
-            .iter_mut()
-            .zip(positions.iter().zip(uvs.iter()))
-        {
-            *out_position = *position;
-            out_interpolants.uv = *uv;
-            out_interpolants.point = default();
-        }
-    }
-
-    fn create_vertex(
-        quad: &crate::UiQuad<Self::InstanceData>,
-        position: Vec2,
-        uvs: &crate::UiQuadInterpolants,
-    ) -> Self::Vertex {
-        BoxShadowVertex {
-            position: position.extend(0.0).into(),
-            uvs: uvs.uv.into(),
-            vertex_color: quad.instance_data.color.into(),
-            size: quad.instance_data.size.into(),
-            radius: quad.instance_data.radius.map(Into::into),
-            blur: quad.instance_data.blur,
-            bounds: quad.instance_data.bounds.into(),
-        }
     }
 }
 

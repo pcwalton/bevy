@@ -45,56 +45,53 @@ fn enabled(flags: u32, mask: u32) -> bool {
 @group(0) @binding(0) var<uniform> view: View;
 
 struct GradientVertexOutput {
-    @location(0) uv: vec2<f32>,
-    @location(1) @interpolate(flat) size: vec2<f32>,
-    @location(2) @interpolate(flat) flags: u32,
-    @location(3) @interpolate(flat) radius_x: vec4<f32>,
-    @location(4) @interpolate(flat) radius_y: vec4<f32>,
-    @location(5) @interpolate(flat) border: vec4<f32>,
+    @location(0) @interpolate(flat) size: vec2<f32>,
+    @location(1) @interpolate(flat) flags: u32,
+    @location(2) @interpolate(flat) radius_x: vec4<f32>,
+    @location(3) @interpolate(flat) radius_y: vec4<f32>,
+    @location(4) @interpolate(flat) border: vec4<f32>,
 
     // Position relative to the center of the rectangle.
-    @location(6) point: vec2<f32>,
-    @location(7) @interpolate(flat) g_start: vec2<f32>,
-    @location(8) @interpolate(flat) dir: vec2<f32>,
-    @location(9) @interpolate(flat) start_color: vec4<f32>,
-    @location(10) @interpolate(flat) start_len: f32,
-    @location(11) @interpolate(flat) end_len: f32,
-    @location(12) @interpolate(flat) end_color: vec4<f32>,
-    @location(13) @interpolate(flat) hint: f32,
+    @location(5) point: vec2<f32>,
+    @location(6) @interpolate(flat) g_start: vec2<f32>,
+    @location(7) @interpolate(flat) dir: vec2<f32>,
+    @location(8) @interpolate(flat) start_color: vec4<f32>,
+    @location(9) @interpolate(flat) start_len: f32,
+    @location(10) @interpolate(flat) end_len: f32,
+    @location(11) @interpolate(flat) end_color: vec4<f32>,
+    @location(12) @interpolate(flat) hint: f32,
     @builtin(position) position: vec4<f32>,
 };
 
 @vertex
 fn vertex(
-    @location(0) vertex_position: vec3<f32>,
-    @location(1) vertex_uv: vec2<f32>,
-    @location(2) flags: u32,
-
-    // x: top left, y: top right, z: bottom right, w: bottom left.
-    @location(3) radius_x: vec4<f32>,
-    @location(4) radius_y: vec4<f32>,
-
+    @location(0) vertex_position: vec2<f32>,
+    @location(1) world_from_local: vec4<f32>,
+    @location(2) @interpolate(flat) radius_x: vec4<f32>,
+    @location(3) @interpolate(flat) radius_y: vec4<f32>,
     // x: left, y: top, z: right, w: bottom.
-    @location(5) border: vec4<f32>,
-    @location(6) size: vec2<f32>,
-    @location(7) point: vec2<f32>,
-    @location(8) @interpolate(flat) g_start: vec2<f32>,
-    @location(9) @interpolate(flat) dir: vec2<f32>,
-    @location(10) @interpolate(flat) start_color: vec4<f32>,
+    @location(4) @interpolate(flat) border: vec4<f32>,
+    @location(5) @interpolate(flat) start_color: vec4<f32>,
+    @location(6) @interpolate(flat) end_color: vec4<f32>,
+    @location(7) @interpolate(flat) translation: vec2<f32>,
+    @location(8) @interpolate(flat) size: vec2<f32>,
+    @location(9) @interpolate(flat) g_start: vec2<f32>,
+    @location(10) @interpolate(flat) dir: vec2<f32>,
     @location(11) @interpolate(flat) start_len: f32,
     @location(12) @interpolate(flat) end_len: f32,
-    @location(13) @interpolate(flat) end_color: vec4<f32>,
-    @location(14) @interpolate(flat) hint: f32
+    @location(13) @interpolate(flat) hint: f32,
+    @location(14) flags: u32,
 ) -> GradientVertexOutput {
     var out: GradientVertexOutput;
-    out.position = view.clip_from_world * vec4(vertex_position, 1.0);
-    out.uv = vertex_uv;
+    let world_position = mat2x2<f32>(world_from_local.xy, world_from_local.zw) * vertex_position +
+        translation;
+    out.position = view.clip_from_world * vec4(world_position, 0.0, 1.0);
     out.size = size;
     out.flags = flags;
     out.radius_x = radius_x;
     out.radius_y = radius_y;
     out.border = border;
-    out.point = point;
+    out.point = vertex_position * size;
     out.dir = dir;
     out.start_color = start_color;
     out.start_len = start_len;
