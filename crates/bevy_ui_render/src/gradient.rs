@@ -350,6 +350,7 @@ impl UiRenderObject for ExtractedGradient {
         out_quad: &mut UiQuad<Self::InstanceData>,
         index: usize,
         _: Option<&GpuImage>,
+        _: u32,
     ) {
         let uinode_rect = self.rect;
 

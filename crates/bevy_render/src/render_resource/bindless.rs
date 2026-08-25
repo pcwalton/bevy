@@ -91,6 +91,7 @@ pub enum BindlessSlabResourceLimit {
 /// of the base material and the material extension at runtime.
 ///
 /// This structure will only be present if this object is bindless.
+#[derive(Clone)]
 pub struct BindlessDescriptor {
     /// The bindless resource types that this object uses, in order of bindless
     /// index.

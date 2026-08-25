@@ -1,5 +1,9 @@
 import bevy_render::view::View;
 import bevy_render::globals::Globals;
+import bevy_render::bindless::{bindless_samplers_filtering, bindless_textures_2d};
+
+@if(BINDLESS)
+enable wgpu_binding_array;
 
 struct UiTextureSliceInstance {
     world_from_local: vec4<f32>,
@@ -9,8 +13,8 @@ struct UiTextureSliceInstance {
     repeat: vec4<f32>,
     atlas_rect: vec4<f32>,
     translation: vec2<f32>,
-    pad_a: u32,
-    pad_b: u32,
+    textured_bind_group_slot: u32,
+    pad: u32,
 }
 
 @group(0) @binding(0)
@@ -18,8 +22,17 @@ var<uniform> view: View;
 @group(0) @binding(1)
 var<uniform> globals: Globals;
 
-@group(1) @binding(0) var sprite_texture: texture_2d<f32>;
-@group(1) @binding(1) var sprite_sampler: sampler;
+@if(BINDLESS) {
+    struct UiTextureSliceBindlessIndices {
+        sprite_texture: u32,
+        sprite_sampler: u32,
+    }
+
+    @group(1) @binding(0) var<storage> sprite_bindless_indices: array<UiTextureSliceBindlessIndices>;
+} @else {
+    @group(1) @binding(0) var sprite_texture: texture_2d<f32>;
+    @group(1) @binding(1) var sprite_sampler: sampler;
+}
 
 @if(RETAINED_INSTANCES)
 @group(2) @binding(0) var<storage, read> instances: array<UiTextureSliceInstance>;
@@ -55,6 +68,10 @@ struct UiVertexOutput {
     // x, y = top, left corner of the atlas rect
     // z, w = bottom, right corner of the atlas rect
     @location(5) @interpolate(flat) atlas_rect: vec4<f32>,
+
+    @if(BINDLESS)
+    @location(6) @interpolate(flat) textured_bind_group_slot: u32,
+
     @builtin(position) position: vec4<f32>,
 }
 
@@ -69,6 +86,8 @@ fn compute_vertex(vertex_position: vec2<f32>, instance: UiTextureSliceInstance) 
     out.target_slices = instance.target_slices;
     out.repeat = instance.repeat;
     out.atlas_rect = instance.atlas_rect;
+    @if(BINDLESS)
+    out.textured_bind_group_slot = instance.textured_bind_group_slot;
     return out;
 }
 
@@ -162,5 +181,15 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     // map the slice coords to texture coords
     let atlas_uv = in.atlas_rect.xy + uv * (in.atlas_rect.zw - in.atlas_rect.xy);
 
-    return in.color * textureSample(sprite_texture, sprite_sampler, atlas_uv);
+    @if(BINDLESS) {
+        let slot = in.textured_bind_group_slot;
+        let sprite_color = textureSample(
+            bindless_textures_2d[sprite_bindless_indices[slot].sprite_texture],
+            bindless_samplers_filtering[sprite_bindless_indices[slot].sprite_sampler],
+            atlas_uv
+        );
+    } @else {
+        let sprite_color = textureSample(sprite_texture, sprite_sampler, atlas_uv);
+    }
+    return in.color * sprite_color;
 }

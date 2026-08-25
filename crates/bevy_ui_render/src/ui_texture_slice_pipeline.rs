@@ -17,12 +17,13 @@ use bevy_render::{
     Extract, ExtractSchedule, Render, RenderSystems,
 };
 use bevy_render::{sync_world::MainEntity, GpuResourceAppExt, RenderStartup};
-use bevy_shader::Shader;
+use bevy_shader::{Shader, ShaderDefVal};
 use bevy_sprite::{SliceScaleMode, SpriteImageMode, TextureSlicer};
 use bevy_ui::widget::NodeImageMode;
 use bevy_ui::{ComputedStackIndex, VisualBox};
 use bevy_utils::default;
 use binding_types::{sampler, texture_2d};
+use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 
 pub struct UiTextureSlicerPlugin;
@@ -38,7 +39,11 @@ impl Plugin for UiTextureSlicerPlugin {
                 .init_gpu_resource::<UiMeta<ExtractedUiTextureSlice>>()
                 .init_gpu_resource::<UiTexturedBindGroups<ExtractedUiTextureSlice>>()
                 .init_gpu_resource::<SpecializedRenderPipelines<UiTextureSlicePipeline>>()
-                .add_systems(RenderStartup, init_ui_texture_slice_pipeline)
+                .add_systems(
+                    RenderStartup,
+                    init_ui_texture_slice_pipeline
+                        .after(init_gpu_resource::<UiTexturedBindGroups<ExtractedUiTextureSlice>>),
+                )
                 .add_systems(
                     ExtractSchedule,
                     extract_ui_texture_slices.in_set(RenderUiSystems::ExtractTextureSlice),
@@ -65,7 +70,8 @@ pub struct UiTextureSliceInstanceData {
     pub repeat: Vec4,
     pub atlas: Vec4,
     pub translation: Vec2,
-    pub pad: Vec2,
+    pub textured_bind_group_slot: u32,
+    pub pad: u32,
 }
 
 #[derive(Resource, Default)]
@@ -77,11 +83,26 @@ pub struct UiTextureSliceImageBindGroups {
 pub struct UiTextureSlicePipeline {
     pub view_layout: BindGroupLayoutDescriptor,
     pub instances_layout: BindGroupLayoutDescriptor,
-    pub image_layout: BindGroupLayoutDescriptor,
+    pub textured_bindless_layout: BindGroupLayoutDescriptor,
+    pub textured_non_bindless_layout: BindGroupLayoutDescriptor,
     pub shader: Handle<Shader>,
 }
 
-pub fn init_ui_texture_slice_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
+impl UiTextureSlicePipeline {
+    pub fn textured_bind_group_layout(&self, is_bindless: bool) -> &BindGroupLayoutDescriptor {
+        if is_bindless {
+            &self.textured_bindless_layout
+        } else {
+            &self.textured_non_bindless_layout
+        }
+    }
+}
+
+pub fn init_ui_texture_slice_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    textured_bind_groups: Res<UiTexturedBindGroups<ExtractedUiTextureSlice>>,
+) {
     let view_layout = BindGroupLayoutDescriptor::new(
         "ui_texture_slice_view_layout",
         &BindGroupLayoutEntries::single(
@@ -98,8 +119,8 @@ pub fn init_ui_texture_slice_pipeline(mut commands: Commands, asset_server: Res<
         ),
     );
 
-    let image_layout = BindGroupLayoutDescriptor::new(
-        "ui_texture_slice_image_layout",
+    let textured_non_bindless_layout = BindGroupLayoutDescriptor::new(
+        "ui_texture_slice_non_bindless_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::FRAGMENT,
             (
@@ -112,7 +133,8 @@ pub fn init_ui_texture_slice_pipeline(mut commands: Commands, asset_server: Res<
     commands.insert_resource(UiTextureSlicePipeline {
         view_layout,
         instances_layout,
-        image_layout,
+        textured_bindless_layout: textured_bind_groups.bindless_layout_descriptor().clone(),
+        textured_non_bindless_layout,
         shader: load_embedded_asset!(asset_server.as_ref(), "ui_texture_slice.wesl"),
     });
 }
@@ -120,7 +142,15 @@ pub fn init_ui_texture_slice_pipeline(mut commands: Commands, asset_server: Res<
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct UiTextureSlicePipelineKey {
     pub target_format: TextureFormat,
-    pub retained_instances: bool,
+    pub flags: UiTextureSlicePipelineFlags,
+}
+
+bitflags! {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub struct UiTextureSlicePipelineFlags: u8 {
+        const RETAINED_INSTANCES = 1 << 0;
+        const BINDLESS = 1 << 1;
+    }
 }
 
 impl SpecializedRenderPipeline for UiTextureSlicePipeline {
@@ -137,7 +167,10 @@ impl SpecializedRenderPipeline for UiTextureSlicePipeline {
 
         let mut instance_layout = VertexBufferLayout::from_vertex_formats(
             VertexStepMode::Instance,
-            if key.retained_instances {
+            if key
+                .flags
+                .contains(UiTextureSlicePipelineFlags::RETAINED_INSTANCES)
+            {
                 vec![
                     // instance index
                     VertexFormat::Uint32,
@@ -163,17 +196,36 @@ impl SpecializedRenderPipeline for UiTextureSlicePipeline {
         )
         .offset_locations_by(1);
         // Account for padding if needed.
-        if !key.retained_instances {
+        if !key
+            .flags
+            .contains(UiTextureSlicePipelineFlags::RETAINED_INSTANCES)
+        {
             instance_layout.array_stride += 8;
         }
 
         let mut shader_defs = Vec::new();
-        if key.retained_instances {
+        if key
+            .flags
+            .contains(UiTextureSlicePipelineFlags::RETAINED_INSTANCES)
+        {
             shader_defs.push("RETAINED_INSTANCES".into());
         }
+        if key.flags.contains(UiTextureSlicePipelineFlags::BINDLESS) {
+            shader_defs.push("BINDLESS".into());
+            shader_defs.push(ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 1));
+        }
 
-        let mut layout = vec![self.view_layout.clone(), self.image_layout.clone()];
-        if key.retained_instances {
+        let mut layout = vec![
+            self.view_layout.clone(),
+            self.textured_bind_group_layout(
+                key.flags.contains(UiTextureSlicePipelineFlags::BINDLESS),
+            )
+            .clone(),
+        ];
+        if key
+            .flags
+            .contains(UiTextureSlicePipelineFlags::RETAINED_INSTANCES)
+        {
             layout.push(self.instances_layout.clone());
         }
 
@@ -220,7 +272,10 @@ impl UiRenderObject for ExtractedUiTextureSlice {
     type ViewQueryData = ();
     type SpecializedRenderPipeline = UiTextureSlicePipeline;
     type ViewPipelineKeyBuilder = ();
-    type PipelineKeySystemParam = SRes<UiMeta<ExtractedUiTextureSlice>>;
+    type PipelineKeySystemParam = (
+        SRes<UiMeta<ExtractedUiTextureSlice>>,
+        SRes<UiTexturedBindGroups<ExtractedUiTextureSlice>>,
+    );
     type InstanceData = UiTextureSliceInstanceData;
     type TexturedGpuAsset = GpuImage;
 
@@ -235,12 +290,23 @@ impl UiRenderObject for ExtractedUiTextureSlice {
     fn create_pipeline_key(
         &self,
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
-        ui_meta: &mut SystemParamItem<Self::PipelineKeySystemParam>,
+        (ui_meta, textured_bind_groups): &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key> {
+        let mut flags = UiTextureSlicePipelineFlags::empty();
+        if matches!(ui_meta.instances, UiInstances::Retained { .. }) {
+            flags.insert(UiTextureSlicePipelineFlags::RETAINED_INSTANCES);
+        }
+        if textured_bind_groups.is_bindless() {
+            flags.insert(UiTextureSlicePipelineFlags::BINDLESS);
+        }
         Some(UiTextureSlicePipelineKey {
             target_format: cached_camera_view.extracted_view.target_format,
-            retained_instances: matches!(ui_meta.instances, UiInstances::Retained { .. }),
+            flags,
         })
+    }
+
+    fn bindless_descriptor() -> Option<BindlessDescriptor> {
+        Some(UI_TEXTURED_BINDLESS_DESCRIPTOR.clone())
     }
 
     fn bind_group_layouts(
@@ -258,20 +324,31 @@ impl UiRenderObject for ExtractedUiTextureSlice {
 
     fn textured_bind_group_layout(
         pipeline: &Self::SpecializedRenderPipeline,
+        is_bindless: bool,
     ) -> Option<&BindGroupLayoutDescriptor> {
-        Some(&pipeline.image_layout)
+        Some(pipeline.textured_bind_group_layout(is_bindless))
     }
 
-    fn get_or_create_textured_bind_group(
-        render_device: &RenderDevice,
-        layout: &BindGroupLayout,
+    fn populate_textured_bind_group_builder(
+        bind_group_builder: &mut BindGroupBuilder,
+        _: &RenderDevice,
+        _: &BindGroupLayoutDescriptor,
         gpu_image: &GpuImage,
-    ) -> Option<BindGroup> {
-        Some(render_device.create_bind_group(
-            "ui_material_texture_slice_bind_group",
-            layout,
-            &BindGroupEntries::sequential((&gpu_image.texture_view, &gpu_image.sampler)),
-        ))
+    ) {
+        bind_group_builder.push((
+            0,
+            UnpreparedBindingResource::TextureView(
+                TextureViewDimension::D2,
+                gpu_image.texture_view.clone(),
+            ),
+        ));
+        bind_group_builder.push((
+            1,
+            UnpreparedBindingResource::Sampler(
+                SamplerBindingType::Filtering,
+                gpu_image.sampler.clone(),
+            ),
+        ));
     }
 
     fn clip(&self) -> Option<&CalculatedClip> {
@@ -283,6 +360,7 @@ impl UiRenderObject for ExtractedUiTextureSlice {
         out_quad: &mut UiQuad<Self::InstanceData>,
         index: usize,
         gpu_image: Option<&GpuImage>,
+        textured_bind_group_slot: u32,
     ) {
         debug_assert_eq!(index, 0);
 
@@ -337,6 +415,7 @@ impl UiRenderObject for ExtractedUiTextureSlice {
             repeat: repeat.into(),
             atlas: atlas.into(),
             translation: self.transform.translation,
+            textured_bind_group_slot,
             pad: default(),
         };
     }
@@ -348,6 +427,7 @@ pub type ExtractedUiTextureSlices = UiRenderObjects<ExtractedUiTextureSlice>;
 pub fn extract_ui_texture_slices(
     mut commands: Commands,
     mut extracted_ui_slicers: ResMut<ExtractedUiTextureSlices>,
+    mut textured_bind_groups: ResMut<UiTexturedBindGroups<ExtractedUiTextureSlice>>,
     texture_atlases: Extract<Res<Assets<TextureAtlasLayout>>>,
     slicers_query: Extract<
         Query<
@@ -430,6 +510,7 @@ pub fn extract_ui_texture_slices(
             let changed = extracted_ui_slicers.changed.entry(main_entity).or_default();
             for (render_entity, _) in slices.drain(..) {
                 commands.entity(render_entity).despawn();
+                textured_bind_groups.free_material_binding(render_entity);
                 changed.push(ChangedUiObject {
                     render_entity,
                     camera_entity: prev_camera_entity,
@@ -539,6 +620,7 @@ pub fn extract_ui_texture_slices(
         let changed = extracted_ui_slicers.changed.entry(main_entity).or_default();
         for (render_entity, _) in extracted_nodes.drain(..) {
             commands.entity(render_entity).despawn();
+            textured_bind_groups.free_material_binding(render_entity);
             changed.push(ChangedUiObject {
                 render_entity,
                 camera_entity: prev_camera_entity,
