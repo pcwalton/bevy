@@ -6,7 +6,7 @@ use bevy_camera::{visibility::Visibility, Camera, RenderTarget};
 use bevy_color::{Alpha, Color};
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{prelude::*, system::SystemParam};
-use bevy_math::{Affine2, BVec2, Rect, UVec2, Vec2, Vec4, Vec4Swizzles};
+use bevy_math::{vec4, Affine2, BVec2, Rect, UVec2, Vec2, Vec4, Vec4Swizzles};
 use bevy_reflect::prelude::*;
 use bevy_sprite::BorderRect;
 use bevy_text::{EmSize, RemSize, DEFAULT_REM_SIZE_PX};
@@ -2963,19 +2963,26 @@ impl ResolvedBorderRadius {
 
 impl From<ResolvedBorderRadius> for [[f32; 4]; 2] {
     fn from(radius: ResolvedBorderRadius) -> Self {
+        let radius: [Vec4; 2] = radius.into();
+        radius.map(Into::into)
+    }
+}
+
+impl From<ResolvedBorderRadius> for [Vec4; 2] {
+    fn from(radius: ResolvedBorderRadius) -> Self {
         [
-            [
+            vec4(
                 radius.top_left.x,
                 radius.top_right.x,
                 radius.bottom_right.x,
                 radius.bottom_left.x,
-            ],
-            [
+            ),
+            vec4(
                 radius.top_left.y,
                 radius.top_right.y,
                 radius.bottom_right.y,
                 radius.bottom_left.y,
-            ],
+            ),
         ]
     }
 }
