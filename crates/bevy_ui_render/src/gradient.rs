@@ -16,7 +16,10 @@ use bevy_math::{Affine2, Vec2Swizzles};
 use bevy_mesh::VertexBufferLayout;
 use bevy_render::{
     render_phase::*,
-    render_resource::{binding_types::uniform_buffer, *},
+    render_resource::{
+        binding_types::{storage_buffer_read_only_sized, uniform_buffer},
+        *,
+    },
     view::*,
     Extract, ExtractSchedule, Render, RenderSystems,
 };
@@ -30,6 +33,7 @@ use bevy_ui::{
     ResolvedBorderRadius, Val,
 };
 use bevy_utils::default;
+use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 
 pub struct GradientPlugin;
@@ -75,6 +79,7 @@ impl Plugin for GradientPlugin {
 #[derive(Resource)]
 pub struct GradientPipeline {
     pub view_layout: BindGroupLayoutDescriptor,
+    pub instances_layout: BindGroupLayoutDescriptor,
     pub shader: Handle<Shader>,
 }
 
@@ -87,8 +92,17 @@ pub fn init_gradient_pipeline(mut commands: Commands, asset_server: Res<AssetSer
         ),
     );
 
+    let instances_layout = BindGroupLayoutDescriptor::new(
+        "ui_gradient_instances_layout",
+        &BindGroupLayoutEntries::single(
+            ShaderStages::VERTEX,
+            storage_buffer_read_only_sized(false, None),
+        ),
+    );
+
     commands.insert_resource(GradientPipeline {
         view_layout,
+        instances_layout,
         shader: load_embedded_asset!(asset_server.as_ref(), "gradient.wesl"),
     });
 }
@@ -115,9 +129,17 @@ pub fn compute_gradient_line_length(angle: f32, size: Vec2) -> f32 {
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct UiGradientPipelineKey {
-    anti_alias: bool,
     color_space: InterpolationColorSpace,
     pub target_format: TextureFormat,
+    flags: UiGradientPipelineKeyFlags,
+}
+
+bitflags! {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    struct UiGradientPipelineKeyFlags: u8 {
+        const ANTI_ALIAS = 1 << 0;
+        const RETAINED_INSTANCES = 1 << 1;
+    }
 }
 
 impl SpecializedRenderPipeline for GradientPipeline {
@@ -133,36 +155,46 @@ impl SpecializedRenderPipeline for GradientPipeline {
         );
         let instance_layout = VertexBufferLayout::from_vertex_formats(
             VertexStepMode::Instance,
-            vec![
-                // transform
-                VertexFormat::Float32x4,
-                // border radius x values (top left, top right, bottom right, bottom left)
-                VertexFormat::Float32x4,
-                // border radius y values (top left, top right, bottom right, bottom left)
-                VertexFormat::Float32x4,
-                // border
-                VertexFormat::Float32x4,
-                // start color
-                VertexFormat::Float32x4,
-                // end color
-                VertexFormat::Float32x4,
-                // transform translation
-                VertexFormat::Float32x2,
-                // size
-                VertexFormat::Float32x2,
-                // start_point
-                VertexFormat::Float32x2,
-                // dir
-                VertexFormat::Float32x2,
-                // start_len
-                VertexFormat::Float32,
-                // end_len
-                VertexFormat::Float32,
-                // hint
-                VertexFormat::Float32,
-                // flags
-                VertexFormat::Uint32,
-            ],
+            if key
+                .flags
+                .contains(UiGradientPipelineKeyFlags::RETAINED_INSTANCES)
+            {
+                vec![
+                    // instance index
+                    VertexFormat::Uint32,
+                ]
+            } else {
+                vec![
+                    // transform
+                    VertexFormat::Float32x4,
+                    // border radius x values (top left, top right, bottom right, bottom left)
+                    VertexFormat::Float32x4,
+                    // border radius y values (top left, top right, bottom right, bottom left)
+                    VertexFormat::Float32x4,
+                    // border
+                    VertexFormat::Float32x4,
+                    // start color
+                    VertexFormat::Float32x4,
+                    // end color
+                    VertexFormat::Float32x4,
+                    // transform translation
+                    VertexFormat::Float32x2,
+                    // size
+                    VertexFormat::Float32x2,
+                    // start_point
+                    VertexFormat::Float32x2,
+                    // dir
+                    VertexFormat::Float32x2,
+                    // start_len
+                    VertexFormat::Float32,
+                    // end_len
+                    VertexFormat::Float32,
+                    // hint
+                    VertexFormat::Float32,
+                    // flags
+                    VertexFormat::Uint32,
+                ]
+            },
         )
         .offset_locations_by(1);
         let color_space = match key.color_space {
@@ -179,11 +211,24 @@ impl SpecializedRenderPipeline for GradientPipeline {
             InterpolationColorSpace::HsvaLong => "IN_HSV_LONG",
         };
 
-        let shader_defs = if key.anti_alias {
-            vec![color_space.into(), "ANTI_ALIAS".into()]
-        } else {
-            vec![color_space.into()]
-        };
+        let mut shader_defs = vec![color_space.into()];
+        if key.flags.contains(UiGradientPipelineKeyFlags::ANTI_ALIAS) {
+            shader_defs.push("ANTI_ALIAS".into());
+        }
+        if key
+            .flags
+            .contains(UiGradientPipelineKeyFlags::RETAINED_INSTANCES)
+        {
+            shader_defs.push("RETAINED_INSTANCES".into());
+        }
+
+        let mut layout = vec![self.view_layout.clone()];
+        if key
+            .flags
+            .contains(UiGradientPipelineKeyFlags::RETAINED_INSTANCES)
+        {
+            layout.push(self.instances_layout.clone());
+        }
 
         RenderPipelineDescriptor {
             vertex: VertexState {
@@ -202,7 +247,7 @@ impl SpecializedRenderPipeline for GradientPipeline {
                 })],
                 ..default()
             }),
-            layout: vec![self.view_layout.clone()],
+            layout,
             label: Some("ui_gradient_pipeline".into()),
             ..default()
         }
@@ -238,7 +283,7 @@ impl UiRenderObject for ExtractedGradient {
     type ViewQueryData = Option<&'static UiAntiAlias>;
     type SpecializedRenderPipeline = GradientPipeline;
     type ViewPipelineKeyBuilder = UiGradientViewPipelineKeyBuilder;
-    type PipelineKeySystemParam = ();
+    type PipelineKeySystemParam = SRes<UiMeta<ExtractedGradient>>;
     type InstanceData = UiGradientInstanceData;
     type TexturedGpuAsset = GpuImage;
 
@@ -263,22 +308,33 @@ impl UiRenderObject for ExtractedGradient {
     fn create_pipeline_key(
         &self,
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
-        _: &mut SystemParamItem<Self::PipelineKeySystemParam>,
+        ui_meta: &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<UiGradientPipelineKey> {
+        let mut flags = UiGradientPipelineKeyFlags::empty();
+        if matches!(
+            cached_camera_view.pipeline_key_builder.anti_alias,
+            None | Some(UiAntiAlias::On)
+        ) {
+            flags.insert(UiGradientPipelineKeyFlags::ANTI_ALIAS);
+        }
+        if matches!(ui_meta.instances, UiInstances::Retained { .. }) {
+            flags.insert(UiGradientPipelineKeyFlags::RETAINED_INSTANCES);
+        }
+
         Some(UiGradientPipelineKey {
-            anti_alias: matches!(
-                cached_camera_view.pipeline_key_builder.anti_alias,
-                None | Some(UiAntiAlias::On)
-            ),
+            flags,
             color_space: self.color_space,
             target_format: cached_camera_view.extracted_view.target_format,
         })
     }
 
-    fn view_bind_group_layout(
+    fn bind_group_layouts(
         pipeline: &Self::SpecializedRenderPipeline,
-    ) -> &BindGroupLayoutDescriptor {
-        &pipeline.view_layout
+    ) -> UiRenderObjectBindGroupLayouts<'_> {
+        UiRenderObjectBindGroupLayouts {
+            view: &pipeline.view_layout,
+            instances: &pipeline.instances_layout,
+        }
     }
 
     fn clip(&self) -> Option<&CalculatedClip> {
@@ -920,7 +976,7 @@ fn convert_color_to_space(color: LinearRgba, space: InterpolationColorSpace) -> 
 pub type DrawGradientFns = (
     SetItemPipeline,
     SetUiViewBindGroup<ExtractedGradient, 0>,
-    DrawUiRenderObject<ExtractedGradient>,
+    DrawUiRenderObject<ExtractedGradient, 1>,
 );
 
 fn calculate_rendered_stop_indices(stops: &[(LinearRgba, f32, f32)]) -> Vec<u32> {

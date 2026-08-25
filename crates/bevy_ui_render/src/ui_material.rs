@@ -127,6 +127,7 @@ pub trait UiMaterial: AsBindGroup + Asset + Clone + Sized {
 
 pub struct UiMaterialKey<M: UiMaterial> {
     pub target_format: TextureFormat,
+    pub retained_instances: bool,
     pub bind_group_data: M::Data,
 }
 
@@ -148,6 +149,7 @@ where
     fn clone(&self) -> Self {
         Self {
             target_format: self.target_format,
+            retained_instances: self.retained_instances,
             bind_group_data: self.bind_group_data.clone(),
         }
     }

@@ -1,6 +1,18 @@
 import bevy_render::view::View;
 import bevy_render::globals::Globals;
 
+struct UiTextureSliceInstance {
+    world_from_local: vec4<f32>,
+    color: vec4<f32>,
+    texture_slices: vec4<f32>,
+    target_slices: vec4<f32>,
+    repeat: vec4<f32>,
+    atlas_rect: vec4<f32>,
+    translation: vec2<f32>,
+    pad_a: u32,
+    pad_b: u32,
+}
+
 @group(0) @binding(0)
 var<uniform> view: View;
 @group(0) @binding(1)
@@ -8,6 +20,9 @@ var<uniform> globals: Globals;
 
 @group(1) @binding(0) var sprite_texture: texture_2d<f32>;
 @group(1) @binding(1) var sprite_sampler: sampler;
+
+@if(RETAINED_INSTANCES)
+@group(2) @binding(0) var<storage, read> instances: array<UiTextureSliceInstance>;
 
 struct UiVertexOutput {
     @location(0) uv: vec2<f32>,
@@ -43,6 +58,29 @@ struct UiVertexOutput {
     @builtin(position) position: vec4<f32>,
 }
 
+fn compute_vertex(vertex_position: vec2<f32>, instance: UiTextureSliceInstance) -> UiVertexOutput {
+    var out: UiVertexOutput;
+    let world_position = mat2x2<f32>(instance.world_from_local.xy, instance.world_from_local.zw) *
+        vertex_position + instance.translation;
+    out.uv = vertex_position + vec2(0.5);
+    out.color = instance.color;
+    out.position = view.clip_from_world * vec4<f32>(world_position, 0.0, 1.0);
+    out.texture_slices = instance.texture_slices;
+    out.target_slices = instance.target_slices;
+    out.repeat = instance.repeat;
+    out.atlas_rect = instance.atlas_rect;
+    return out;
+}
+
+@if(RETAINED_INSTANCES)
+@vertex
+fn vertex(
+    @location(0) vertex_position: vec2<f32>,
+    @location(1) instance_index: u32
+) -> UiVertexOutput {
+    return compute_vertex(vertex_position, instances[instance_index]);
+}
+@else
 @vertex
 fn vertex(
     @location(0) vertex_position: vec2<f32>,
@@ -54,17 +92,15 @@ fn vertex(
     @location(6) @interpolate(flat) atlas_rect: vec4<f32>,
     @location(7) @interpolate(flat) translation: vec2<f32>,
 ) -> UiVertexOutput {
-    var out: UiVertexOutput;
-    let world_position = mat2x2<f32>(world_from_local.xy, world_from_local.zw) * vertex_position +
-        translation;
-    out.uv = vertex_position + vec2(0.5);
-    out.color = vertex_color;
-    out.position = view.clip_from_world * vec4<f32>(world_position, 0.0, 1.0);
-    out.texture_slices = texture_slices;
-    out.target_slices = target_slices;
-    out.repeat = repeat;
-    out.atlas_rect = atlas_rect;
-    return out;
+    var instance: UiTextureSliceInstance;
+    instance.world_from_local = world_from_local;
+    instance.color = vertex_color;
+    instance.texture_slices = texture_slices;
+    instance.target_slices = target_slices;
+    instance.repeat = repeat;
+    instance.atlas_rect = atlas_rect;
+    instance.translation = translation;
+    return compute_vertex(vertex_position, instance);
 }
 
 /// maps a point along the axis of the render target to slice coordinates
