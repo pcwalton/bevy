@@ -1,13 +1,11 @@
 use crate::ui_material::{MaterialNode, UiMaterial, UiMaterialKey};
 use crate::*;
 use bevy_asset::*;
-use bevy_ecs::system::{
-    lifetimeless::{SRes, SResMut},
-    *,
-};
+use bevy_ecs::system::lifetimeless::SResMut;
+use bevy_ecs::system::{lifetimeless::SRes, *};
 use bevy_math::{vec4, Affine2, FloatOrd, Rect, Vec2, Vec4};
 use bevy_mesh::VertexBufferLayout;
-use bevy_render::material_bind_groups::FallbackBuffer;
+use bevy_render::material_bind_groups::{FallbackBuffer, MaterialBindingId};
 use bevy_render::storage::GpuShaderBuffer;
 use bevy_render::{
     globals::GlobalsUniform,
@@ -322,10 +320,8 @@ where
         self.material
     }
 
-    fn textured_bind_group_layout(
-        pipeline: &Self::SpecializedRenderPipeline,
-    ) -> Option<&BindGroupLayoutDescriptor> {
-        Some(&pipeline.ui_layout)
+    fn textured_binding_id(gpu_asset: &PreparedUiMaterial<M>) -> Option<MaterialBindingId> {
+        Some(gpu_asset.binding)
     }
 
     fn clip(&self) -> Option<&CalculatedClip> {
@@ -338,6 +334,7 @@ where
         index: usize,
         _: &RenderAssets<Self::TexturedGpuAsset>,
         _: &AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset>,
+        _: u32,
     ) {
         debug_assert_eq!(index, 0);
 
@@ -548,11 +545,19 @@ pub fn extract_ui_material_nodes<M>(
 }
 
 pub struct PreparedUiMaterial<T: UiMaterial> {
-    pub bindings: BindingResources,
+    pub binding: MaterialBindingId,
     pub key: T::Data,
 }
 
-impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M> {
+impl<M: UiMaterial> UiTexturedRenderAsset for PreparedUiMaterial<M> where
+    M::Data: PartialEq + Eq + Hash + Clone
+{
+}
+
+impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M>
+where
+    M::Data: PartialEq + Eq + Hash + Clone,
+{
     type SourceAsset = M;
 
     type Param = (
@@ -567,64 +572,39 @@ impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M> {
 
     fn prepare_asset(
         material: Self::SourceAsset,
-        id: AssetId<Self::SourceAsset>,
+        material_id: AssetId<Self::SourceAsset>,
         (
             render_device,
             pipeline_cache,
             fallback_buffer,
             shader_buffer_assets,
             pipeline,
-            bind_groups,
+            textured_bind_groups,
             material_param,
         ): &mut SystemParamItem<Self::Param>,
         _: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
         let bind_group_data = material.bind_group_data();
-        match material.as_bind_group(
-            &pipeline.ui_layout.clone(),
+        let binding = textured_bind_groups.prepare_ui_material_binding(
+            &material,
+            material_id,
+            material_param,
+            &pipeline.ui_layout,
             render_device,
             pipeline_cache,
             fallback_buffer,
             shader_buffer_assets,
-            material_param,
-        ) {
-            Ok(prepared) => {
-                // Insert the bind group into the [`UiTexturedBindGroups`]
-                // resource.
-                bind_groups.values.insert(id, prepared.bind_group);
-                Ok(PreparedUiMaterial {
-                    bindings: prepared.bindings,
-                    key: bind_group_data,
-                })
-            }
-            Err(AsBindGroupError::RetryNextUpdate) => {
-                Err(PrepareAssetError::RetryNextUpdate(material))
-            }
-            Err(other) => Err(PrepareAssetError::AsBindGroupError(other)),
-        }
+        )?;
+        Ok(PreparedUiMaterial {
+            binding,
+            key: bind_group_data,
+        })
     }
 
     fn unload_asset(
         source_asset: AssetId<Self::SourceAsset>,
-        (_, _, _, _, _, bind_groups, _): &mut SystemParamItem<Self::Param>,
+        (_, _, _, _, _, textured_bind_groups, _): &mut SystemParamItem<Self::Param>,
     ) {
-        // Remove the bind group from the [`UiTexturedBindGroups`] resource.
-        bind_groups.values.remove(&source_asset);
-    }
-}
-
-impl<M> UiTexturedRenderAsset for PreparedUiMaterial<M>
-where
-    M: UiMaterial,
-{
-    fn create_textured_bind_group(
-        _: &RenderDevice,
-        _: &BindGroupLayout,
-        _: &RenderAssets<Self>,
-        _: &AssetId<<Self as RenderAsset>::SourceAsset>,
-    ) -> Option<BindGroup> {
-        // This should ordinarily never be called, as UI materials are prepared
-        // during [`RenderAsset::prepare_asset`].`
-        None
+        textured_bind_groups.free_ui_material_binding(source_asset.untyped());
     }
 }

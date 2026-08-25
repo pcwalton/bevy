@@ -774,6 +774,12 @@ impl MaterialBindGroupAllocator {
             Self::NonBindless(_) => 0,
         }
     }
+
+    /// Returns true if this [`MaterialBindGroupAllocator`] is in bindless mode
+    /// or false otherwise.
+    pub fn is_bindless(&self) -> bool {
+        matches!(*self, MaterialBindGroupAllocator::Bindless(..))
+    }
 }
 
 impl MaterialBindlessIndexTable {

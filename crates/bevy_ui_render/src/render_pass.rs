@@ -216,19 +216,22 @@ where
         textured_bind_groups: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let textured_bind_groups = textured_bind_groups.into_inner();
         let Some(batch) = batch else {
             return RenderCommandResult::Skip;
         };
 
-        pass.set_bind_group(
-            I,
-            textured_bind_groups
-                .values
-                .get(&batch.textured_asset_id)
-                .unwrap(),
-            &[],
-        );
+        let Some(slab) = textured_bind_groups
+            .into_inner()
+            .allocator
+            .get(batch.textured_bind_group_index)
+        else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(bind_group) = slab.bind_group() else {
+            return RenderCommandResult::Skip;
+        };
+
+        pass.set_bind_group(I, bind_group, &[]);
         RenderCommandResult::Success
     }
 }
