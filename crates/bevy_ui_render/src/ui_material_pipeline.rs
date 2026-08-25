@@ -10,7 +10,10 @@ use bevy_render::{
     globals::GlobalsUniform,
     render_asset::{PrepareAssetError, RenderAsset, RenderAssetPlugin, RenderAssets},
     render_phase::*,
-    render_resource::{binding_types::uniform_buffer, *},
+    render_resource::{
+        binding_types::{storage_buffer_read_only_sized, uniform_buffer},
+        *,
+    },
     renderer::RenderDevice,
     sync_world::MainEntity,
     view::*,
@@ -102,6 +105,7 @@ pub struct ExtractedUiMaterialNodeInstanceData {
 pub struct UiMaterialPipeline<M: UiMaterial> {
     pub ui_layout: BindGroupLayoutDescriptor,
     pub view_layout: BindGroupLayoutDescriptor,
+    pub instances_layout: BindGroupLayoutDescriptor,
     pub vertex_shader: Handle<Shader>,
     pub fragment_shader: Handle<Shader>,
     marker: PhantomData<M>,
@@ -123,26 +127,38 @@ where
         );
         let instance_layout = VertexBufferLayout::from_vertex_formats(
             VertexStepMode::Instance,
-            vec![
-                // transform
-                VertexFormat::Float32x4,
-                // border widths
-                VertexFormat::Float32x4,
-                // border radius x values (top left, top right, bottom right, bottom left)
-                VertexFormat::Float32x4,
-                // border radius y values (top left, top right, bottom right, bottom left)
-                VertexFormat::Float32x4,
-                // size
-                VertexFormat::Float32x2,
-                // translation
-                VertexFormat::Float32x2,
-                // UV scale
-                VertexFormat::Float32x2,
-                // UV offset
-                VertexFormat::Float32x2,
-            ],
-        ).offset_locations_by(1);
-        let shader_defs = Vec::new();
+            if key.retained_instances {
+                vec![
+                    // instance index
+                    VertexFormat::Uint32,
+                ]
+            } else {
+                vec![
+                    // transform
+                    VertexFormat::Float32x4,
+                    // border widths
+                    VertexFormat::Float32x4,
+                    // border radius x values (top left, top right, bottom right, bottom left)
+                    VertexFormat::Float32x4,
+                    // border radius y values (top left, top right, bottom right, bottom left)
+                    VertexFormat::Float32x4,
+                    // size
+                    VertexFormat::Float32x2,
+                    // translation
+                    VertexFormat::Float32x2,
+                    // UV scale
+                    VertexFormat::Float32x2,
+                    // UV offset
+                    VertexFormat::Float32x2,
+                ]
+            },
+        )
+        .offset_locations_by(1);
+
+        let mut shader_defs = vec![];
+        if key.retained_instances {
+            shader_defs.push("RETAINED_INSTANCES".into());
+        }
 
         let mut descriptor = RenderPipelineDescriptor {
             vertex: VertexState {
@@ -166,6 +182,9 @@ where
         };
 
         descriptor.layout = vec![self.view_layout.clone(), self.ui_layout.clone()];
+        if key.retained_instances {
+            descriptor.layout.push(self.instances_layout.clone());
+        }
 
         M::specialize(&mut descriptor, key);
 
@@ -191,11 +210,20 @@ pub fn init_ui_material_pipeline<M: UiMaterial>(
         ),
     );
 
+    let instances_layout = BindGroupLayoutDescriptor::new(
+        "ui_material_instances_layout",
+        &BindGroupLayoutEntries::single(
+            ShaderStages::VERTEX,
+            storage_buffer_read_only_sized(false, None),
+        ),
+    );
+
     let load_default = || load_embedded_asset!(asset_server.as_ref(), "ui_material.wesl");
 
     commands.insert_resource(UiMaterialPipeline::<M> {
         ui_layout,
         view_layout,
+        instances_layout,
         vertex_shader: match M::vertex_shader() {
             ShaderRef::Default => load_default(),
             ShaderRef::Handle(handle) => handle,
@@ -214,7 +242,7 @@ pub type DrawUiMaterial<M> = (
     SetItemPipeline,
     SetUiViewBindGroup<ExtractedUiMaterialNode<M>, 0>,
     SetUiTextureBindGroup<ExtractedUiMaterialNode<M>, 1>,
-    DrawUiRenderObject<ExtractedUiMaterialNode<M>>,
+    DrawUiRenderObject<ExtractedUiMaterialNode<M>, 2>,
 );
 
 pub struct ExtractedUiMaterialNode<M: UiMaterial> {
@@ -239,7 +267,10 @@ where
     type ViewPipelineKeyBuilder = ();
     type ViewQueryData = ();
     type SpecializedRenderPipeline = UiMaterialPipeline<M>;
-    type PipelineKeySystemParam = Res<'static, RenderAssets<PreparedUiMaterial<M>>>;
+    type PipelineKeySystemParam = (
+        Res<'static, UiMeta<ExtractedUiMaterialNode<M>>>,
+        Res<'static, RenderAssets<PreparedUiMaterial<M>>>,
+    );
     type InstanceData = ExtractedUiMaterialNodeInstanceData;
     type TexturedGpuAsset = PreparedUiMaterial<M>;
 
@@ -254,23 +285,27 @@ where
     fn create_pipeline_key(
         &self,
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
-        render_materials: &mut SystemParamItem<Self::PipelineKeySystemParam>,
+        (ui_meta, render_materials): &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key> {
         render_materials
             .get(self.material)
             .map(|material| UiMaterialKey {
                 target_format: cached_camera_view.extracted_view.target_format,
                 bind_group_data: material.key.clone(),
+                retained_instances: matches!(ui_meta.instances, UiInstances::Retained { .. }),
             })
     }
 
-    fn view_bind_group_layout(
-        pipeline: &Self::SpecializedRenderPipeline,
-    ) -> &BindGroupLayoutDescriptor {
-        &pipeline.view_layout
-    }
-
     const NEEDS_GLOBALS_UNIFORM: bool = true;
+
+    fn bind_group_layouts(
+        pipeline: &Self::SpecializedRenderPipeline,
+    ) -> UiRenderObjectBindGroupLayouts<'_> {
+        UiRenderObjectBindGroupLayouts {
+            view: &pipeline.view_layout,
+            instances: &pipeline.instances_layout,
+        }
+    }
 
     fn textured_asset_id(&self) -> AssetId<M> {
         self.material

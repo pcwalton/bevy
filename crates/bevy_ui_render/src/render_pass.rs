@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 
 use super::{UiBatch, UiMeta, UiTexturedBindGroups, UiViewTarget};
 
-use crate::{ExtractedUiNode, UiCameraView, UiRenderObject};
+use crate::{ExtractedUiNode, UiCameraView, UiInstances, UiRenderObject};
 use bevy_ecs::{
     entity::EntityHash,
     prelude::*,
@@ -159,7 +159,7 @@ pub type DrawUi = (
     SetItemPipeline,
     SetUiViewBindGroup<ExtractedUiNode, 0>,
     SetUiTextureBindGroup<ExtractedUiNode, 1>,
-    DrawUiRenderObject<ExtractedUiNode>,
+    DrawUiRenderObject<ExtractedUiNode, 2>,
 );
 
 pub struct SetUiViewBindGroup<E, const I: usize>(PhantomData<E>)
@@ -223,10 +223,11 @@ where
     }
 }
 
-pub struct DrawUiRenderObject<E>(PhantomData<E>)
+pub struct DrawUiRenderObject<E, const INSTANCES_BIND_GROUP: usize>(PhantomData<E>)
 where
     E: UiRenderObject;
-impl<E, P: PhaseItem> RenderCommand<P> for DrawUiRenderObject<E>
+impl<E, P: PhaseItem, const INSTANCES_BIND_GROUP: usize> RenderCommand<P>
+    for DrawUiRenderObject<E, INSTANCES_BIND_GROUP>
 where
     E: UiRenderObject,
 {
@@ -252,14 +253,37 @@ where
         let Some(indices) = ui_meta.indices.buffer() else {
             return RenderCommandResult::Failure("missing indices to draw ui");
         };
-        let Some(instances) = ui_meta.instances.buffer() else {
-            return RenderCommandResult::Failure("missing instances to draw ui");
-        };
 
         // Store the vertices
         pass.set_vertex_buffer(0, vertices.slice(..));
-        // Store the per-instance data
-        pass.set_vertex_buffer(1, instances.slice(..));
+
+        match ui_meta.instances {
+            UiInstances::Retained {
+                ref instance_index_buffer,
+                ref bind_group,
+                ..
+            } => {
+                let Some(instance_index_buffer) = instance_index_buffer.buffer() else {
+                    return RenderCommandResult::Failure(
+                        "missing instance index buffer to draw ui",
+                    );
+                };
+                let Some(bind_group) = bind_group.as_ref() else {
+                    return RenderCommandResult::Failure(
+                        "missing retained instance bind group to draw ui",
+                    );
+                };
+                pass.set_vertex_buffer(1, instance_index_buffer.slice(..));
+                pass.set_bind_group(INSTANCES_BIND_GROUP, bind_group, &[]);
+            }
+            UiInstances::Immediate { ref instances } => {
+                let Some(instances) = instances.buffer() else {
+                    return RenderCommandResult::Failure("missing instances to draw ui");
+                };
+                pass.set_vertex_buffer(1, instances.slice(..));
+            }
+        }
+
         // Define how to "connect" the vertices
         pass.set_index_buffer(
             indices.slice(..),
