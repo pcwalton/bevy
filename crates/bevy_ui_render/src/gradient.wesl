@@ -42,7 +42,27 @@ fn enabled(flags: u32, mask: u32) -> bool {
     return (flags & mask) != 0u;
 }
 
+struct GradientInstance {
+    world_from_local: vec4<f32>,
+    radius_x: vec4<f32>,
+    radius_y: vec4<f32>,
+    border: vec4<f32>,
+    start_color: vec4<f32>,
+    end_color: vec4<f32>,
+    translation: vec2<f32>,
+    size: vec2<f32>,
+    g_start: vec2<f32>,
+    g_dir: vec2<f32>,
+    start_len: f32,
+    end_len: f32,
+    hint: f32,
+    flags: u32,
+}
+
 @group(0) @binding(0) var<uniform> view: View;
+
+@if(RETAINED_INSTANCES)
+@group(1) @binding(0) var<storage, read> instances: array<GradientInstance>;
 
 struct GradientVertexOutput {
     @location(0) @interpolate(flat) size: vec2<f32>,
@@ -63,6 +83,39 @@ struct GradientVertexOutput {
     @builtin(position) position: vec4<f32>,
 };
 
+fn compute_vertex(vertex_position: vec2<f32>, instance: GradientInstance) -> GradientVertexOutput {
+    var out: GradientVertexOutput;
+    let world_position = mat2x2<f32>(
+        instance.world_from_local.xy,
+        instance.world_from_local.zw
+    ) * vertex_position + instance.translation;
+    out.position = view.clip_from_world * vec4(world_position, 0.0, 1.0);
+    out.size = instance.size;
+    out.flags = instance.flags;
+    out.radius_x = instance.radius_x;
+    out.radius_y = instance.radius_y;
+    out.border = instance.border;
+    out.point = vertex_position * instance.size;
+    out.dir = instance.g_dir;
+    out.start_color = instance.start_color;
+    out.start_len = instance.start_len;
+    out.end_len = instance.end_len;
+    out.end_color = instance.end_color;
+    out.g_start = instance.g_start;
+    out.hint = instance.hint;
+
+    return out;
+}
+
+@if(RETAINED_INSTANCES)
+@vertex
+fn vertex(
+    @location(0) vertex_position: vec2<f32>,
+    @location(1) instance_index: u32
+) -> GradientVertexOutput {
+    return compute_vertex(vertex_position, instances[instance_index]);
+}
+@else
 @vertex
 fn vertex(
     @location(0) vertex_position: vec2<f32>,
@@ -82,25 +135,22 @@ fn vertex(
     @location(13) @interpolate(flat) hint: f32,
     @location(14) flags: u32,
 ) -> GradientVertexOutput {
-    var out: GradientVertexOutput;
-    let world_position = mat2x2<f32>(world_from_local.xy, world_from_local.zw) * vertex_position +
-        translation;
-    out.position = view.clip_from_world * vec4(world_position, 0.0, 1.0);
-    out.size = size;
-    out.flags = flags;
-    out.radius_x = radius_x;
-    out.radius_y = radius_y;
-    out.border = border;
-    out.point = vertex_position * size;
-    out.dir = dir;
-    out.start_color = start_color;
-    out.start_len = start_len;
-    out.end_len = end_len;
-    out.end_color = end_color;
-    out.g_start = g_start;
-    out.hint = hint;
-
-    return out;
+    var instance: GradientInstance;
+    instance.world_from_local = world_from_local;
+    instance.start_color = start_color;
+    instance.end_color = end_color;
+    instance.border = border;
+    instance.radius_x = radius_x;
+    instance.radius_y = radius_y;
+    instance.translation = translation;
+    instance.size = size;
+    instance.g_start = g_start;
+    instance.g_dir = dir;
+    instance.start_len = start_len;
+    instance.end_len = end_len;
+    instance.hint = hint;
+    instance.flags = flags;
+    return compute_vertex(vertex_position, instance);
 }
 
 @fragment
