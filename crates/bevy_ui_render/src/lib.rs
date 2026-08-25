@@ -62,7 +62,7 @@ use bevy_render::{
         ViewSortedRenderPhases,
     },
     render_resource::*,
-    renderer::{RenderDevice, RenderQueue},
+    renderer::{RenderAdapter, RenderDevice, RenderQueue},
     sync_world::{MainEntity, RenderEntity},
     texture::GpuImage,
     view::{ExtractedView, RetainedViewEntity, ViewUniforms},
@@ -2220,6 +2220,7 @@ where
     indices: RawBufferVec<u32>,
     instances: UiInstances<E::InstanceData>,
     view_bind_group: Option<BindGroup>,
+    draw_args: UiMetaDrawArgs,
 }
 
 impl<E> FromWorld for UiMeta<E>
@@ -2228,6 +2229,7 @@ where
 {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
+        let render_adapter = world.resource::<RenderAdapter>();
 
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
@@ -2248,7 +2250,53 @@ where
                     instances: RawBufferVec::new(BufferUsages::VERTEX | BufferUsages::COPY_DST),
                 }
             },
+            draw_args: if render_adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(DownlevelFlags::INDIRECT_EXECUTION)
+            {
+                UiMetaDrawArgs::Indirect(RawBufferVec::new(BufferUsages::INDIRECT))
+            } else {
+                UiMetaDrawArgs::Direct(vec![])
+            },
             view_bind_group: None,
+        }
+    }
+}
+
+pub(crate) enum UiMetaDrawArgs {
+    Direct(Vec<IndirectParametersIndexed>),
+    Indirect(RawBufferVec<IndirectParametersIndexed>),
+}
+
+impl UiMetaDrawArgs {
+    fn push(&mut self, args: IndirectParametersIndexed) {
+        match *self {
+            UiMetaDrawArgs::Direct(ref mut draw_args) => draw_args.push(args),
+            UiMetaDrawArgs::Indirect(ref mut draw_args) => {
+                draw_args.push(args);
+            }
+        }
+    }
+
+    fn len(&self) -> u32 {
+        match *self {
+            UiMetaDrawArgs::Direct(ref draw_args) => draw_args.len() as u32,
+            UiMetaDrawArgs::Indirect(ref draw_args) => draw_args.len() as u32,
+        }
+    }
+
+    fn last_mut(&mut self) -> Option<&mut IndirectParametersIndexed> {
+        match *self {
+            UiMetaDrawArgs::Direct(ref mut draw_args) => draw_args.last_mut(),
+            UiMetaDrawArgs::Indirect(ref mut draw_args) => draw_args.values_mut().last_mut(),
+        }
+    }
+
+    fn clear(&mut self) {
+        match *self {
+            UiMetaDrawArgs::Direct(ref mut draw_args) => draw_args.clear(),
+            UiMetaDrawArgs::Indirect(ref mut draw_args) => draw_args.clear(),
         }
     }
 }
@@ -2361,7 +2409,7 @@ pub struct UiBatch<E>
 where
     E: UiPrepareRenderObject,
 {
-    pub params: Vec<IndirectParametersIndexed>,
+    pub params_range: Option<Range<u32>>,
     pub image: AssetId<Image>,
     phantom: PhantomData<E>,
 }
@@ -2370,27 +2418,50 @@ impl<E> UiBatch<E>
 where
     E: UiPrepareRenderObject,
 {
-    fn push_simple_quad(&mut self, instance_index: u32) {
-        self.push(0, 0..(QUAD_INDICES.len() as u32), instance_index);
+    fn push_simple_quad_to(&mut self, draw_args: &mut UiMetaDrawArgs, instance_index: u32) {
+        self.push_to(draw_args, 0, 0..(QUAD_INDICES.len() as u32), instance_index);
     }
 
-    fn push(&mut self, base_vertex: u32, indices: Range<u32>, instance_index: u32) {
-        match self.params.last_mut() {
-            Some(params)
-                if params.base_vertex == base_vertex
-                    && params.first_index == indices.start
-                    && params.first_index + params.index_count == indices.end
-                    && params.first_instance + params.instance_count == instance_index =>
-            {
-                params.instance_count += 1;
+    fn push_to(
+        &mut self,
+        draw_args: &mut UiMetaDrawArgs,
+        base_vertex: u32,
+        indices: Range<u32>,
+        instance_index: u32,
+    ) {
+        if self
+            .params_range
+            .as_ref()
+            .is_some_and(|params_range| params_range.end == draw_args.len())
+            && let Some(last_params) = draw_args.last_mut()
+            && last_params.base_vertex == base_vertex
+            && last_params.first_index == indices.start
+            && last_params.first_index + last_params.index_count == indices.end
+            && last_params.first_instance + last_params.instance_count == instance_index
+        {
+            last_params.instance_count += 1;
+            return;
+        }
+
+        let new_params = IndirectParametersIndexed {
+            index_count: indices.end - indices.start,
+            instance_count: 1,
+            first_index: indices.start,
+            base_vertex,
+            first_instance: instance_index,
+        };
+
+        let draw_indirect_index = draw_args.len();
+        draw_args.push(new_params);
+
+        match self.params_range {
+            None => {
+                self.params_range = Some(draw_indirect_index..(draw_indirect_index + 1));
             }
-            _ => self.params.push(IndirectParametersIndexed {
-                index_count: indices.end - indices.start,
-                instance_count: 1,
-                first_index: indices.start,
-                base_vertex,
-                first_instance: instance_index,
-            }),
+            Some(ref mut params_range) => {
+                debug_assert_eq!(params_range.end, draw_indirect_index);
+                params_range.end = draw_indirect_index + 1;
+            }
         }
     }
 }
@@ -2732,6 +2803,7 @@ pub fn prepare_uinodes<E>(
 
         ui_meta.vertices.clear();
         ui_meta.indices.clear();
+        ui_meta.draw_args.clear();
 
         match ui_meta.instances {
             UiInstances::Immediate { ref mut instances } => instances.clear(),
@@ -2800,7 +2872,7 @@ pub fn prepare_uinodes<E>(
                     batch_image_handle = Some(image);
 
                     let new_batch = UiBatch {
-                        params: vec![],
+                        params_range: None,
                         image,
                         phantom: PhantomData,
                     };
@@ -2872,7 +2944,7 @@ pub fn prepare_uinodes<E>(
                     if extracted_uinode.clip().is_none() {
                         let instance_index = entity_instances
                             .get_or_insert_instance(quad_index, || quad.instance_data);
-                        batch.push_simple_quad(instance_index);
+                        batch.push_simple_quad_to(&mut ui_meta.draw_args, instance_index);
                         is_invisible = false;
                         continue;
                     }
@@ -2888,7 +2960,8 @@ pub fn prepare_uinodes<E>(
                     let instance_index =
                         entity_instances.get_or_insert_instance(quad_index, || quad.instance_data);
                     let index_count = (clipped_quad.len() as u32 - 2) * 3;
-                    batch.push(
+                    batch.push_to(
+                        &mut ui_meta.draw_args,
                         vertices_index,
                         indices_index..(indices_index + index_count),
                         instance_index,
@@ -2951,6 +3024,13 @@ pub fn prepare_uinodes<E>(
                     )
                 });
             }
+        }
+
+        match ui_meta.draw_args {
+            UiMetaDrawArgs::Indirect(ref mut draw_args) => {
+                draw_args.write_buffer(&render_device, &render_queue);
+            }
+            UiMetaDrawArgs::Direct(_) => {}
         }
 
         *previous_len = batches.len();

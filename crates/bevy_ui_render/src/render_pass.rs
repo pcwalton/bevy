@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 
 use super::{ImageNodeBindGroups, UiBatch, UiMeta, UiViewTarget};
 
-use crate::{ExtractedUiNode, UiCameraView, UiInstances, UiPrepareRenderObject};
+use crate::{ExtractedUiNode, UiCameraView, UiInstances, UiMetaDrawArgs, UiPrepareRenderObject};
 use bevy_ecs::{
     entity::EntityHash,
     prelude::*,
@@ -11,6 +11,7 @@ use bevy_ecs::{
 };
 use bevy_math::FloatOrd;
 use bevy_render::{
+    batching::gpu_preprocessing::IndirectParametersIndexed,
     camera::ExtractedCamera,
     diagnostic::RecordDiagnostics,
     render_phase::*,
@@ -239,6 +240,9 @@ where
         let Some(batch) = batch else {
             return RenderCommandResult::Skip;
         };
+        let Some(ref params_range) = batch.params_range else {
+            return RenderCommandResult::Skip;
+        };
         let ui_meta = ui_meta.into_inner();
         let Some(vertices) = ui_meta.vertices.buffer() else {
             return RenderCommandResult::Failure("missing vertices to draw ui");
@@ -282,12 +286,28 @@ where
             indices.slice(..),
             bevy_render::render_resource::IndexFormat::Uint32,
         );
-        for params in &batch.params {
-            pass.draw_indexed(
-                params.first_index..(params.first_index + params.index_count),
-                params.base_vertex as i32,
-                params.first_instance..(params.first_instance + params.instance_count),
-            );
+        match ui_meta.draw_args {
+            UiMetaDrawArgs::Indirect(ref indirect_draw_args) => {
+                let Some(indirect_draw_args_buffer) = indirect_draw_args.buffer() else {
+                    return RenderCommandResult::Failure(
+                        "missing indirect draw arguments buffer to draw ui",
+                    );
+                };
+                pass.multi_draw_indexed_indirect(
+                    indirect_draw_args_buffer,
+                    params_range.start as u64 * size_of::<IndirectParametersIndexed>() as u64,
+                    params_range.end - params_range.start,
+                );
+            }
+            UiMetaDrawArgs::Direct(ref draw_params) => {
+                for params in &draw_params[params_range.start as usize..params_range.end as usize] {
+                    pass.draw_indexed(
+                        params.first_index..(params.first_index + params.index_count),
+                        params.base_vertex as i32,
+                        params.first_instance..(params.first_instance + params.instance_count),
+                    );
+                }
+            }
         }
         RenderCommandResult::Success
     }
