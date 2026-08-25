@@ -9,6 +9,7 @@ use bevy_render::{
     RenderApp,
 };
 use bevy_shader::ShaderRef;
+use bitflags::bitflags;
 use derive_more::derive::From;
 
 /// Materials are used alongside [`UiMaterialPlugin`](crate::UiMaterialPlugin) and [`MaterialNode`]
@@ -127,12 +128,26 @@ pub trait UiMaterial: AsBindGroup + Asset + Clone + Sized {
 
 pub struct UiMaterialKey<M: UiMaterial> {
     pub target_format: TextureFormat,
-    /// True if we're using retained mode instances or false if we're using
-    /// immediate mode instances.
-    ///
-    /// See [`crate::UiInstances`] for more information.
-    pub retained_instances: bool,
+    /// Various flags.
+    pub flags: UiMaterialKeyFlags,
+    /// Data stored alongside the bind group in the material bind group
+    /// allocator.
     pub bind_group_data: M::Data,
+}
+
+bitflags! {
+    /// Various flags that describe UI material node pipelines.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub struct UiMaterialKeyFlags: u8 {
+        /// Set if we're using retained instances; unset if we're using
+        /// immediate instances.
+        ///
+        /// See [`crate::UiInstances`] for more information.
+        const RETAINED_INSTANCES = 1 << 0;
+        /// Set if the material uses bindless resources and bindless resources
+        /// are available on the target platform.
+        const BINDLESS = 1 << 1;
+    }
 }
 
 impl<M: UiMaterial> Eq for UiMaterialKey<M> where M::Data: PartialEq {}
@@ -153,7 +168,7 @@ where
     fn clone(&self) -> Self {
         Self {
             target_format: self.target_format,
-            retained_instances: self.retained_instances,
+            flags: self.flags,
             bind_group_data: self.bind_group_data.clone(),
         }
     }

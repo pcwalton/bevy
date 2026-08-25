@@ -1,13 +1,11 @@
-use crate::ui_material::{MaterialNode, UiMaterial, UiMaterialKey};
+use crate::ui_material::{MaterialNode, UiMaterial, UiMaterialKey, UiMaterialKeyFlags};
 use crate::*;
 use bevy_asset::*;
-use bevy_ecs::system::{
-    lifetimeless::{SRes, SResMut},
-    *,
-};
+use bevy_ecs::system::lifetimeless::SResMut;
+use bevy_ecs::system::{lifetimeless::SRes, *};
 use bevy_math::{vec4, Affine2, FloatOrd, Rect, Vec2, Vec4};
 use bevy_mesh::VertexBufferLayout;
-use bevy_render::material_bind_groups::FallbackBuffer;
+use bevy_render::material_bind_groups::{FallbackBuffer, MaterialBindingId};
 use bevy_render::storage::GpuShaderBuffer;
 use bevy_render::{
     globals::GlobalsUniform,
@@ -96,10 +94,13 @@ pub struct UiMaterialVertex {
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 #[repr(C)]
 pub struct UiMaterialNodeInstanceData {
+    /// The packed linear part of the transform from local space (unit quad
+    /// centered on the origin) to world space.
     world_from_local: Vec4,
     border: Vec4,
     radius: [Vec4; 2],
     size: Vec2,
+    /// The translation from local space to world space.
     translation: Vec2,
     uv_scale: Vec2,
     uv_offset: Vec2,
@@ -137,7 +138,7 @@ where
         );
         let instance_layout = VertexBufferLayout::from_vertex_formats(
             VertexStepMode::Instance,
-            if key.retained_instances {
+            if key.flags.contains(UiMaterialKeyFlags::RETAINED_INSTANCES) {
                 vec![
                     // instance index
                     VertexFormat::Uint32,
@@ -166,8 +167,11 @@ where
         .offset_locations_by(1);
 
         let mut shader_defs = vec![];
-        if key.retained_instances {
+        if key.flags.contains(UiMaterialKeyFlags::RETAINED_INSTANCES) {
             shader_defs.push("RETAINED_INSTANCES".into());
+        }
+        if key.flags.contains(UiMaterialKeyFlags::BINDLESS) {
+            shader_defs.push("BINDLESS".into());
         }
 
         let mut descriptor = RenderPipelineDescriptor {
@@ -192,7 +196,7 @@ where
         };
 
         descriptor.layout = vec![self.view_layout.clone(), self.ui_layout.clone()];
-        if key.retained_instances {
+        if key.flags.contains(UiMaterialKeyFlags::RETAINED_INSTANCES) {
             descriptor.layout.push(self.instances_layout.clone());
         }
 
@@ -281,6 +285,7 @@ where
     type PipelineKeySystemParam = (
         Res<'static, UiMeta<ExtractedUiMaterialNode<M>>>,
         Res<'static, RenderAssets<PreparedUiMaterial<M>>>,
+        Res<'static, UiTexturedBindGroups<PreparedUiMaterial<M>>>,
     );
     type InstanceData = UiMaterialNodeInstanceData;
     type TexturedGpuAsset = PreparedUiMaterial<M>;
@@ -296,14 +301,24 @@ where
     fn create_pipeline_key(
         &self,
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
-        (ui_meta, render_materials): &mut SystemParamItem<Self::PipelineKeySystemParam>,
+        (ui_meta, render_materials, textured_bind_groups): &mut SystemParamItem<
+            Self::PipelineKeySystemParam,
+        >,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key> {
+        let mut flags = UiMaterialKeyFlags::empty();
+        if matches!(ui_meta.instances, UiInstances::Retained { .. }) {
+            flags.insert(UiMaterialKeyFlags::RETAINED_INSTANCES);
+        }
+        if textured_bind_groups.is_bindless() {
+            flags.insert(UiMaterialKeyFlags::BINDLESS);
+        }
+
         render_materials
             .get(self.material)
             .map(|material| UiMaterialKey {
                 target_format: cached_camera_view.extracted_view.target_format,
+                flags,
                 bind_group_data: material.key.clone(),
-                retained_instances: matches!(ui_meta.instances, UiInstances::Retained { .. }),
             })
     }
 
@@ -322,10 +337,8 @@ where
         self.material
     }
 
-    fn textured_bind_group_layout(
-        pipeline: &Self::SpecializedRenderPipeline,
-    ) -> Option<&BindGroupLayoutDescriptor> {
-        Some(&pipeline.ui_layout)
+    fn textured_binding_id(gpu_asset: &PreparedUiMaterial<M>) -> Option<MaterialBindingId> {
+        Some(gpu_asset.binding)
     }
 
     fn clip(&self) -> Option<&CalculatedClip> {
@@ -338,6 +351,7 @@ where
         index: usize,
         _: &RenderAssets<Self::TexturedGpuAsset>,
         _: &AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset>,
+        _: u32,
     ) {
         debug_assert_eq!(index, 0);
 
@@ -548,11 +562,39 @@ pub fn extract_ui_material_nodes<M>(
 }
 
 pub struct PreparedUiMaterial<T: UiMaterial> {
-    pub bindings: BindingResources,
+    pub binding: MaterialBindingId,
     pub key: T::Data,
 }
 
-impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M> {
+impl<M: UiMaterial> UiTexturedRenderAsset for PreparedUiMaterial<M>
+where
+    M::Data: PartialEq + Eq + Hash + Clone,
+{
+    type Key = AssetId<M>;
+
+    fn get_or_insert_material_binding_for_entity(
+        &self,
+        _: &mut UiTexturedBindGroups<Self>,
+        _: Entity,
+        _: &BindGroupLayoutDescriptor,
+    ) -> MaterialBindingId {
+        // See the documentation of `get_or_insert_material_binding_for_entity`
+        // for more information on why this should never be called.
+        panic!("UI materials key material bindings off asset IDs, not entities")
+    }
+
+    fn bindless_descriptor(render_device: &RenderDevice) -> Option<BindlessDescriptor> {
+        // Check to ensure both that the platform supports bindless resources
+        // and that the material has a bindless descriptor.
+        let bindless_descriptor = M::bindless_descriptor()?;
+        M::bindless_supported(render_device).then_some(bindless_descriptor)
+    }
+}
+
+impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M>
+where
+    M::Data: PartialEq + Eq + Hash + Clone,
+{
     type SourceAsset = M;
 
     type Param = (
@@ -567,64 +609,104 @@ impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M> {
 
     fn prepare_asset(
         material: Self::SourceAsset,
-        id: AssetId<Self::SourceAsset>,
+        material_id: AssetId<Self::SourceAsset>,
         (
             render_device,
             pipeline_cache,
             fallback_buffer,
             shader_buffer_assets,
             pipeline,
-            bind_groups,
+            textured_bind_groups,
             material_param,
         ): &mut SystemParamItem<Self::Param>,
         _: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
+        let textured_bind_groups = &mut **textured_bind_groups;
+
         let bind_group_data = material.bind_group_data();
-        match material.as_bind_group(
-            &pipeline.ui_layout.clone(),
+
+        let actual_bind_group_layout = pipeline_cache.get_bind_group_layout(&pipeline.ui_layout);
+
+        let binding = match material.build_bind_group(
+            &actual_bind_group_layout,
             render_device,
-            pipeline_cache,
-            fallback_buffer,
-            shader_buffer_assets,
             material_param,
+            true,
+            &mut textured_bind_groups.builder,
         ) {
-            Ok(prepared) => {
-                // Insert the bind group into the [`UiTexturedBindGroups`]
-                // resource.
-                bind_groups.values.insert(id, prepared.bind_group);
-                Ok(PreparedUiMaterial {
-                    bindings: prepared.bindings,
-                    key: bind_group_data,
-                })
+            Ok(()) => {
+                let binding_id = match textured_bind_groups
+                    .material_binding_id_table
+                    .entry(material_id)
+                {
+                    Entry::Occupied(mut occupied_entry) => {
+                        let old_binding_id = *occupied_entry.get();
+                        if textured_bind_groups
+                            .allocator
+                            .try_update_data(old_binding_id, &mut textured_bind_groups.builder)
+                        {
+                            old_binding_id
+                        } else {
+                            textured_bind_groups.allocator.free(old_binding_id);
+                            let new_binding_id =
+                                textured_bind_groups.allocator.allocate_unprepared(
+                                    &mut textured_bind_groups.builder,
+                                    &pipeline.ui_layout,
+                                );
+                            *occupied_entry.get_mut() = new_binding_id;
+                            new_binding_id
+                        }
+                    }
+                    Entry::Vacant(vacant_entry) => {
+                        *vacant_entry.insert(textured_bind_groups.allocator.allocate_unprepared(
+                            &mut textured_bind_groups.builder,
+                            &pipeline.ui_layout,
+                        ))
+                    }
+                };
+                textured_bind_groups.builder.clear();
+                Ok(binding_id)
             }
             Err(AsBindGroupError::RetryNextUpdate) => {
-                Err(PrepareAssetError::RetryNextUpdate(material))
+                Err(PrepareAssetError::RetryNextUpdate(material.clone()))
+            }
+            Err(AsBindGroupError::CreateBindGroupDirectly) => {
+                match material.as_bind_group(
+                    &pipeline.ui_layout,
+                    render_device,
+                    pipeline_cache,
+                    fallback_buffer,
+                    shader_buffer_assets,
+                    material_param,
+                ) {
+                    Ok(prepared_bind_group) => {
+                        let binding_id = textured_bind_groups
+                            .allocator
+                            .allocate_prepared(prepared_bind_group, pipeline.ui_layout.clone());
+                        textured_bind_groups
+                            .material_binding_id_table
+                            .insert(material_id, binding_id);
+                        Ok(binding_id)
+                    }
+                    Err(AsBindGroupError::RetryNextUpdate) => {
+                        Err(PrepareAssetError::RetryNextUpdate(material.clone()))
+                    }
+                    Err(other) => Err(PrepareAssetError::AsBindGroupError(other)),
+                }
             }
             Err(other) => Err(PrepareAssetError::AsBindGroupError(other)),
-        }
+        }?;
+
+        Ok(PreparedUiMaterial {
+            binding,
+            key: bind_group_data,
+        })
     }
 
     fn unload_asset(
         source_asset: AssetId<Self::SourceAsset>,
-        (_, _, _, _, _, bind_groups, _): &mut SystemParamItem<Self::Param>,
+        (_, _, _, _, _, textured_bind_groups, _): &mut SystemParamItem<Self::Param>,
     ) {
-        // Remove the bind group from the [`UiTexturedBindGroups`] resource.
-        bind_groups.values.remove(&source_asset);
-    }
-}
-
-impl<M> UiTexturedRenderAsset for PreparedUiMaterial<M>
-where
-    M: UiMaterial,
-{
-    fn create_textured_bind_group(
-        _: &RenderDevice,
-        _: &BindGroupLayout,
-        _: &RenderAssets<Self>,
-        _: &AssetId<<Self as RenderAsset>::SourceAsset>,
-    ) -> Option<BindGroup> {
-        // This should ordinarily never be called, as UI materials are prepared
-        // during [`RenderAsset::prepare_asset`].`
-        None
+        textured_bind_groups.free_material_binding(&source_asset);
     }
 }
