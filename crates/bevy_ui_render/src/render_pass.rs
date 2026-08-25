@@ -1,8 +1,9 @@
 use core::ops::Range;
+use std::marker::PhantomData;
 
-use super::{ImageNodeBindGroups, UiBatch, UiMeta, UiViewTarget};
+use super::{UiBatch, UiMeta, UiTexturedBindGroups, UiViewTarget};
 
-use crate::UiCameraView;
+use crate::{ExtractedUiNode, UiCameraView, UiRenderObject};
 use bevy_ecs::{
     entity::EntityHash,
     prelude::*,
@@ -156,14 +157,19 @@ impl CachedRenderPipelinePhaseItem for TransparentUi {
 
 pub type DrawUi = (
     SetItemPipeline,
-    SetUiViewBindGroup<0>,
-    SetUiTextureBindGroup<1>,
-    DrawUiNode,
+    SetUiViewBindGroup<ExtractedUiNode, 0>,
+    SetUiTextureBindGroup<ExtractedUiNode, 1>,
+    DrawUiRenderObject<ExtractedUiNode>,
 );
 
-pub struct SetUiViewBindGroup<const I: usize>;
-impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetUiViewBindGroup<I> {
-    type Param = SRes<UiMeta>;
+pub struct SetUiViewBindGroup<E, const I: usize>(PhantomData<E>)
+where
+    E: UiRenderObject;
+impl<E, P: PhaseItem, const I: usize> RenderCommand<P> for SetUiViewBindGroup<E, I>
+where
+    E: UiRenderObject,
+{
+    type Param = SRes<UiMeta<E>>;
     type ViewQuery = Read<ViewUniformOffset>;
     type ItemQuery = ();
 
@@ -181,41 +187,58 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetUiViewBindGroup<I> {
         RenderCommandResult::Success
     }
 }
-pub struct SetUiTextureBindGroup<const I: usize>;
-impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetUiTextureBindGroup<I> {
-    type Param = SRes<ImageNodeBindGroups>;
+pub struct SetUiTextureBindGroup<E, const I: usize>(PhantomData<E>)
+where
+    E: UiRenderObject;
+impl<E, P: PhaseItem, const I: usize> RenderCommand<P> for SetUiTextureBindGroup<E, I>
+where
+    E: UiRenderObject,
+{
+    type Param = SRes<UiTexturedBindGroups<E>>;
     type ViewQuery = ();
-    type ItemQuery = Read<UiBatch>;
+    type ItemQuery = Read<UiBatch<E>>;
 
     #[inline]
     fn render<'w>(
         _item: &P,
         _view: (),
-        batch: Option<&'w UiBatch>,
-        image_bind_groups: SystemParamItem<'w, '_, Self::Param>,
+        batch: Option<&'w UiBatch<E>>,
+        textured_bind_groups: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let image_bind_groups = image_bind_groups.into_inner();
+        let textured_bind_groups = textured_bind_groups.into_inner();
         let Some(batch) = batch else {
             return RenderCommandResult::Skip;
         };
 
-        pass.set_bind_group(I, image_bind_groups.values.get(&batch.image).unwrap(), &[]);
+        pass.set_bind_group(
+            I,
+            textured_bind_groups
+                .values
+                .get(&batch.textured_asset_id)
+                .unwrap(),
+            &[],
+        );
         RenderCommandResult::Success
     }
 }
 
-pub struct DrawUiNode;
-impl<P: PhaseItem> RenderCommand<P> for DrawUiNode {
-    type Param = SRes<UiMeta>;
+pub struct DrawUiRenderObject<E>(PhantomData<E>)
+where
+    E: UiRenderObject;
+impl<E, P: PhaseItem> RenderCommand<P> for DrawUiRenderObject<E>
+where
+    E: UiRenderObject,
+{
+    type Param = SRes<UiMeta<E>>;
     type ViewQuery = ();
-    type ItemQuery = Read<UiBatch>;
+    type ItemQuery = Read<UiBatch<E>>;
 
     #[inline]
     fn render<'w>(
         _item: &P,
         _view: (),
-        batch: Option<&'w UiBatch>,
+        batch: Option<&'w UiBatch<E>>,
         ui_meta: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
