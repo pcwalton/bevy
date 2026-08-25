@@ -1,31 +1,22 @@
 use core::{
     f32::consts::{FRAC_PI_2, TAU},
     hash::Hash,
-    ops::Range,
 };
 
 use super::shader_flags::BORDER_ALL;
-use crate::clipping::clip_polygon;
 use crate::*;
 use bevy_asset::*;
 use bevy_color::{ColorToComponents, Hsla, Hsva, LinearRgba, Okhsla, Oklaba, Oklcha, Srgba};
-use bevy_ecs::{
-    prelude::Component,
-    system::{
-        lifetimeless::{Read, SRes},
-        *,
-    },
-};
+use bevy_ecs::system::*;
 use bevy_math::{
     ops::{cos, sin},
-    FloatOrd, Rect, Vec2,
+    vec2, vec4, FloatOrd, Rect, Vec2, Vec4,
 };
 use bevy_math::{Affine2, Vec2Swizzles};
 use bevy_mesh::VertexBufferLayout;
 use bevy_render::{
     render_phase::*,
     render_resource::{binding_types::uniform_buffer, *},
-    renderer::{RenderDevice, RenderQueue},
     view::*,
     Extract, ExtractSchedule, Render, RenderSystems,
 };
@@ -51,7 +42,7 @@ impl Plugin for GradientPlugin {
             render_app
                 .add_render_command::<TransparentUi, DrawGradientFns>()
                 .init_resource::<ExtractedGradients>()
-                .init_gpu_resource::<GradientMeta>()
+                .init_gpu_resource::<UiMeta<ExtractedGradient>>()
                 .init_gpu_resource::<SpecializedRenderPipelines<GradientPipeline>>()
                 .add_systems(RenderStartup, init_gradient_pipeline)
                 .add_systems(
@@ -73,31 +64,10 @@ impl Plugin for GradientPlugin {
                     Render,
                     (
                         queue_ui_items::<ExtractedGradient>.in_set(RenderSystems::Queue),
-                        prepare_gradient.in_set(RenderSystems::PrepareBindGroups),
+                        prepare_uinodes::<ExtractedGradient>
+                            .in_set(RenderSystems::PrepareBindGroups),
                     ),
                 );
-        }
-    }
-}
-
-#[derive(Component)]
-pub struct GradientBatch {
-    pub range: Range<u32>,
-}
-
-#[derive(Resource)]
-pub struct GradientMeta {
-    vertices: RawBufferVec<UiGradientVertex>,
-    indices: RawBufferVec<u32>,
-    view_bind_group: Option<BindGroup>,
-}
-
-impl Default for GradientMeta {
-    fn default() -> Self {
-        Self {
-            vertices: RawBufferVec::new(BufferUsages::VERTEX),
-            indices: RawBufferVec::new(BufferUsages::INDEX),
-            view_bind_group: None,
         }
     }
 }
@@ -254,6 +224,22 @@ pub struct ExtractedGradient {
     pub border: BorderRect,
     pub resolved_gradient: ResolvedGradient,
     pub color_space: InterpolationColorSpace,
+    pub rendered_stop_indices: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct UiGradientInstanceData {
+    flags: u32,
+    radius: [Vec4; 2],
+    border: Vec4,
+    size: Vec2,
+    g_start: Vec2,
+    g_dir: Vec2,
+    start_color: Vec4,
+    start_len: f32,
+    end_color: Vec4,
+    end_len: f32,
+    hint: f32,
 }
 
 impl UiRenderObject for ExtractedGradient {
@@ -262,6 +248,9 @@ impl UiRenderObject for ExtractedGradient {
     type SpecializedRenderPipeline = GradientPipeline;
     type ViewPipelineKeyBuilder = UiGradientViewPipelineKeyBuilder;
     type PipelineKeySystemParam = ();
+    type Vertex = UiGradientVertex;
+    type InstanceData = UiGradientInstanceData;
+    type TexturedGpuAsset = GpuImage;
 
     fn get_sort_key(&self) -> FloatOrd {
         FloatOrd(
@@ -294,6 +283,134 @@ impl UiRenderObject for ExtractedGradient {
             color_space: self.color_space,
             target_format: cached_camera_view.extracted_view.target_format,
         })
+    }
+
+    fn view_bind_group_layout(
+        pipeline: &Self::SpecializedRenderPipeline,
+    ) -> &BindGroupLayoutDescriptor {
+        &pipeline.view_layout
+    }
+
+    fn clip(&self) -> Option<&CalculatedClip> {
+        self.clip.as_ref()
+    }
+
+    fn quad_count(&self) -> usize {
+        self.rendered_stop_indices.len()
+    }
+
+    fn populate_quad(
+        &self,
+        out_quad: &mut UiQuad<Self::InstanceData>,
+        quad_index: usize,
+        _: &RenderAssets<Self::TexturedGpuAsset>,
+        _: &AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset>,
+    ) {
+        let uinode_rect = self.rect;
+
+        let rect_size = uinode_rect.size();
+
+        // Specify the corners of the node
+        let corner_points = QUAD_VERTEX_POSITIONS.map(|pos| pos * rect_size);
+        let positions = corner_points.map(|pos| self.transform.transform_point2(pos));
+
+        let uvs = { [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y] };
+
+        let mut flags = if let NodeType::Border(borders) = self.node_type {
+            borders
+        } else {
+            0
+        };
+
+        let (g_start, g_dir, g_flags) = match self.resolved_gradient {
+            ResolvedGradient::Linear { angle } => {
+                let corner_index = (angle - FRAC_PI_2).rem_euclid(TAU) / FRAC_PI_2;
+                (
+                    corner_points[corner_index as usize],
+                    // CSS angles increase in a clockwise direction
+                    vec2(sin(angle), -cos(angle)),
+                    0,
+                )
+            }
+            ResolvedGradient::Conic { center, start } => {
+                (center, vec2(start, 0.), shader_flags::CONIC)
+            }
+            ResolvedGradient::Radial { center, size } => (
+                center,
+                Vec2::splat(if size.y != 0. { size.x / size.y } else { 1. }),
+                shader_flags::RADIAL,
+            ),
+        };
+
+        flags |= g_flags;
+
+        let stop_index = self.rendered_stop_indices[quad_index] as usize;
+        let mut start_stop = self.stops[stop_index];
+        let end_stop = self.stops[stop_index + 1];
+        if start_stop.1 == end_stop.1 && stop_index == self.stops.len() - 2 && 0 < quad_index {
+            start_stop.0 = LinearRgba::NONE;
+        }
+        let start_color = convert_color_to_space(start_stop.0, self.color_space);
+        let end_color = convert_color_to_space(end_stop.0, self.color_space);
+        let mut stop_flags = flags;
+        if 0. < start_stop.1 && (stop_index == 0 || quad_index == 0) {
+            stop_flags |= shader_flags::FILL_START;
+        }
+        if stop_index == self.stops.len() - 2 {
+            stop_flags |= shader_flags::FILL_END;
+        }
+
+        out_quad.instance_data = UiGradientInstanceData {
+            flags: stop_flags,
+            radius: self.border_radius.into(),
+            border: vec4(
+                self.border.min_inset.x,
+                self.border.min_inset.y,
+                self.border.max_inset.x,
+                self.border.max_inset.y,
+            ),
+            size: rect_size.xy(),
+            g_start,
+            g_dir,
+            start_color: start_color.into(),
+            start_len: start_stop.1,
+            end_len: end_stop.1,
+            end_color: end_color.into(),
+            hint: start_stop.2,
+        };
+
+        for (&mut (ref mut out_position, ref mut out_uvs), (position, (uv_a, uv_b))) in out_quad
+            .vertices
+            .iter_mut()
+            .zip(positions.iter().zip(uvs.iter().zip(corner_points.iter())))
+        {
+            *out_position = *position;
+            out_uvs.uv = *uv_a;
+            out_uvs.point = *uv_b;
+        }
+    }
+
+    fn create_vertex(
+        quad: &UiQuad<Self::InstanceData>,
+        position: Vec2,
+        uvs: &UiQuadInterpolants,
+    ) -> Self::Vertex {
+        UiGradientVertex {
+            position: position.extend(0.0).into(),
+            uv: uvs.uv.to_array(),
+            flags: quad.instance_data.flags,
+            radius: quad.instance_data.radius.map(Into::into),
+            border: quad.instance_data.border.into(),
+            size: quad.instance_data.size.into(),
+            point: uvs.point.to_array(),
+            g_start: quad.instance_data.g_start.into(),
+            g_dir: quad.instance_data.g_dir.into(),
+            start_color: quad.instance_data.start_color.into(),
+            start_len: quad.instance_data.start_len,
+            end_len: quad.instance_data.end_len,
+            end_color: quad.instance_data.end_color.into(),
+            hint: quad.instance_data.hint,
+        }
     }
 }
 
@@ -527,6 +644,7 @@ pub fn extract_gradients(
                         uinode.em_size,
                         uinode.rem_size,
                     );
+                    let rendered_stop_indices = calculate_rendered_stop_indices(&extracted_stops);
                     extracted_gradients.add(
                         &mut commands,
                         main_entity,
@@ -545,6 +663,7 @@ pub fn extract_gradients(
                             border: uinode.border,
                             resolved_gradient: ResolvedGradient::Linear { angle: 0.0 },
                             color_space: gradient.get_color_space(),
+                            rendered_stop_indices,
                         },
                     );
                     continue;
@@ -567,6 +686,9 @@ pub fn extract_gradients(
                             uinode.rem_size,
                         );
 
+                        let rendered_stop_indices =
+                            calculate_rendered_stop_indices(&extracted_stops);
+
                         extracted_gradients.add(
                             &mut commands,
                             main_entity,
@@ -585,6 +707,7 @@ pub fn extract_gradients(
                                 border: uinode.border,
                                 resolved_gradient: ResolvedGradient::Linear { angle: *angle },
                                 color_space: *color_space,
+                                rendered_stop_indices,
                             },
                         );
                     }
@@ -623,6 +746,9 @@ pub fn extract_gradients(
                             uinode.rem_size,
                         );
 
+                        let rendered_stop_indices =
+                            calculate_rendered_stop_indices(&computed_stops);
+
                         extracted_gradients.add(
                             &mut commands,
                             main_entity,
@@ -641,6 +767,7 @@ pub fn extract_gradients(
                                 border: uinode.border,
                                 resolved_gradient: ResolvedGradient::Radial { center: c, size },
                                 color_space: *color_space,
+                                rendered_stop_indices,
                             },
                         );
                     }
@@ -681,6 +808,9 @@ pub fn extract_gradients(
 
                         interpolate_color_stops(&mut extracted_color_stops, 0., TAU);
 
+                        let rendered_stop_indices =
+                            calculate_rendered_stop_indices(&extracted_color_stops);
+
                         extracted_gradients.add(
                             &mut commands,
                             main_entity,
@@ -702,6 +832,7 @@ pub fn extract_gradients(
                                     center: g_start,
                                 },
                                 color_space: *color_space,
+                                rendered_stop_indices,
                             },
                         );
                     }
@@ -751,7 +882,7 @@ pub struct UiGradientViewPipelineKeyBuilder {
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-struct UiGradientVertex {
+pub struct UiGradientVertex {
     position: [f32; 3],
     uv: [f32; 2],
     flags: u32,
@@ -811,231 +942,18 @@ fn convert_color_to_space(color: LinearRgba, space: InterpolationColorSpace) -> 
     }
 }
 
-pub fn prepare_gradient(
-    mut commands: Commands,
-    render_device: Res<RenderDevice>,
-    render_queue: Res<RenderQueue>,
-    pipeline_cache: Res<PipelineCache>,
-    mut ui_meta: ResMut<GradientMeta>,
-    extracted_gradients: Res<ExtractedGradients>,
-    view_uniforms: Res<ViewUniforms>,
-    gradients_pipeline: Res<GradientPipeline>,
-    mut phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
-    mut previous_len: Local<usize>,
-) {
-    if let Some(view_binding) = view_uniforms.uniforms.binding() {
-        let mut batches: Vec<(Entity, GradientBatch)> = Vec::with_capacity(*previous_len);
+pub type DrawGradientFns = (
+    SetItemPipeline,
+    SetUiViewBindGroup<ExtractedGradient, 0>,
+    DrawUiRenderObject<ExtractedGradient>,
+);
 
-        ui_meta.vertices.clear();
-        ui_meta.indices.clear();
-        ui_meta.view_bind_group = Some(render_device.create_bind_group(
-            "gradient_view_bind_group",
-            &pipeline_cache.get_bind_group_layout(&gradients_pipeline.view_layout),
-            &BindGroupEntries::single(view_binding),
-        ));
-
-        // Buffer indexes
-        let mut vertices_index = 0;
-        let mut indices_index = 0;
-
-        for ui_phase in phases.values_mut() {
-            for item_index in 0..ui_phase.items.len() {
-                let item = &mut ui_phase.items[item_index];
-                if let Some(gradient) = extracted_gradients
-                    .objects
-                    .get(&item.main_entity())
-                    .and_then(|(_, subgradients)| subgradients.get(&item.entity()))
-                {
-                    *item.batch_range_mut() = item_index as u32..item_index as u32 + 1;
-                    let uinode_rect = gradient.rect;
-
-                    let rect_size = uinode_rect.size();
-
-                    // Specify the corners of the node
-                    let corner_points = QUAD_VERTEX_POSITIONS.map(|pos| pos * rect_size);
-                    let positions =
-                        corner_points.map(|pos| gradient.transform.transform_point2(pos));
-
-                    let uvs = { [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y] };
-
-                    let mut flags = if let NodeType::Border(borders) = gradient.node_type {
-                        borders
-                    } else {
-                        0
-                    };
-
-                    let (g_start, g_dir, g_flags) = match gradient.resolved_gradient {
-                        ResolvedGradient::Linear { angle } => {
-                            let corner_index = (angle - FRAC_PI_2).rem_euclid(TAU) / FRAC_PI_2;
-                            (
-                                corner_points[corner_index as usize].into(),
-                                // CSS angles increase in a clockwise direction
-                                [sin(angle), -cos(angle)],
-                                0,
-                            )
-                        }
-                        ResolvedGradient::Conic { center, start } => {
-                            (center.into(), [start, 0.], shader_flags::CONIC)
-                        }
-                        ResolvedGradient::Radial { center, size } => (
-                            center.into(),
-                            Vec2::splat(if size.y != 0. { size.x / size.y } else { 1. }).into(),
-                            shader_flags::RADIAL,
-                        ),
-                    };
-
-                    flags |= g_flags;
-
-                    let vertices = clip_polygon(
-                        gradient.clip.as_ref(),
-                        &[
-                            (positions[0], (uvs[0], corner_points[0])),
-                            (positions[1], (uvs[1], corner_points[1])),
-                            (positions[2], (uvs[2], corner_points[2])),
-                            (positions[3], (uvs[3], corner_points[3])),
-                        ],
-                        |a, b, t| (a.0.lerp(b.0, t), a.1.lerp(b.1, t)),
-                    );
-                    if vertices.is_empty() {
-                        continue;
-                    }
-                    let segment_index_count = 3 * (vertices.len() as u32 - 2);
-
-                    let range = 0..gradient.stops.len() - 1;
-                    let mut segment_count = 0;
-
-                    for stop_index in range {
-                        let mut start_stop = gradient.stops[stop_index];
-                        let end_stop = gradient.stops[stop_index + 1];
-                        if start_stop.1 == end_stop.1 {
-                            if stop_index == gradient.stops.len() - 2 {
-                                if 0 < segment_count {
-                                    start_stop.0 = LinearRgba::NONE;
-                                }
-                            } else {
-                                continue;
-                            }
-                        }
-                        let start_color =
-                            convert_color_to_space(start_stop.0, gradient.color_space);
-                        let end_color = convert_color_to_space(end_stop.0, gradient.color_space);
-                        let mut stop_flags = flags;
-                        if 0. < start_stop.1 && (stop_index == 0 || segment_count == 0) {
-                            stop_flags |= shader_flags::FILL_START;
-                        }
-                        if stop_index == gradient.stops.len() - 2 {
-                            stop_flags |= shader_flags::FILL_END;
-                        }
-
-                        for &(position, (uv, point)) in &vertices {
-                            ui_meta.vertices.push(UiGradientVertex {
-                                position: position.extend(0.).into(),
-                                uv: uv.into(),
-                                flags: stop_flags,
-                                radius: gradient.border_radius.into(),
-                                border: [
-                                    gradient.border.min_inset.x,
-                                    gradient.border.min_inset.y,
-                                    gradient.border.max_inset.x,
-                                    gradient.border.max_inset.y,
-                                ],
-                                size: rect_size.xy().into(),
-                                g_start,
-                                g_dir,
-                                point: point.into(),
-                                start_color,
-                                start_len: start_stop.1,
-                                end_len: end_stop.1,
-                                end_color,
-                                hint: start_stop.2,
-                            });
-                        }
-
-                        for i in 1..vertices.len() as u32 - 1 {
-                            ui_meta.indices.push(indices_index);
-                            ui_meta.indices.push(indices_index + i);
-                            ui_meta.indices.push(indices_index + i + 1);
-                        }
-                        indices_index += vertices.len() as u32;
-                        segment_count += 1;
-                    }
-
-                    if 0 < segment_count {
-                        let vertices_count = segment_index_count * segment_count;
-
-                        batches.push((
-                            item.entity(),
-                            GradientBatch {
-                                range: vertices_index..(vertices_index + vertices_count),
-                            },
-                        ));
-
-                        vertices_index += vertices_count;
-                    }
-                }
-            }
+fn calculate_rendered_stop_indices(stops: &[(LinearRgba, f32, f32)]) -> Vec<u32> {
+    let mut rendered_stop_indices = vec![];
+    for stop_index in 0..(stops.len() - 1) {
+        if stop_index + 2 == stops.len() || stops[stop_index].1 != stops[stop_index + 1].1 {
+            rendered_stop_indices.push(stop_index as u32);
         }
-        ui_meta.vertices.write_buffer(&render_device, &render_queue);
-        ui_meta.indices.write_buffer(&render_device, &render_queue);
-        *previous_len = batches.len();
-        commands.try_insert_batch(batches);
     }
-}
-
-pub type DrawGradientFns = (SetItemPipeline, SetGradientViewBindGroup<0>, DrawGradient);
-
-pub struct SetGradientViewBindGroup<const I: usize>;
-impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetGradientViewBindGroup<I> {
-    type Param = SRes<GradientMeta>;
-    type ViewQuery = Read<ViewUniformOffset>;
-    type ItemQuery = ();
-
-    fn render<'w>(
-        _item: &P,
-        view_uniform: &'w ViewUniformOffset,
-        _entity: Option<()>,
-        ui_meta: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        let Some(view_bind_group) = ui_meta.into_inner().view_bind_group.as_ref() else {
-            return RenderCommandResult::Failure("view_bind_group not available");
-        };
-        pass.set_bind_group(I, view_bind_group, &[view_uniform.offset]);
-        RenderCommandResult::Success
-    }
-}
-
-pub struct DrawGradient;
-impl<P: PhaseItem> RenderCommand<P> for DrawGradient {
-    type Param = SRes<GradientMeta>;
-    type ViewQuery = ();
-    type ItemQuery = Read<GradientBatch>;
-
-    #[inline]
-    fn render<'w>(
-        _item: &P,
-        _view: (),
-        batch: Option<&'w GradientBatch>,
-        ui_meta: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        let Some(batch) = batch else {
-            return RenderCommandResult::Skip;
-        };
-        let ui_meta = ui_meta.into_inner();
-        let Some(vertices) = ui_meta.vertices.buffer() else {
-            return RenderCommandResult::Failure("missing vertices to draw ui");
-        };
-        let Some(indices) = ui_meta.indices.buffer() else {
-            return RenderCommandResult::Failure("missing indices to draw ui");
-        };
-
-        // Store the vertices
-        pass.set_vertex_buffer(0, vertices.slice(..));
-        // Define how to "connect" the vertices
-        pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
-        // Draw the vertices
-        pass.draw_indexed(batch.range.clone(), 0, 0..1);
-        RenderCommandResult::Success
-    }
+    rendered_stop_indices
 }

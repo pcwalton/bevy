@@ -1,25 +1,20 @@
-use crate::clipping::clip_polygon;
 use crate::ui_material::{MaterialNode, UiMaterial, UiMaterialKey};
 use crate::*;
 use bevy_asset::*;
-use bevy_ecs::{
-    prelude::Component,
-    query::ROQueryItem,
-    system::{
-        lifetimeless::{Read, SRes, SResMut},
-        *,
-    },
+use bevy_ecs::system::{
+    lifetimeless::{SRes, SResMut},
+    *,
 };
-use bevy_math::{Affine2, FloatOrd, Rect, Vec2};
+use bevy_math::{vec4, Affine2, FloatOrd, Rect, Vec2, Vec4};
 use bevy_mesh::VertexBufferLayout;
 use bevy_render::material_bind_groups::FallbackBuffer;
 use bevy_render::storage::GpuShaderBuffer;
 use bevy_render::{
-    globals::{GlobalsBuffer, GlobalsUniform},
+    globals::GlobalsUniform,
     render_asset::{PrepareAssetError, RenderAsset, RenderAssetPlugin, RenderAssets},
     render_phase::*,
     render_resource::{binding_types::uniform_buffer, *},
-    renderer::{RenderDevice, RenderQueue},
+    renderer::RenderDevice,
     sync_world::MainEntity,
     view::*,
     Extract, ExtractSchedule, Render, RenderSystems,
@@ -30,7 +25,7 @@ use bevy_sprite::BorderRect;
 use bevy_ui::ComputedStackIndex;
 use bevy_utils::default;
 use bytemuck::{Pod, Zeroable};
-use core::{hash::Hash, marker::PhantomData, ops::Range};
+use core::{hash::Hash, marker::PhantomData};
 
 /// Adds the necessary ECS resources and render logic to enable rendering entities using the given
 /// [`UiMaterial`] asset type (which includes [`UiMaterial`] types).
@@ -62,8 +57,8 @@ where
             render_app
                 .add_render_command::<TransparentUi, DrawUiMaterial<M>>()
                 .init_resource::<ExtractedUiMaterialNodes<M>>()
-                .init_gpu_resource::<UiMaterialMeta<M>>()
-                .init_gpu_resource::<UiTexturedBindGroups<M>>()
+                .init_gpu_resource::<UiMeta<ExtractedUiMaterialNode<M>>>()
+                .init_gpu_resource::<UiTexturedBindGroups<PreparedUiMaterial<M>>>()
                 .init_gpu_resource::<SpecializedRenderPipelines<UiMaterialPipeline<M>>>()
                 .add_systems(RenderStartup, init_ui_material_pipeline::<M>)
                 .add_systems(
@@ -74,26 +69,11 @@ where
                     Render,
                     (
                         queue_ui_items::<ExtractedUiMaterialNode<M>>.in_set(RenderSystems::Queue),
-                        prepare_uimaterial_nodes::<M>.in_set(RenderSystems::PrepareBindGroups),
+                        prepare_uinodes::<ExtractedUiMaterialNode<M>>
+                            .in_set(RenderSystems::PrepareBindGroups),
+                        clear_batches::<ExtractedUiMaterialNode<M>>.in_set(RenderSystems::Cleanup),
                     ),
                 );
-        }
-    }
-}
-
-#[derive(Resource)]
-pub struct UiMaterialMeta<M: UiMaterial> {
-    vertices: RawBufferVec<UiMaterialVertex>,
-    view_bind_group: Option<BindGroup>,
-    marker: PhantomData<M>,
-}
-
-impl<M: UiMaterial> Default for UiMaterialMeta<M> {
-    fn default() -> Self {
-        Self {
-            vertices: RawBufferVec::new(BufferUsages::VERTEX),
-            view_bind_group: Default::default(),
-            marker: PhantomData,
         }
     }
 }
@@ -108,13 +88,11 @@ pub struct UiMaterialVertex {
     pub radius: [[f32; 4]; 2],
 }
 
-// in this [`UiMaterialPipeline`] there is (currently) no batching going on.
-// Therefore the [`UiMaterialBatch`] is more akin to a draw call.
-#[derive(Component)]
-pub struct UiMaterialBatch<M: UiMaterial> {
-    /// The range of vertices inside the [`UiMaterialMeta`]
-    pub range: Range<u32>,
-    pub material: AssetId<M>,
+#[derive(Clone, Default)]
+pub struct ExtractedUiMaterialNodeInstanceData {
+    size: Vec2,
+    border: Vec4,
+    radius: [Vec4; 2],
 }
 
 /// Render pipeline data for a given [`UiMaterial`]
@@ -221,93 +199,17 @@ pub fn init_ui_material_pipeline<M: UiMaterial>(
 
 pub type DrawUiMaterial<M> = (
     SetItemPipeline,
-    SetMatUiViewBindGroup<M, 0>,
-    SetUiMaterialBindGroup<M, 1>,
-    DrawUiMaterialNode<M>,
+    SetUiViewBindGroup<ExtractedUiMaterialNode<M>, 0>,
+    SetUiTextureBindGroup<ExtractedUiMaterialNode<M>, 1>,
+    DrawUiRenderObject<ExtractedUiMaterialNode<M>>,
 );
-
-pub struct SetMatUiViewBindGroup<M: UiMaterial, const I: usize>(PhantomData<M>);
-impl<P: PhaseItem, M: UiMaterial, const I: usize> RenderCommand<P> for SetMatUiViewBindGroup<M, I> {
-    type Param = SRes<UiMaterialMeta<M>>;
-    type ViewQuery = Read<ViewUniformOffset>;
-    type ItemQuery = ();
-
-    fn render<'w>(
-        _item: &P,
-        view_uniform: &'w ViewUniformOffset,
-        _entity: Option<()>,
-        ui_meta: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        pass.set_bind_group(
-            I,
-            ui_meta.into_inner().view_bind_group.as_ref().unwrap(),
-            &[view_uniform.offset],
-        );
-        RenderCommandResult::Success
-    }
-}
-
-pub struct SetUiMaterialBindGroup<M: UiMaterial, const I: usize>(PhantomData<M>);
-impl<P: PhaseItem, M: UiMaterial, const I: usize> RenderCommand<P>
-    for SetUiMaterialBindGroup<M, I>
-{
-    type Param = SRes<UiTexturedBindGroups<M>>;
-    type ViewQuery = ();
-    type ItemQuery = Read<UiMaterialBatch<M>>;
-
-    fn render<'w>(
-        _item: &P,
-        _view: (),
-        material_handle: Option<ROQueryItem<'_, '_, Self::ItemQuery>>,
-        bind_groups: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        let Some(material_handle) = material_handle else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(bind_group) = bind_groups
-            .into_inner()
-            .values
-            .get(&material_handle.material)
-        else {
-            return RenderCommandResult::Skip;
-        };
-        pass.set_bind_group(I, bind_group, &[]);
-        RenderCommandResult::Success
-    }
-}
-
-pub struct DrawUiMaterialNode<M>(PhantomData<M>);
-impl<P: PhaseItem, M: UiMaterial> RenderCommand<P> for DrawUiMaterialNode<M> {
-    type Param = SRes<UiMaterialMeta<M>>;
-    type ViewQuery = ();
-    type ItemQuery = Read<UiMaterialBatch<M>>;
-
-    #[inline]
-    fn render<'w>(
-        _item: &P,
-        _view: (),
-        batch: Option<&'w UiMaterialBatch<M>>,
-        ui_meta: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        let Some(batch) = batch else {
-            return RenderCommandResult::Skip;
-        };
-
-        pass.set_vertex_buffer(0, ui_meta.into_inner().vertices.buffer().unwrap().slice(..));
-        pass.draw(batch.range.clone(), 0..1);
-        RenderCommandResult::Success
-    }
-}
 
 pub struct ExtractedUiMaterialNode<M: UiMaterial> {
     pub stack_index: u32,
     pub transform: Affine2,
     pub rect: Rect,
     pub border: BorderRect,
-    pub border_radius: [[f32; 4]; 2],
+    pub border_radius: [Vec4; 2],
     pub material: AssetId<M>,
     pub clip: Option<CalculatedClip>,
 }
@@ -325,6 +227,11 @@ where
     type ViewQueryData = ();
     type SpecializedRenderPipeline = UiMaterialPipeline<M>;
     type PipelineKeySystemParam = Res<'static, RenderAssets<PreparedUiMaterial<M>>>;
+    type Vertex = UiMaterialVertex;
+    type InstanceData = ExtractedUiMaterialNodeInstanceData;
+    type TexturedGpuAsset = PreparedUiMaterial<M>;
+
+    const TEXTURED: bool = true;
 
     fn get_sort_key(&self) -> FloatOrd {
         FloatOrd(self.stack_index as f32 + M::stack_z_offset())
@@ -343,6 +250,86 @@ where
                 target_format: cached_camera_view.extracted_view.target_format,
                 bind_group_data: material.key.clone(),
             })
+    }
+
+    fn view_bind_group_layout(
+        pipeline: &Self::SpecializedRenderPipeline,
+    ) -> &BindGroupLayoutDescriptor {
+        &pipeline.view_layout
+    }
+
+    const NEEDS_GLOBALS_UNIFORM: bool = true;
+
+    fn textured_asset_id(&self) -> AssetId<M> {
+        self.material
+    }
+
+    fn textured_bind_group_layout(
+        pipeline: &Self::SpecializedRenderPipeline,
+    ) -> Option<&BindGroupLayoutDescriptor> {
+        Some(&pipeline.ui_layout)
+    }
+
+    fn clip(&self) -> Option<&CalculatedClip> {
+        self.clip.as_ref()
+    }
+
+    fn populate_quad(
+        &self,
+        out_quad: &mut UiQuad<Self::InstanceData>,
+        index: usize,
+        _: &RenderAssets<Self::TexturedGpuAsset>,
+        _: &AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset>,
+    ) {
+        debug_assert_eq!(index, 0);
+
+        let rect_size = self.rect.size();
+
+        let positions =
+            QUAD_VERTEX_POSITIONS.map(|pos| self.transform.transform_point2(pos * rect_size));
+
+        let uvs = [
+            Vec2::new(self.rect.min.x, self.rect.min.y),
+            Vec2::new(self.rect.max.x, self.rect.min.y),
+            Vec2::new(self.rect.max.x, self.rect.max.y),
+            Vec2::new(self.rect.min.x, self.rect.max.y),
+        ]
+        .map(|pos| pos / self.rect.max);
+
+        out_quad.instance_data = ExtractedUiMaterialNodeInstanceData {
+            size: rect_size,
+            border: vec4(
+                self.border.min_inset.x,
+                self.border.min_inset.y,
+                self.border.max_inset.x,
+                self.border.max_inset.y,
+            ),
+            radius: self.border_radius,
+        };
+
+        for (&mut (ref mut out_position, ref mut out_uvs), (position, uv)) in out_quad
+            .vertices
+            .iter_mut()
+            .zip(positions.iter().zip(uvs.iter()))
+        {
+            *out_position = *position;
+            out_uvs.uv = *uv;
+            out_uvs.point = default();
+        }
+    }
+
+    fn create_vertex(
+        quad: &UiQuad<Self::InstanceData>,
+        position: Vec2,
+        uvs: &UiQuadInterpolants,
+    ) -> Self::Vertex {
+        UiMaterialVertex {
+            position: position.extend(1.0).into(),
+            uv: uvs.uv.into(),
+            size: quad.instance_data.size.into(),
+            border: quad.instance_data.border.into(),
+            radius: quad.instance_data.radius.map(Into::into),
+        }
     }
 }
 
@@ -525,131 +512,6 @@ pub fn extract_ui_material_nodes<M>(
     }
 }
 
-pub fn prepare_uimaterial_nodes<M>(
-    mut commands: Commands,
-    render_device: Res<RenderDevice>,
-    render_queue: Res<RenderQueue>,
-    pipeline_cache: Res<PipelineCache>,
-    mut ui_meta: ResMut<UiMaterialMeta<M>>,
-    extracted_uinodes: Res<ExtractedUiMaterialNodes<M>>,
-    view_uniforms: Res<ViewUniforms>,
-    globals_buffer: Res<GlobalsBuffer>,
-    ui_material_pipeline: Res<UiMaterialPipeline<M>>,
-    mut phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
-    mut previous_len: Local<usize>,
-) where
-    M: UiMaterial,
-    M::Data: PartialEq + Eq + Hash + Clone,
-{
-    if let (Some(view_binding), Some(globals_binding)) = (
-        view_uniforms.uniforms.binding(),
-        globals_buffer.buffer.binding(),
-    ) {
-        let mut batches: Vec<(Entity, UiMaterialBatch<M>)> = Vec::with_capacity(*previous_len);
-
-        ui_meta.vertices.clear();
-        ui_meta.view_bind_group = Some(render_device.create_bind_group(
-            "ui_material_view_bind_group",
-            &pipeline_cache.get_bind_group_layout(&ui_material_pipeline.view_layout),
-            &BindGroupEntries::sequential((view_binding, globals_binding)),
-        ));
-        let mut index = 0;
-
-        for ui_phase in phases.values_mut() {
-            let mut batch_item_index = 0;
-            let mut batch_shader_handle = None;
-
-            for item_index in 0..ui_phase.items.len() {
-                let item = &mut ui_phase.items[item_index];
-                if let Some(extracted_uinode) = extracted_uinodes
-                    .objects
-                    .get(&item.main_entity())
-                    .and_then(|(_, subnodes)| subnodes.get(&item.entity()))
-                {
-                    // Initialize the batch range to be zero-length initially.
-                    // We'll extend it as we accumulate items into this batch.
-                    item.batch_range = (item_index as u32)..(item_index as u32);
-
-                    let mut existing_batch = batches
-                        .last_mut()
-                        .filter(|_| batch_shader_handle == Some(extracted_uinode.material));
-
-                    if existing_batch.is_none() {
-                        batch_item_index = item_index;
-                        batch_shader_handle = Some(extracted_uinode.material);
-
-                        let new_batch = UiMaterialBatch {
-                            range: index..index,
-                            material: extracted_uinode.material,
-                        };
-
-                        batches.push((item.entity(), new_batch));
-
-                        existing_batch = batches.last_mut();
-                    }
-
-                    let uinode_rect = extracted_uinode.rect;
-
-                    let rect_size = uinode_rect.size();
-
-                    let positions = QUAD_VERTEX_POSITIONS
-                        .map(|pos| extracted_uinode.transform.transform_point2(pos * rect_size));
-
-                    let uvs = [
-                        Vec2::new(uinode_rect.min.x, uinode_rect.min.y),
-                        Vec2::new(uinode_rect.max.x, uinode_rect.min.y),
-                        Vec2::new(uinode_rect.max.x, uinode_rect.max.y),
-                        Vec2::new(uinode_rect.min.x, uinode_rect.max.y),
-                    ]
-                    .map(|pos| pos / uinode_rect.max);
-
-                    let polygon = [
-                        (positions[0], uvs[0]),
-                        (positions[1], uvs[1]),
-                        (positions[2], uvs[2]),
-                        (positions[3], uvs[3]),
-                    ];
-                    let clipped_polygon =
-                        clip_polygon(extracted_uinode.clip.as_ref(), &polygon, Vec2::lerp);
-                    if clipped_polygon.is_empty() {
-                        continue;
-                    }
-
-                    for i in 1..clipped_polygon.len() - 1 {
-                        for vertex in [
-                            clipped_polygon[0],
-                            clipped_polygon[i],
-                            clipped_polygon[i + 1],
-                        ] {
-                            ui_meta.vertices.push(UiMaterialVertex {
-                                position: vertex.0.extend(1.0).into(),
-                                uv: vertex.1.into(),
-                                size: extracted_uinode.rect.size().into(),
-                                radius: extracted_uinode.border_radius,
-                                border: [
-                                    extracted_uinode.border.min_inset.x,
-                                    extracted_uinode.border.min_inset.y,
-                                    extracted_uinode.border.max_inset.x,
-                                    extracted_uinode.border.max_inset.y,
-                                ],
-                            });
-                        }
-                    }
-
-                    index += 3 * (clipped_polygon.len() as u32 - 2);
-                    existing_batch.unwrap().1.range.end = index;
-                    ui_phase.items[batch_item_index].batch_range_mut().end += 1;
-                } else {
-                    batch_shader_handle = None;
-                }
-            }
-        }
-        ui_meta.vertices.write_buffer(&render_device, &render_queue);
-        *previous_len = batches.len();
-        commands.try_insert_batch(batches);
-    }
-}
-
 pub struct PreparedUiMaterial<T: UiMaterial> {
     pub bindings: BindingResources,
     pub key: T::Data,
@@ -716,4 +578,18 @@ impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M> {
     }
 }
 
-impl<M> UiTexturedRenderAsset for PreparedUiMaterial<M> where M: UiMaterial {}
+impl<M> UiTexturedRenderAsset for PreparedUiMaterial<M>
+where
+    M: UiMaterial,
+{
+    fn create_textured_bind_group(
+        _: &RenderDevice,
+        _: &BindGroupLayout,
+        _: &RenderAssets<Self>,
+        _: &AssetId<<Self as RenderAsset>::SourceAsset>,
+    ) -> Option<BindGroup> {
+        // This should ordinarily never be called, as UI materials are prepared
+        // during [`RenderAsset::prepare_asset`].`
+        None
+    }
+}

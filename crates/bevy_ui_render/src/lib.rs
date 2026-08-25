@@ -36,7 +36,6 @@ use bevy_reflect::Reflect;
 use bevy_render::camera::{extract_cameras, CameraMainPassTextureFormats};
 use bevy_render::sync_world::{MainEntityHashMap, MainEntityHashSet};
 use bevy_shader::load_shader_library;
-use bevy_sprite_render::SpriteAssetEvents;
 use bevy_ui::widget::{ImageNode, ImageNodeSize, NodeImageMode, Text, TextShadow, ViewportNode};
 use bevy_ui::{
     BackgroundColor, BackgroundGradient, BorderColor, BorderGradient, BoxShadow, CalculatedClip,
@@ -45,7 +44,7 @@ use bevy_ui::{
 };
 
 use bevy_app::prelude::*;
-use bevy_asset::{Asset, AssetEvent, AssetEventSystems, AssetId, Assets};
+use bevy_asset::{AssetEventSystems, AssetId, Assets};
 use bevy_color::{Alpha, ColorToComponents, LinearRgba};
 use bevy_core_pipeline::schedule::{Core2d, Core2dSystems, Core3d, Core3dSystems};
 use bevy_core_pipeline::upscaling::upscaling;
@@ -55,6 +54,7 @@ use bevy_ecs::system::{StaticSystemParam, SystemParam, SystemParamItem};
 use bevy_image::{prelude::*, TRANSPARENT_IMAGE_HANDLE};
 use bevy_math::{proj, Affine2, FloatOrd, Rect, UVec4, Vec2};
 use bevy_render::{
+    globals::GlobalsBuffer,
     render_asset::RenderAssets,
     render_phase::{
         sort_phase_system, AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex,
@@ -73,7 +73,7 @@ pub use debug_overlay::{GlobalUiDebugOptions, UiDebugOptions};
 
 use gradient::GradientPlugin;
 
-use bevy_platform::collections::{HashMap, HashSet};
+use bevy_platform::collections::{hash_map::Entry, HashMap, HashSet};
 use bevy_text::{
     ComputedTextBlock, EditableText, PositionedGlyph, Strikethrough, StrikethroughColor,
     TextBackgroundColor, TextColor, TextCursorStyle, TextLayoutInfo, TextSpan, Underline,
@@ -84,7 +84,7 @@ use box_shadow::BoxShadowPlugin;
 use bytemuck::{Pod, Zeroable};
 use core::ops::Range;
 use smallvec::SmallVec;
-use std::marker::Send;
+use std::marker::{PhantomData, Send};
 use std::mem;
 
 pub use pipeline::*;
@@ -239,8 +239,8 @@ impl Plugin for UiRenderPlugin {
 
         render_app
             .init_gpu_resource::<SpecializedRenderPipelines<UiPipeline>>()
-            .init_gpu_resource::<UiTexturedBindGroups<Image>>()
-            .init_gpu_resource::<UiMeta>()
+            .init_gpu_resource::<UiTexturedBindGroups<GpuImage>>()
+            .init_gpu_resource::<UiMeta<ExtractedUiNode>>()
             .init_resource::<ExtractedUiNodes>()
             .allow_ambiguous_resource::<ExtractedUiNodes>()
             .init_resource::<DrawFunctions<TransparentUi>>()
@@ -297,8 +297,8 @@ impl Plugin for UiRenderPlugin {
                     queue_ui_items::<ExtractedUiNode>.in_set(RenderSystems::Queue),
                     sort_phase_system::<TransparentUi>.in_set(RenderSystems::PhaseSort),
                     remove_textured_bind_groups::<GpuImage>.in_set(RenderSystems::PrepareResources),
-                    prepare_uinodes.in_set(RenderSystems::PrepareBindGroups),
-                    clear_batches.in_set(RenderSystems::Cleanup),
+                    prepare_uinodes::<ExtractedUiNode>.in_set(RenderSystems::PrepareBindGroups),
+                    clear_batches::<ExtractedUiNode>.in_set(RenderSystems::Cleanup),
                 ),
             )
             .add_systems(
@@ -371,12 +371,26 @@ pub struct ExtractedUiNode {
     pub transform: Affine2,
 }
 
+#[derive(Clone, Default)]
+pub struct ExtractedUiNodeInstanceData {
+    color: [f32; 4],
+    flags: u32,
+    radius: [[f32; 4]; 2],
+    border: [f32; 4],
+    size: Vec2,
+}
+
 impl UiRenderObject for ExtractedUiNode {
     type DrawFunctions = DrawUi;
     type ViewPipelineKeyBuilder = UiNodePipelineKeyBuilder;
     type ViewQueryData = Option<&'static UiAntiAlias>;
     type SpecializedRenderPipeline = UiPipeline;
     type PipelineKeySystemParam = ();
+    type Vertex = UiVertex;
+    type InstanceData = ExtractedUiNodeInstanceData;
+    type TexturedGpuAsset = GpuImage;
+
+    const TEXTURED: bool = true;
 
     fn get_sort_key(&self) -> FloatOrd {
         FloatOrd(self.z_order)
@@ -402,6 +416,184 @@ impl UiRenderObject for ExtractedUiNode {
                 None | Some(UiAntiAlias::On)
             ),
         })
+    }
+
+    fn view_bind_group_layout(
+        pipeline: &Self::SpecializedRenderPipeline,
+    ) -> &BindGroupLayoutDescriptor {
+        &pipeline.view_layout
+    }
+
+    fn textured_asset_id(&self) -> AssetId<Image> {
+        self.image
+    }
+
+    fn textured_bind_group_layout(
+        pipeline: &Self::SpecializedRenderPipeline,
+    ) -> Option<&BindGroupLayoutDescriptor> {
+        Some(&pipeline.image_layout)
+    }
+
+    fn clip(&self) -> Option<&CalculatedClip> {
+        self.clip.as_ref()
+    }
+
+    fn quad_count(&self) -> usize {
+        match &self.item {
+            ExtractedUiItem::Node { .. } => 1,
+            ExtractedUiItem::Glyphs { glyphs } => glyphs.len(),
+        }
+    }
+
+    fn populate_quad(
+        &self,
+        out_quad: &mut UiQuad<Self::InstanceData>,
+        quad_index: usize,
+        gpu_textured_assets: &RenderAssets<Self::TexturedGpuAsset>,
+        textured_asset_id: &AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset>,
+    ) {
+        let (positions, uvs, points);
+
+        match &self.item {
+            ExtractedUiItem::Node {
+                atlas_scaling,
+                flip_x,
+                flip_y,
+                border_radius,
+                border,
+                node_type,
+                rect,
+                color,
+            } => {
+                debug_assert_eq!(quad_index, 0);
+
+                let mut flags = if self.image != AssetId::default() {
+                    shader_flags::TEXTURED
+                } else {
+                    shader_flags::UNTEXTURED
+                };
+
+                let rect_size = rect.size();
+
+                let transform = self.transform;
+
+                // Specify the corners of the node
+                points = QUAD_VERTEX_POSITIONS.map(|pos| pos * rect_size);
+                positions = points.map(|pos| transform.transform_point2(pos));
+
+                uvs = if flags == shader_flags::UNTEXTURED {
+                    [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y]
+                } else {
+                    let mut uinode_rect = *rect;
+                    let image = gpu_textured_assets
+                        .get(*textured_asset_id)
+                        .expect("Image was checked during batching and should still exist");
+                    // Rescale atlases. This is done here because we need texture data that might not be available in Extract.
+                    let atlas_extent = atlas_scaling
+                        .map(|scaling| image.size_2d().as_vec2() * scaling)
+                        .unwrap_or(uinode_rect.max);
+                    if *flip_x {
+                        mem::swap(&mut uinode_rect.max.x, &mut uinode_rect.min.x);
+                    }
+                    if *flip_y {
+                        mem::swap(&mut uinode_rect.max.y, &mut uinode_rect.min.y);
+                    }
+                    [
+                        Vec2::new(uinode_rect.min.x, uinode_rect.min.y),
+                        Vec2::new(uinode_rect.max.x, uinode_rect.min.y),
+                        Vec2::new(uinode_rect.max.x, uinode_rect.max.y),
+                        Vec2::new(uinode_rect.min.x, uinode_rect.max.y),
+                    ]
+                    .map(|pos| pos / atlas_extent)
+                };
+
+                let color = color.to_f32_array();
+                match node_type {
+                    NodeType::Border(border_flags) => {
+                        flags |= border_flags;
+                    }
+                    NodeType::Inverted => {
+                        flags |= INVERT;
+                    }
+                    _ => {}
+                }
+
+                out_quad.instance_data = ExtractedUiNodeInstanceData {
+                    color,
+                    flags,
+                    radius: (*border_radius).into(),
+                    border: [
+                        border.min_inset.x,
+                        border.min_inset.y,
+                        border.max_inset.x,
+                        border.max_inset.y,
+                    ],
+                    size: rect_size,
+                };
+            }
+            ExtractedUiItem::Glyphs { glyphs } => {
+                let image = gpu_textured_assets
+                    .get(*textured_asset_id)
+                    .expect("Image was checked during batching and should still exist");
+
+                let atlas_extent = image.size_2d().as_vec2();
+
+                let glyph = &glyphs[quad_index];
+                let color = glyph.color.to_f32_array();
+                let glyph_rect = glyph.rect;
+                let rect_size = glyph_rect.size();
+
+                // Specify the corners of the glyph
+                positions = QUAD_VERTEX_POSITIONS.map(|pos| {
+                    self.transform
+                        .transform_point2(glyph.translation + pos * glyph_rect.size())
+                });
+
+                uvs = [
+                    Vec2::new(glyph.rect.min.x, glyph.rect.min.y) / atlas_extent,
+                    Vec2::new(glyph.rect.max.x, glyph.rect.min.y) / atlas_extent,
+                    Vec2::new(glyph.rect.max.x, glyph.rect.max.y) / atlas_extent,
+                    Vec2::new(glyph.rect.min.x, glyph.rect.max.y) / atlas_extent,
+                ];
+
+                points = default();
+
+                out_quad.instance_data = ExtractedUiNodeInstanceData {
+                    color,
+                    flags: shader_flags::TEXTURED,
+                    radius: default(),
+                    border: default(),
+                    size: rect_size,
+                };
+            }
+        }
+
+        for (&mut (ref mut out_position, ref mut out_uvs), (position, (uv_a, uv_b))) in out_quad
+            .vertices
+            .iter_mut()
+            .zip(positions.iter().zip(uvs.iter().zip(points.iter())))
+        {
+            *out_position = *position;
+            out_uvs.uv = *uv_a;
+            out_uvs.point = *uv_b;
+        }
+    }
+
+    fn create_vertex(
+        quad: &UiQuad<Self::InstanceData>,
+        position: Vec2,
+        uvs: &UiQuadInterpolants,
+    ) -> UiVertex {
+        UiVertex {
+            position: position.extend(0.0).into(),
+            uv: uvs.uv.into(),
+            color: quad.instance_data.color,
+            flags: quad.instance_data.flags,
+            radius: quad.instance_data.radius,
+            border: quad.instance_data.border,
+            size: quad.instance_data.size.into(),
+            point: uvs.point.into(),
+        }
     }
 }
 
@@ -2017,7 +2209,7 @@ pub fn extract_text_decorations(
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct UiVertex {
+pub struct UiVertex {
     pub position: [f32; 3],
     pub uv: [f32; 2],
     pub color: [f32; 4],
@@ -2037,13 +2229,19 @@ struct UiVertex {
 }
 
 #[derive(Resource)]
-pub struct UiMeta {
-    vertices: RawBufferVec<UiVertex>,
+pub struct UiMeta<E>
+where
+    E: UiRenderObject,
+{
+    vertices: RawBufferVec<E::Vertex>,
     indices: RawBufferVec<u32>,
     view_bind_group: Option<BindGroup>,
 }
 
-impl Default for UiMeta {
+impl<E> Default for UiMeta<E>
+where
+    E: UiRenderObject,
+{
     fn default() -> Self {
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
@@ -2061,9 +2259,13 @@ pub(crate) const QUAD_VERTEX_POSITIONS: [Vec2; 4] = [
 ];
 
 #[derive(Component, Debug)]
-pub struct UiBatch {
+pub struct UiBatch<E>
+where
+    E: UiRenderObject,
+{
     pub range: Range<u32>,
-    pub image: AssetId<Image>,
+    pub textured_asset_id: AssetId<<E::TexturedGpuAsset as RenderAsset>::SourceAsset>,
+    phantom: PhantomData<E>,
 }
 
 /// The values here should match the values for the constants in `ui.wesl`
@@ -2356,32 +2558,77 @@ where
     }
 }
 
-impl UiTexturedRenderAsset for GpuImage {}
+impl UiTexturedRenderAsset for GpuImage {
+    fn create_textured_bind_group(
+        render_device: &RenderDevice,
+        layout: &BindGroupLayout,
+        render_assets: &RenderAssets<GpuImage>,
+        asset_id: &AssetId<Image>,
+    ) -> Option<BindGroup> {
+        render_assets.get(*asset_id).map(|gpu_image| {
+            render_device.create_bind_group(
+                "UI textured bind group",
+                layout,
+                &BindGroupEntries::sequential((&gpu_image.texture_view, &gpu_image.sampler)),
+            )
+        })
+    }
+}
 
-pub fn prepare_uinodes(
+/// A system, part of the render world, that creates the geometry and builds the
+/// [`UiBatch`]es for each type of UI render object.
+///
+/// Additionally, this system uploads the buffers to the GPU. It also populates
+/// bind groups for textured items that don't create their bind groups during
+/// the asset preparation phase.
+pub fn prepare_uinodes<E>(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     pipeline_cache: Res<PipelineCache>,
-    mut ui_meta: ResMut<UiMeta>,
-    extracted_uinodes: Res<ExtractedUiNodes>,
+    ui_meta: ResMut<UiMeta<E>>,
+    extracted_uinodes: Res<UiRenderObjects<E>>,
     view_uniforms: Res<ViewUniforms>,
-    ui_pipeline: Res<UiPipeline>,
-    mut image_bind_groups: ResMut<UiTexturedBindGroups<GpuImage>>,
-    gpu_images: Res<RenderAssets<GpuImage>>,
+    globals_buffer: Res<GlobalsBuffer>,
+    ui_pipeline: Res<E::SpecializedRenderPipeline>,
+    mut maybe_textured_bind_groups: Option<ResMut<UiTexturedBindGroups<E::TexturedGpuAsset>>>,
+    gpu_textured_assets: Res<RenderAssets<E::TexturedGpuAsset>>,
     mut phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
     mut previous_len: Local<usize>,
-) {
+) where
+    E: UiRenderObject,
+{
+    let ui_meta = ui_meta.into_inner();
+
+    let globals_binding = if E::NEEDS_GLOBALS_UNIFORM {
+        let Some(globals_binding) = globals_buffer.buffer.binding() else {
+            return;
+        };
+        Some(globals_binding)
+    } else {
+        None
+    };
+
     if let Some(view_binding) = view_uniforms.uniforms.binding() {
-        let mut batches: Vec<(Entity, UiBatch)> = Vec::with_capacity(*previous_len);
+        let mut batches: Vec<(Entity, UiBatch<E>)> = Vec::with_capacity(*previous_len);
 
         ui_meta.vertices.clear();
         ui_meta.indices.clear();
-        ui_meta.view_bind_group = Some(render_device.create_bind_group(
-            "ui_view_bind_group",
-            &pipeline_cache.get_bind_group_layout(&ui_pipeline.view_layout),
-            &BindGroupEntries::single(view_binding),
-        ));
+        let view_bind_group_layout =
+            pipeline_cache.get_bind_group_layout(E::view_bind_group_layout(&ui_pipeline));
+        ui_meta.view_bind_group = Some(if let Some(globals_binding) = globals_binding {
+            render_device.create_bind_group(
+                "ui_view_and_globals_bind_group",
+                &view_bind_group_layout,
+                &BindGroupEntries::sequential((view_binding, globals_binding)),
+            )
+        } else {
+            render_device.create_bind_group(
+                "ui_view_bind_group",
+                &view_bind_group_layout,
+                &BindGroupEntries::single(view_binding),
+            )
+        });
 
         // Buffer indexes
         let mut vertices_index = 0;
@@ -2389,8 +2636,10 @@ pub fn prepare_uinodes(
 
         for ui_phase in phases.values_mut() {
             let mut batch_item_index = 0;
-            let mut batch_image_handle = None;
+            let mut batch_textured_asset_id = None;
+            let mut last_drawn_item_index_of_this_type: Option<usize> = None;
 
+            // Process each item.
             for item_index in 0..ui_phase.items.len() {
                 let item = &mut ui_phase.items[item_index];
                 let Some(extracted_uinode) = extracted_uinodes
@@ -2398,7 +2647,6 @@ pub fn prepare_uinodes(
                     .get(&item.main_entity())
                     .and_then(|(_, sub_uinodes)| sub_uinodes.get(&item.entity()))
                 else {
-                    batch_image_handle = None;
                     continue;
                 };
 
@@ -2406,247 +2654,117 @@ pub fn prepare_uinodes(
                 // We'll extend it as we accumulate items into this batch.
                 item.batch_range = (item_index as u32)..(item_index as u32);
 
-                let mut existing_batch = batches.last_mut();
+                let textured_asset_id = extracted_uinode.textured_asset_id();
 
-                if batch_image_handle.is_none()
-                    || existing_batch.is_none()
-                    || (batch_image_handle != Some(AssetId::default())
-                        && extracted_uinode.image != AssetId::default()
-                        && batch_image_handle != Some(extracted_uinode.image))
+                // If this object is textured, and there wasn't a bind group
+                // created for it yet, create one now.
+                if E::TEXTURED
+                    && let Entry::Vacant(vacant_entry) = maybe_textured_bind_groups
+                        .as_mut()
+                        .unwrap()
+                        .values
+                        .entry(textured_asset_id)
                 {
-                    if let Some(gpu_image) = gpu_images.get(extracted_uinode.image) {
-                        batch_item_index = item_index;
-                        batch_image_handle = Some(extracted_uinode.image);
+                    let Some(textured_bind_group) =
+                        <E::TexturedGpuAsset as UiTexturedRenderAsset>::create_textured_bind_group(
+                            &render_device,
+                            &pipeline_cache.get_bind_group_layout(
+                                E::textured_bind_group_layout(&ui_pipeline).expect(
+                                    "Textured UI render objects must have texture bind group \
+                                    layouts",
+                                ),
+                            ),
+                            &gpu_textured_assets,
+                            &textured_asset_id,
+                        )
+                    else {
+                        // The asset hasn't loaded yet.
+                        continue;
+                    };
+                    vacant_entry.insert(textured_bind_group);
+                }
 
-                        let new_batch = UiBatch {
-                            range: vertices_index..vertices_index,
-                            image: extracted_uinode.image,
-                        };
-                        batches.push((item.entity(), new_batch));
+                // We have to start a new batch if:
+                //
+                // 1. The item immediately preceding this one wasn't of this
+                //    type.
+                //
+                // 2. The item is textured and the batch already has a different
+                //    texture.
+                let batch_is_textured = batch_textured_asset_id != Some(AssetId::default());
+                if !last_drawn_item_index_of_this_type
+                    .is_some_and(|last_drawn_item_index| last_drawn_item_index + 1 == item_index)
+                    || (E::TEXTURED
+                        && batch_is_textured
+                        && batch_textured_asset_id != Some(textured_asset_id))
+                {
+                    // Start a new batch.
+                    batch_item_index = item_index;
+                    batch_textured_asset_id = Some(textured_asset_id);
 
-                        image_bind_groups
-                            .values
-                            .entry(extracted_uinode.image)
-                            .or_insert_with(|| {
-                                render_device.create_bind_group(
-                                    "ui_material_bind_group",
-                                    &pipeline_cache
-                                        .get_bind_group_layout(&ui_pipeline.image_layout),
-                                    &BindGroupEntries::sequential((
-                                        &gpu_image.texture_view,
-                                        &gpu_image.sampler,
-                                    )),
-                                )
-                            });
+                    let new_batch = UiBatch {
+                        range: vertices_index..vertices_index,
+                        textured_asset_id,
+                        phantom: PhantomData,
+                    };
+                    batches.push((item.entity(), new_batch));
+                } else if E::TEXTURED && !batch_is_textured {
+                    // The batch doesn't have a texture yet, but this item has a
+                    // texture. Assign the texture from this item to the batch.
+                    batch_textured_asset_id = Some(textured_asset_id);
+                    batches.last_mut().unwrap().1.textured_asset_id = textured_asset_id;
+                }
 
-                        existing_batch = batches.last_mut();
-                    } else {
+                // Now iterate over each quad.
+                let indices_start_index = indices_index;
+                let mut quad = UiQuad::default();
+                for quad_index in 0..extracted_uinode.quad_count() {
+                    // Fill in the per-quad data.
+                    extracted_uinode.populate_quad(
+                        &mut quad,
+                        quad_index,
+                        &gpu_textured_assets,
+                        &textured_asset_id,
+                    );
+
+                    // Clip the polygon with Sutherland-Hodgman clipping. Skip
+                    // if clipped out.
+                    let clipped_quad = clip_polygon(
+                        extracted_uinode.clip(),
+                        &quad.vertices,
+                        UiQuadInterpolants::interpolate,
+                    );
+                    if clipped_quad.is_empty() {
                         continue;
                     }
-                } else if batch_image_handle == Some(AssetId::default())
-                    && extracted_uinode.image != AssetId::default()
-                {
-                    if let Some(ref mut existing_batch) = existing_batch
-                        && let Some(gpu_image) = gpu_images.get(extracted_uinode.image)
-                    {
-                        batch_image_handle = Some(extracted_uinode.image);
-                        existing_batch.1.image = extracted_uinode.image;
 
-                        image_bind_groups
-                            .values
-                            .entry(extracted_uinode.image)
-                            .or_insert_with(|| {
-                                render_device.create_bind_group(
-                                    "ui_material_bind_group",
-                                    &pipeline_cache
-                                        .get_bind_group_layout(&ui_pipeline.image_layout),
-                                    &BindGroupEntries::sequential((
-                                        &gpu_image.texture_view,
-                                        &gpu_image.sampler,
-                                    )),
-                                )
-                            });
-                    } else {
-                        continue;
+                    // Push the geometry of the quad onto the vertex buffers
+                    // we're building up.
+
+                    for &(position, ref uvs) in &clipped_quad {
+                        ui_meta
+                            .vertices
+                            .push(E::create_vertex(&quad, position, uvs));
                     }
+
+                    for i in 1..clipped_quad.len() as u32 - 1 {
+                        ui_meta.indices.push(indices_index);
+                        ui_meta.indices.push(indices_index + i);
+                        ui_meta.indices.push(indices_index + i + 1);
+                    }
+
+                    vertices_index += 3 * (clipped_quad.len() as u32 - 2);
+                    indices_index += clipped_quad.len() as u32;
                 }
-                match &extracted_uinode.item {
-                    ExtractedUiItem::Node {
-                        atlas_scaling,
-                        flip_x,
-                        flip_y,
-                        border_radius,
-                        border,
-                        node_type,
-                        rect,
-                        color,
-                    } => {
-                        let mut flags = if extracted_uinode.image != AssetId::default() {
-                            shader_flags::TEXTURED
-                        } else {
-                            shader_flags::UNTEXTURED
-                        };
 
-                        let rect_size = rect.size();
-
-                        let transform = extracted_uinode.transform;
-
-                        // Specify the corners of the node
-                        let points = QUAD_VERTEX_POSITIONS.map(|pos| pos * rect_size);
-                        let positions = points.map(|pos| transform.transform_point2(pos));
-
-                        let uvs = if flags == shader_flags::UNTEXTURED {
-                            [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y]
-                        } else {
-                            let mut uinode_rect = *rect;
-                            let image = gpu_images
-                                .get(extracted_uinode.image)
-                                .expect("Image was checked during batching and should still exist");
-                            // Rescale atlases. This is done here because we need texture data that might not be available in Extract.
-                            let atlas_extent = atlas_scaling
-                                .map(|scaling| image.size_2d().as_vec2() * scaling)
-                                .unwrap_or(uinode_rect.max);
-                            if *flip_x {
-                                mem::swap(&mut uinode_rect.max.x, &mut uinode_rect.min.x);
-                            }
-                            if *flip_y {
-                                mem::swap(&mut uinode_rect.max.y, &mut uinode_rect.min.y);
-                            }
-                            [
-                                Vec2::new(uinode_rect.min.x, uinode_rect.min.y),
-                                Vec2::new(uinode_rect.max.x, uinode_rect.min.y),
-                                Vec2::new(uinode_rect.max.x, uinode_rect.max.y),
-                                Vec2::new(uinode_rect.min.x, uinode_rect.max.y),
-                            ]
-                            .map(|pos| pos / atlas_extent)
-                        };
-
-                        let color = color.to_f32_array();
-                        match *node_type {
-                            NodeType::Border(border_flags) => {
-                                flags |= border_flags;
-                            }
-                            NodeType::Inverted => {
-                                flags |= INVERT;
-                            }
-                            _ => {}
-                        }
-
-                        let vertices = clip_polygon(
-                            extracted_uinode.clip.as_ref(),
-                            &[
-                                (positions[0], (uvs[0], points[0])),
-                                (positions[1], (uvs[1], points[1])),
-                                (positions[2], (uvs[2], points[2])),
-                                (positions[3], (uvs[3], points[3])),
-                            ],
-                            |a, b, t| (a.0.lerp(b.0, t), a.1.lerp(b.1, t)),
-                        );
-                        if vertices.is_empty() {
-                            continue;
-                        }
-
-                        for &(position, (uv, point)) in &vertices {
-                            ui_meta.vertices.push(UiVertex {
-                                position: position.extend(0.).into(),
-                                uv: uv.into(),
-                                color,
-                                flags,
-                                radius: (*border_radius).into(),
-                                border: [
-                                    border.min_inset.x,
-                                    border.min_inset.y,
-                                    border.max_inset.x,
-                                    border.max_inset.y,
-                                ],
-                                size: rect_size.into(),
-                                point: point.into(),
-                            });
-                        }
-
-                        for i in 1..vertices.len() as u32 - 1 {
-                            ui_meta.indices.push(indices_index);
-                            ui_meta.indices.push(indices_index + i);
-                            ui_meta.indices.push(indices_index + i + 1);
-                        }
-
-                        vertices_index += 3 * (vertices.len() as u32 - 2);
-                        indices_index += vertices.len() as u32;
-                    }
-                    ExtractedUiItem::Glyphs { glyphs } => {
-                        let image = gpu_images
-                            .get(extracted_uinode.image)
-                            .expect("Image was checked during batching and should still exist");
-
-                        let atlas_extent = image.size_2d().as_vec2();
-
-                        for glyph in glyphs {
-                            let color = glyph.color.to_f32_array();
-                            let glyph_rect = glyph.rect;
-                            let rect_size = glyph_rect.size();
-
-                            // Specify the corners of the glyph
-                            let positions = QUAD_VERTEX_POSITIONS.map(|pos| {
-                                extracted_uinode
-                                    .transform
-                                    .transform_point2(glyph.translation + pos * glyph_rect.size())
-                            });
-
-                            let vertices = clip_polygon(
-                                extracted_uinode.clip.as_ref(),
-                                &[
-                                    (
-                                        positions[0],
-                                        Vec2::new(glyph.rect.min.x, glyph.rect.min.y)
-                                            / atlas_extent,
-                                    ),
-                                    (
-                                        positions[1],
-                                        Vec2::new(glyph.rect.max.x, glyph.rect.min.y)
-                                            / atlas_extent,
-                                    ),
-                                    (
-                                        positions[2],
-                                        Vec2::new(glyph.rect.max.x, glyph.rect.max.y)
-                                            / atlas_extent,
-                                    ),
-                                    (
-                                        positions[3],
-                                        Vec2::new(glyph.rect.min.x, glyph.rect.max.y)
-                                            / atlas_extent,
-                                    ),
-                                ],
-                                Vec2::lerp,
-                            );
-                            if vertices.is_empty() {
-                                continue;
-                            }
-
-                            for vertex in &vertices {
-                                ui_meta.vertices.push(UiVertex {
-                                    position: vertex.0.extend(0.).into(),
-                                    uv: vertex.1.into(),
-                                    color,
-                                    flags: shader_flags::TEXTURED,
-                                    radius: [[0.0; 4]; 2],
-                                    border: [0.0; 4],
-                                    size: rect_size.into(),
-                                    point: [0.0; 2],
-                                });
-                            }
-
-                            for i in 1..vertices.len() as u32 - 1 {
-                                ui_meta.indices.push(indices_index);
-                                ui_meta.indices.push(indices_index + i);
-                                ui_meta.indices.push(indices_index + i + 1);
-                            }
-
-                            vertices_index += 3 * (vertices.len() as u32 - 2);
-                            indices_index += vertices.len() as u32;
-                        }
-                    }
+                // If this batch was empty, skip it entirely.
+                if indices_start_index == indices_index {
+                    continue;
                 }
-                existing_batch.unwrap().1.range.end = vertices_index;
+
+                // Push the batch onto the list of batches we're building up.
+                batches.last_mut().unwrap().1.range.end = vertices_index;
+                last_drawn_item_index_of_this_type = Some(item_index);
                 ui_phase.items[batch_item_index].batch_range_mut().end += 1;
             }
         }
@@ -2681,9 +2799,12 @@ pub fn remove_textured_bind_groups<A>(
 /// them.
 ///
 /// This is run during the render cleanup phase.
-pub fn clear_batches(mut commands: Commands, batches_query: Query<Entity, With<UiBatch>>) {
+pub fn clear_batches<E>(mut commands: Commands, batches_query: Query<Entity, With<UiBatch<E>>>)
+where
+    E: UiRenderObject,
+{
     for entity in &batches_query {
-        commands.entity(entity).remove::<UiBatch>();
+        commands.entity(entity).remove::<UiBatch<E>>();
     }
 }
 
@@ -2811,6 +2932,32 @@ pub trait UiRenderObject: Send + Sync + 'static {
     /// Any extra system data needed in order to create a pipeline key.
     type PipelineKeySystemParam: SystemParam;
 
+    /// The GPU type of a single vertex.
+    type Vertex: Pod + Zeroable + Send + Sync + 'static;
+
+    /// Data that's unique to each quad but shared among all vertices.
+    ///
+    /// This isn't uploaded to the GPU; it's there to aid in the construction of
+    /// a vertex in [`Self::create_vertex`].
+    type InstanceData: Clone + Default;
+
+    /// If there is no texture, you can set this to `GpuImage`.
+    type TexturedGpuAsset: UiTexturedRenderAsset;
+
+    /// Whether this object needs an extra bind group to track per-node
+    /// resources.
+    ///
+    /// This is typically used to sample a texture, hence the name. For example,
+    /// UI image nodes, glyphs, texture slices, and UI materials are textured.
+    /// UI box shadows and gradients aren't.
+    const TEXTURED: bool = false;
+
+    /// Returns true if the `Globals` uniform needs to be attached to the
+    /// shader.
+    ///
+    /// Right now, only UI materials use this uniform.
+    const NEEDS_GLOBALS_UNIFORM: bool = false;
+
     /// Returns the sort order for this render object.
     fn get_sort_key(&self) -> FloatOrd;
 
@@ -2827,13 +2974,133 @@ pub trait UiRenderObject: Send + Sync + 'static {
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
         system_param: &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key>;
+
+    /// Extracts the layout of the view bind group from the given pipeline and
+    /// returns it.
+    fn view_bind_group_layout(
+        pipeline: &Self::SpecializedRenderPipeline,
+    ) -> &BindGroupLayoutDescriptor;
+
+    /// Returns the asset ID corresponding to the texture that this render
+    /// object uses.
+    ///
+    /// If the object isn't textured, or the texture hasn't loaded yet, this
+    /// method returns [`AssetId::default`].
+    ///
+    /// The default implementation returns [`AssetId::default`].
+    fn textured_asset_id(&self) -> AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset> {
+        AssetId::default()
+    }
+
+    /// Returns the layout of the textured bind group, if applicable.
+    ///
+    /// If [`Self::TEXTURED`] is true, this method must have an implementation
+    /// that returns `Some`.
+    ///
+    /// The default implementation returns `None`.
+    fn textured_bind_group_layout(
+        _pipeline: &Self::SpecializedRenderPipeline,
+    ) -> Option<&BindGroupLayoutDescriptor> {
+        None
+    }
+
+    /// Returns the computed clip of this node.
+    fn clip(&self) -> Option<&CalculatedClip>;
+
+    /// Returns the number of quads that this render object emits.
+    fn quad_count(&self) -> usize {
+        1
+    }
+
+    /// Populates the [`UiQuad`] data for a single quad.
+    ///
+    /// The given `quad_index` is always less than [`Self::quad_count`].
+    fn populate_quad(
+        &self,
+        out_quad: &mut UiQuad<Self::InstanceData>,
+        quad_index: usize,
+        gpu_textured_assets: &RenderAssets<Self::TexturedGpuAsset>,
+        textured_asset_id: &AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset>,
+    );
+
+    /// Creates the interpolated vertex for a quad with the given world-space
+    /// position.
+    ///
+    /// The interpolants are already pre-interpolated, so all this method needs
+    /// to do is to pack the position, instance data, and interpolants into an
+    /// instance of type [`Self::Vertex`].
+    fn create_vertex(
+        quad: &UiQuad<Self::InstanceData>,
+        position: Vec2,
+        uvs: &UiQuadInterpolants,
+    ) -> Self::Vertex;
+}
+
+/// Unclipped quad data emitted by a UI render object.
+///
+/// Each UI render object corresponds to at least one of these.
+#[derive(Default)]
+pub struct UiQuad<ID>
+where
+    ID: Clone + Default,
+{
+    /// The world-space position of each vertex, as well as the interpolants.
+    ///
+    /// This is in the order (top left, top right, bottom right, bottom left).
+    vertices: [(Vec2, UiQuadInterpolants); 4],
+    /// Render-object-specific per-quad data.
+    instance_data: ID,
+}
+
+/// Data that's interpolated across each quad.
+///
+/// The meaning of this data is up to each individual UI render object. Any
+/// interpolant can be set to `default()` if not needed by the render object in
+/// question.
+#[derive(Clone, Copy, Default)]
+pub struct UiQuadInterpolants {
+    /// An interpolant typically used for the UV of a texture.
+    uv: Vec2,
+    /// A second interpolant, the meaning of which varies depending on the
+    /// render object.
+    point: Vec2,
+}
+
+impl UiQuadInterpolants {
+    /// Interpolates the [`Self::uv`] and [`Self::point`] data according to the
+    /// given time value.
+    fn interpolate(a: Self, b: Self, t: f32) -> UiQuadInterpolants {
+        UiQuadInterpolants {
+            uv: a.uv.lerp(b.uv, t),
+            point: a.point.lerp(b.point, t),
+        }
+    }
 }
 
 /// A render asset that can produce bind groups for a textured render object.
 ///
 /// At present, this is either a [`GpuImage`] or a
 /// [`ui_material_pipeline::PreparedUiMaterial`].
-pub trait UiTexturedRenderAsset: RenderAsset {}
+pub trait UiTexturedRenderAsset: RenderAsset {
+    /// Creates a textured bind group for the given asset suitable for attaching
+    /// to the shader.
+    ///
+    /// Bevy only calls this function if the render object is (1) textured and
+    /// (2) doesn't already have a cached bind group stored for the asset ID in
+    /// the [`UiTexturedBindGroups`]. In particular, even though UI materials
+    /// are textured, Bevy nevertheless doersn't call this function, since UI
+    /// materials insert themselves into [`UiTexturedBindGroups`] in the asset
+    /// preparation phase, not during [`prepare_uinodes`], and so the
+    /// corresponding bind groups are always considered present and up to date.
+    ///
+    /// If the asset hasn't loaded yet, this method should return `None`.
+    fn create_textured_bind_group(
+        _render_device: &RenderDevice,
+        _layout: &BindGroupLayout,
+        _render_assets: &RenderAssets<Self>,
+        _asset_id: &AssetId<<Self as RenderAsset>::SourceAsset>,
+    ) -> Option<BindGroup>;
+}
 
 /// Information about a single view that [`queue_ui_items`] caches.
 ///
