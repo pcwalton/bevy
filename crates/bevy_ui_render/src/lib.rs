@@ -12,6 +12,7 @@ pub mod clipping;
 mod gradient;
 mod image;
 use bevy_ecs::query::QueryData;
+use bevy_ecs::system::lifetimeless::SRes;
 use bevy_render::batching::gpu_preprocessing::IndirectParametersIndexed;
 use bevy_render::render_phase::DrawFunctionId;
 use bevy_render::render_resource::SpecializedRenderPipeline;
@@ -30,7 +31,7 @@ mod debug_overlay;
 use bevy_a11y::AccessibilitySystems;
 use bevy_camera::visibility::InheritedVisibility;
 use bevy_camera::{Camera, Camera2d, Camera3d, RenderTarget};
-use bevy_ecs::entity::{EntityHashSet, EntityIndexMap};
+use bevy_ecs::entity::{EntityHashMap, EntityHashSet, EntityIndexMap};
 use bevy_reflect::prelude::ReflectDefault;
 use bevy_reflect::Reflect;
 use bevy_render::camera::{extract_cameras, CameraMainPassTextureFormats};
@@ -390,7 +391,7 @@ impl UiRenderObject for ExtractedUiNode {
     type ViewPipelineKeyBuilder = UiNodePipelineKeyBuilder;
     type ViewQueryData = Option<&'static UiAntiAlias>;
     type SpecializedRenderPipeline = UiPipeline;
-    type PipelineKeySystemParam = ();
+    type PipelineKeySystemParam = SRes<UiMeta<ExtractedUiNode>>;
 
     fn get_sort_key(&self) -> FloatOrd {
         FloatOrd(self.z_order)
@@ -407,14 +408,22 @@ impl UiRenderObject for ExtractedUiNode {
     fn create_pipeline_key(
         &self,
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
-        _: &mut SystemParamItem<Self::PipelineKeySystemParam>,
+        ui_meta: &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key> {
+        let mut flags = UiPipelineKeyFlags::empty();
+        if matches!(
+            cached_camera_view.pipeline_key_builder.anti_alias,
+            None | Some(UiAntiAlias::On)
+        ) {
+            flags.insert(UiPipelineKeyFlags::ANTI_ALIAS);
+        }
+        if matches!(ui_meta.instances, UiInstances::Retained { .. }) {
+            flags.insert(UiPipelineKeyFlags::RETAINED_INSTANCES);
+        }
+
         Some(UiPipelineKey {
             target_format: cached_camera_view.extracted_view.target_format,
-            anti_alias: matches!(
-                cached_camera_view.pipeline_key_builder.anti_alias,
-                None | Some(UiAntiAlias::On)
-            ),
+            flags,
         })
     }
 }
@@ -424,10 +433,13 @@ impl UiPrepareRenderObject for ExtractedUiNode {
 
     const TEXTURED: bool = true;
 
-    fn view_bind_group_layout(
+    fn bind_group_layouts(
         pipeline: &Self::SpecializedRenderPipeline,
-    ) -> &BindGroupLayoutDescriptor {
-        &pipeline.view_layout
+    ) -> UiRenderObjectBindGroupLayouts<'_> {
+        UiRenderObjectBindGroupLayouts {
+            view: &pipeline.view_layout,
+            instances: &pipeline.instances_layout,
+        }
     }
 
     fn image(&self) -> AssetId<Image> {
@@ -2206,20 +2218,132 @@ where
 {
     vertices: RawBufferVec<UiVertex>,
     indices: RawBufferVec<u32>,
-    instances: RawBufferVec<E::InstanceData>,
+    instances: UiInstances<E::InstanceData>,
     view_bind_group: Option<BindGroup>,
 }
 
-impl<E> Default for UiMeta<E>
+impl<E> FromWorld for UiMeta<E>
 where
     E: UiPrepareRenderObject,
 {
-    fn default() -> Self {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
             indices: RawBufferVec::new(BufferUsages::INDEX),
-            instances: RawBufferVec::new(BufferUsages::VERTEX),
+            instances: if render_device.limits().max_storage_buffers_per_shader_stage > 0 {
+                UiInstances::Retained {
+                    instances: SparseBufferVec::new(
+                        BufferUsages::STORAGE,
+                        "UI retained instances".into(),
+                    ),
+                    instances_free_list: vec![],
+                    entity_to_instance_index: default(),
+                    instance_index_buffer: RawBufferVec::new(BufferUsages::VERTEX),
+                    bind_group: None,
+                }
+            } else {
+                UiInstances::Immediate {
+                    instances: RawBufferVec::new(BufferUsages::VERTEX | BufferUsages::COPY_DST),
+                }
+            },
             view_bind_group: None,
+        }
+    }
+}
+
+#[expect(clippy::large_enum_variant, reason = "it only ever wastes stack space")]
+pub(crate) enum UiInstances<T>
+where
+    T: Pod + Default,
+{
+    Retained {
+        instances: SparseBufferVec<T>,
+        instances_free_list: Vec<u32>,
+        entity_to_instance_index: EntityHashMap<SmallVec<[u32; 1]>>,
+        instance_index_buffer: RawBufferVec<u32>,
+        bind_group: Option<BindGroup>,
+    },
+    Immediate {
+        instances: RawBufferVec<T>,
+    },
+}
+
+impl<T> UiInstances<T>
+where
+    T: Pod + Default,
+{
+    fn get_entity_mut(&mut self, entity: Entity) -> UiEntityInstances<'_, T> {
+        match *self {
+            UiInstances::Retained {
+                ref mut instances,
+                ref mut instances_free_list,
+                ref mut entity_to_instance_index,
+                ref mut instance_index_buffer,
+                ..
+            } => UiEntityInstances::Retained {
+                instances,
+                instances_free_list,
+                entity_instance_indices: entity_to_instance_index.entry(entity).or_default(),
+                instance_index_buffer,
+            },
+            UiInstances::Immediate { ref mut instances } => {
+                UiEntityInstances::Immediate { instances }
+            }
+        }
+    }
+}
+
+enum UiEntityInstances<'a, T>
+where
+    T: Pod + Default,
+{
+    Retained {
+        instances: &'a mut SparseBufferVec<T>,
+        instances_free_list: &'a mut Vec<u32>,
+        entity_instance_indices: &'a mut SmallVec<[u32; 1]>,
+        instance_index_buffer: &'a mut RawBufferVec<u32>,
+    },
+    Immediate {
+        instances: &'a mut RawBufferVec<T>,
+    },
+}
+
+impl<'a, T> UiEntityInstances<'a, T>
+where
+    T: Pod + Default,
+{
+    fn get_or_insert_instance(
+        &mut self,
+        entity_index: usize,
+        create_instance: impl FnOnce() -> T,
+    ) -> u32 {
+        match *self {
+            UiEntityInstances::Immediate { ref mut instances } => {
+                instances.push(create_instance()) as u32
+            }
+            UiEntityInstances::Retained {
+                ref mut instances,
+                ref mut instances_free_list,
+                ref mut entity_instance_indices,
+                ref mut instance_index_buffer,
+            } => {
+                if let Some(instance_index) = entity_instance_indices.get_mut(entity_index) {
+                    return instance_index_buffer.push(*instance_index) as u32;
+                }
+
+                let instance_index = match instances_free_list.pop() {
+                    Some(instance_index) => {
+                        instances.set(instance_index, create_instance());
+                        instance_index
+                    }
+                    None => instances.push(create_instance()),
+                };
+                debug_assert_eq!(entity_instance_indices.len(), entity_index);
+                entity_instance_indices.push(instance_index);
+                instance_index_buffer.push(instance_index) as u32
+            }
         }
     }
 }
@@ -2570,6 +2694,15 @@ pub fn prepare_uinodes<E>(
     gpu_images: Res<RenderAssets<GpuImage>>,
     mut phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
     events: Res<SpriteAssetEvents>,
+    (
+        mut sparse_buffer_update_jobs,
+        mut sparse_buffer_update_bind_groups,
+        sparse_buffer_update_pipelines,
+    ): (
+        ResMut<SparseBufferUpdateJobs>,
+        ResMut<SparseBufferUpdateBindGroups>,
+        Res<SparseBufferUpdatePipelines>,
+    ),
     mut previous_len: Local<usize>,
 ) where
     E: UiPrepareRenderObject,
@@ -2595,12 +2728,22 @@ pub fn prepare_uinodes<E>(
     if let Some(view_binding) = view_uniforms.uniforms.binding() {
         let mut batches: Vec<(Entity, UiBatch<E>)> = Vec::with_capacity(*previous_len);
 
+        let bind_group_layouts = E::bind_group_layouts(&ui_pipeline);
+
         ui_meta.vertices.clear();
         ui_meta.indices.clear();
-        ui_meta.instances.clear();
+
+        match ui_meta.instances {
+            UiInstances::Immediate { ref mut instances } => instances.clear(),
+            UiInstances::Retained {
+                ref mut instance_index_buffer,
+                ..
+            } => instance_index_buffer.clear(),
+        };
+
         ui_meta.view_bind_group = Some(render_device.create_bind_group(
             "ui_view_bind_group",
-            &pipeline_cache.get_bind_group_layout(E::view_bind_group_layout(&ui_pipeline)),
+            &pipeline_cache.get_bind_group_layout(bind_group_layouts.view),
             &BindGroupEntries::single(view_binding),
         ));
 
@@ -2721,12 +2864,14 @@ pub fn prepare_uinodes<E>(
                 }
 
                 let batch = &mut existing_batch.expect("We should have a batch").1;
+                let mut entity_instances = ui_meta.instances.get_entity_mut(item.entity());
                 let (mut quad, mut is_invisible) = (UiQuad::default(), true);
                 for quad_index in 0..extracted_uinode.quad_count() {
                     extracted_uinode.populate_quad(&mut quad, quad_index, gpu_image);
 
                     if extracted_uinode.clip().is_none() {
-                        let instance_index = ui_meta.instances.push(quad.instance_data) as u32;
+                        let instance_index = entity_instances
+                            .get_or_insert_instance(quad_index, || quad.instance_data);
                         batch.push_simple_quad(instance_index);
                         is_invisible = false;
                         continue;
@@ -2740,7 +2885,8 @@ pub fn prepare_uinodes<E>(
                         continue;
                     }
 
-                    let instance_index = ui_meta.instances.push(quad.instance_data) as u32;
+                    let instance_index =
+                        entity_instances.get_or_insert_instance(quad_index, || quad.instance_data);
                     let index_count = (clipped_quad.len() as u32 - 2) * 3;
                     batch.push(
                         vertices_index,
@@ -2775,7 +2921,38 @@ pub fn prepare_uinodes<E>(
 
         ui_meta.vertices.write_buffer(&render_device, &render_queue);
         ui_meta.indices.write_buffer(&render_device, &render_queue);
-        ui_meta.instances.write_buffer(&render_device, &render_queue);
+
+        match ui_meta.instances {
+            UiInstances::Immediate { ref mut instances } => {
+                instances.write_buffer(&render_device, &render_queue);
+            }
+            UiInstances::Retained {
+                ref mut instances,
+                ref mut instance_index_buffer,
+                ref mut bind_group,
+                ..
+            } => {
+                instances.write_buffers(&render_device, &render_queue);
+                instances.prepare_to_populate_buffers(
+                    &render_device,
+                    &pipeline_cache,
+                    &mut sparse_buffer_update_jobs,
+                    &mut sparse_buffer_update_bind_groups,
+                    &sparse_buffer_update_pipelines,
+                );
+                instance_index_buffer.write_buffer(&render_device, &render_queue);
+                *bind_group = instances.buffer().map(|instances_buffer| {
+                    let bind_group_layout =
+                        pipeline_cache.get_bind_group_layout(bind_group_layouts.instances);
+                    render_device.create_bind_group(
+                        "UI instances bind group",
+                        &bind_group_layout,
+                        &BindGroupEntries::single(instances_buffer.as_entire_binding()),
+                    )
+                });
+            }
+        }
+
         *previous_len = batches.len();
         commands.try_insert_batch(batches);
     }
@@ -2794,6 +2971,11 @@ where
     for entity in &batches_query {
         commands.entity(entity).remove::<UiBatch<E>>();
     }
+}
+
+pub struct UiRenderObjectBindGroupLayouts<'a> {
+    pub view: &'a BindGroupLayoutDescriptor,
+    pub instances: &'a BindGroupLayoutDescriptor,
 }
 
 /// A render-world resource that holds all UI render objects of a single type.
@@ -2943,9 +3125,9 @@ pub trait UiPrepareRenderObject: UiRenderObject {
 
     const TEXTURED: bool = false;
 
-    fn view_bind_group_layout(
+    fn bind_group_layouts(
         pipeline: &Self::SpecializedRenderPipeline,
-    ) -> &BindGroupLayoutDescriptor;
+    ) -> UiRenderObjectBindGroupLayouts<'_>;
 
     fn image(&self) -> AssetId<Image> {
         AssetId::default()

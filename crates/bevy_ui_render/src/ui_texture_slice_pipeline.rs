@@ -10,7 +10,10 @@ use bevy_mesh::VertexBufferLayout;
 use bevy_platform::collections::HashMap;
 use bevy_render::{
     render_phase::*,
-    render_resource::{binding_types::uniform_buffer, *},
+    render_resource::{
+        binding_types::{storage_buffer_read_only_sized, uniform_buffer},
+        *,
+    },
     texture::GpuImage,
     view::*,
     Extract, ExtractSchedule, Render, RenderSystems,
@@ -75,6 +78,7 @@ pub struct UiTextureSliceImageBindGroups {
 #[derive(Resource)]
 pub struct UiTextureSlicePipeline {
     pub view_layout: BindGroupLayoutDescriptor,
+    pub instances_layout: BindGroupLayoutDescriptor,
     pub image_layout: BindGroupLayoutDescriptor,
     pub shader: Handle<Shader>,
 }
@@ -85,6 +89,14 @@ pub fn init_ui_texture_slice_pipeline(mut commands: Commands, asset_server: Res<
         &BindGroupLayoutEntries::single(
             ShaderStages::VERTEX_FRAGMENT,
             uniform_buffer::<ViewUniform>(true),
+        ),
+    );
+
+    let instances_layout = BindGroupLayoutDescriptor::new(
+        "ui_texture_slice_instances_layout",
+        &BindGroupLayoutEntries::single(
+            ShaderStages::VERTEX,
+            storage_buffer_read_only_sized(false, None),
         ),
     );
 
@@ -101,6 +113,7 @@ pub fn init_ui_texture_slice_pipeline(mut commands: Commands, asset_server: Res<
 
     commands.insert_resource(UiTextureSlicePipeline {
         view_layout,
+        instances_layout,
         image_layout,
         shader: load_embedded_asset!(asset_server.as_ref(), "ui_texture_slice.wesl"),
     });
@@ -109,6 +122,7 @@ pub fn init_ui_texture_slice_pipeline(mut commands: Commands, asset_server: Res<
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct UiTextureSlicePipelineKey {
     pub target_format: TextureFormat,
+    pub retained_instances: bool,
 }
 
 impl SpecializedRenderPipeline for UiTextureSlicePipeline {
@@ -125,28 +139,45 @@ impl SpecializedRenderPipeline for UiTextureSlicePipeline {
 
         let mut instance_layout = VertexBufferLayout::from_vertex_formats(
             VertexStepMode::Instance,
-            vec![
-                // transform
-                VertexFormat::Float32x4,
-                // color
-                VertexFormat::Float32x4,
-                // normalized texture slicing lines (left, top, right, bottom)
-                VertexFormat::Float32x4,
-                // normalized target slicing lines (left, top, right, bottom)
-                VertexFormat::Float32x4,
-                // repeat values (horizontal side, vertical side, horizontal center, vertical center)
-                VertexFormat::Float32x4,
-                // normalized texture atlas rect (left, top, right, bottom)
-                VertexFormat::Float32x4,
-                // transform translation
-                VertexFormat::Float32x2,
-            ],
+            if key.retained_instances {
+                vec![
+                    // instance index
+                    VertexFormat::Uint32,
+                ]
+            } else {
+                vec![
+                    // transform
+                    VertexFormat::Float32x4,
+                    // color
+                    VertexFormat::Float32x4,
+                    // normalized texture slicing lines (left, top, right, bottom)
+                    VertexFormat::Float32x4,
+                    // normalized target slicing lines (left, top, right, bottom)
+                    VertexFormat::Float32x4,
+                    // repeat values (horizontal side, vertical side, horizontal center, vertical center)
+                    VertexFormat::Float32x4,
+                    // normalized texture atlas rect (left, top, right, bottom)
+                    VertexFormat::Float32x4,
+                    // transform translation
+                    VertexFormat::Float32x2,
+                ]
+            },
         )
         .offset_locations_by(1);
-        // Account for padding.
-        instance_layout.array_stride += 8;
+        // Account for padding if needed.
+        if !key.retained_instances {
+            instance_layout.array_stride += 8;
+        }
 
-        let shader_defs = Vec::new();
+        let mut shader_defs = Vec::new();
+        if key.retained_instances {
+            shader_defs.push("RETAINED_INSTANCES".into());
+        }
+
+        let mut layout = vec![self.view_layout.clone(), self.image_layout.clone()];
+        if key.retained_instances {
+            layout.push(self.instances_layout.clone());
+        }
 
         RenderPipelineDescriptor {
             vertex: VertexState {
@@ -165,7 +196,7 @@ impl SpecializedRenderPipeline for UiTextureSlicePipeline {
                 })],
                 ..default()
             }),
-            layout: vec![self.view_layout.clone(), self.image_layout.clone()],
+            layout,
             label: Some("ui_texture_slice_pipeline".into()),
             ..default()
         }
@@ -191,7 +222,7 @@ impl UiRenderObject for ExtractedUiTextureSlice {
     type ViewQueryData = ();
     type SpecializedRenderPipeline = UiTextureSlicePipeline;
     type ViewPipelineKeyBuilder = ();
-    type PipelineKeySystemParam = ();
+    type PipelineKeySystemParam = SRes<UiMeta<ExtractedUiTextureSlice>>;
 
     fn get_sort_key(&self) -> FloatOrd {
         FloatOrd(self.stack_index as f32 + stack_z_offsets::IMAGE)
@@ -202,10 +233,11 @@ impl UiRenderObject for ExtractedUiTextureSlice {
     fn create_pipeline_key(
         &self,
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
-        _: &mut SystemParamItem<Self::PipelineKeySystemParam>,
+        ui_meta: &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key> {
         Some(UiTextureSlicePipelineKey {
             target_format: cached_camera_view.extracted_view.target_format,
+            retained_instances: matches!(ui_meta.instances, UiInstances::Retained { .. }),
         })
     }
 }
@@ -215,10 +247,13 @@ impl UiPrepareRenderObject for ExtractedUiTextureSlice {
 
     const TEXTURED: bool = true;
 
-    fn view_bind_group_layout(
+    fn bind_group_layouts(
         pipeline: &Self::SpecializedRenderPipeline,
-    ) -> &BindGroupLayoutDescriptor {
-        &pipeline.view_layout
+    ) -> UiRenderObjectBindGroupLayouts<'_> {
+        UiRenderObjectBindGroupLayouts {
+            view: &pipeline.view_layout,
+            instances: &pipeline.instances_layout,
+        }
     }
 
     fn image(&self) -> AssetId<Image> {
@@ -508,7 +543,7 @@ pub type DrawUiTextureSlices = (
     SetItemPipeline,
     SetUiViewBindGroup<ExtractedUiTextureSlice, 0>,
     SetUiTextureBindGroup<ExtractedUiTextureSlice, 1>,
-    DrawUiRenderObject<ExtractedUiTextureSlice>,
+    DrawUiRenderObject<ExtractedUiTextureSlice, 2>,
 );
 
 fn compute_texture_slices(

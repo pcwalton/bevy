@@ -16,7 +16,29 @@ fn enabled(flags: u32, mask: u32) -> bool {
     return (flags & mask) != 0u;
 }
 
+struct UiInstance {
+    world_from_local: vec4<f32>,
+    color: vec4<f32>,
+    border: vec4<f32>,
+    radius_x: vec4<f32>,
+    radius_y: vec4<f32>,
+    uv_scale: vec2<f32>,
+    uv_offset: vec2<f32>,
+    translation: vec2<f32>,
+    size: vec2<f32>,
+    flags: u32,
+    pad_a: u32,
+    pad_b: u32,
+    pad_c: u32,
+}
+
 @group(0) @binding(0) var<uniform> view: View;
+
+@group(1) @binding(0) var sprite_texture: texture_2d<f32>;
+@group(1) @binding(1) var sprite_sampler: sampler;
+
+@if(RETAINED_INSTANCES)
+@group(2) @binding(0) var<storage, read> instances: array<UiInstance>;
 
 struct VertexOutput {
     @location(0) uv: vec2<f32>,
@@ -33,6 +55,31 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
 };
 
+fn compute_vertex(vertex_position: vec2<f32>, instance: UiInstance) -> VertexOutput {
+    var out: VertexOutput;
+    let world_position = mat2x2<f32>(instance.world_from_local.xy, instance.world_from_local.zw) *
+        vertex_position + instance.translation;
+    out.uv = instance.uv_offset + (vertex_position + vec2(0.5)) * instance.uv_scale;
+    out.position = view.clip_from_world * vec4(world_position, 0.0, 1.0);
+    out.color = instance.color;
+    out.flags = instance.flags;
+    out.radius_x = instance.radius_x;
+    out.radius_y = instance.radius_y;
+    out.size = instance.size;
+    out.border = instance.border;
+    out.point = select(vertex_position * instance.size, vec2(0.0), enabled(instance.flags, TEXT));
+    return out;
+}
+
+@if(RETAINED_INSTANCES)
+@vertex
+fn vertex(
+    @location(0) vertex_position: vec2<f32>,
+    @location(1) instance_index: u32
+) -> VertexOutput {
+    return compute_vertex(vertex_position, instances[instance_index]);
+}
+@else
 @vertex
 fn vertex(
     @location(0) vertex_position: vec2<f32>,
@@ -49,25 +96,19 @@ fn vertex(
     @location(9) size: vec2<f32>,
     @location(10) flags: u32,
 ) -> VertexOutput {
-    var out: VertexOutput;
-    let world_position = mat2x2<f32>(world_from_local.xy, world_from_local.zw) * vertex_position +
-        translation;
-    out.uv = uv_offset + (vertex_position + vec2(0.5)) * uv_scale;
-    out.position = view.clip_from_world * vec4(world_position, 0.0, 1.0);
-    out.color = vertex_color;
-    out.flags = flags;
-    out.radius_x = radius_x;
-    out.radius_y = radius_y;
-    out.size = size;
-    out.border = border;
-    out.point = select(vertex_position * size, vec2(0.0), enabled(flags, TEXT));
-
-    return out;
+    var instance: UiInstance;
+    instance.world_from_local = world_from_local;
+    instance.color = vertex_color;
+    instance.border = border;
+    instance.radius_x = radius_x;
+    instance.radius_y = radius_y;
+    instance.uv_scale = uv_scale;
+    instance.uv_offset = uv_offset;
+    instance.translation = translation;
+    instance.size = size;
+    instance.flags = flags;
+    return compute_vertex(vertex_position, instance); 
 }
-
-@group(1) @binding(0) var sprite_texture: texture_2d<f32>;
-@group(1) @binding(1) var sprite_sampler: sampler;
-
 
 // Returns the radius of the corner closest to the given point.
 //

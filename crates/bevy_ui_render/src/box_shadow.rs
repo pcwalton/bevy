@@ -7,9 +7,11 @@ use bevy_asset::*;
 use bevy_camera::visibility::InheritedVisibility;
 use bevy_color::{Alpha, ColorToComponents, LinearRgba};
 use bevy_ecs::prelude::*;
+use bevy_ecs::system::lifetimeless::SRes;
 use bevy_ecs::{prelude::Component, system::*};
 use bevy_math::{vec2, Affine2, FloatOrd, Vec2, Vec4};
 use bevy_mesh::VertexBufferLayout;
+use bevy_render::render_resource::binding_types::storage_buffer_read_only_sized;
 use bevy_render::sync_world::{MainEntity, MainEntityHashSet};
 use bevy_render::{
     render_phase::*,
@@ -27,8 +29,8 @@ use bevy_utils::default;
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
-    pack_transform, prepare_uinodes, DrawUiRenderObject, SetUiViewBindGroup, UiMeta,
-    UiPrepareRenderObject,
+    pack_transform, prepare_uinodes, DrawUiRenderObject, SetUiViewBindGroup, UiInstances, UiMeta,
+    UiPrepareRenderObject, UiRenderObjectBindGroupLayouts,
 };
 use crate::{
     queue_ui_items, wipe_phase_items_if_camera_component_changed, BoxShadowSamples,
@@ -99,6 +101,7 @@ pub struct UiShadowsBatch {
 #[derive(Resource)]
 pub struct BoxShadowPipeline {
     pub view_layout: BindGroupLayoutDescriptor,
+    pub instances_layout: BindGroupLayoutDescriptor,
     pub shader: Handle<Shader>,
 }
 
@@ -111,8 +114,17 @@ pub fn init_box_shadow_pipeline(mut commands: Commands, asset_server: Res<AssetS
         ),
     );
 
+    let instances_layout = BindGroupLayoutDescriptor::new(
+        "box_shadow_instances_layout",
+        &BindGroupLayoutEntries::single(
+            ShaderStages::VERTEX,
+            storage_buffer_read_only_sized(false, None),
+        ),
+    );
+
     commands.insert_resource(BoxShadowPipeline {
         view_layout,
+        instances_layout,
         shader: load_embedded_asset!(asset_server.as_ref(), "box_shadow.wesl"),
     });
 }
@@ -122,6 +134,7 @@ pub struct BoxShadowPipelineKey {
     pub target_format: TextureFormat,
     /// Number of samples, a higher value results in better quality shadows.
     pub samples: u32,
+    pub retained_instances: bool,
 }
 
 impl SpecializedRenderPipeline for BoxShadowPipeline {
@@ -138,30 +151,47 @@ impl SpecializedRenderPipeline for BoxShadowPipeline {
 
         let mut instance_layout = VertexBufferLayout::from_vertex_formats(
             VertexStepMode::Instance,
-            vec![
-                // transform
-                VertexFormat::Float32x4,
-                // color
-                VertexFormat::Float32x4,
-                // corner radius x values (top left, top right, bottom right, bottom left)
-                VertexFormat::Float32x4,
-                // corner radius y values (top left, top right, bottom right, bottom left)
-                VertexFormat::Float32x4,
-                // translation
-                VertexFormat::Float32x2,
-                // inner size
-                VertexFormat::Float32x2,
-                // outer bounds
-                VertexFormat::Float32x2,
-                // blur radius
-                VertexFormat::Float32,
-            ],
+            if key.retained_instances {
+                vec![
+                    // instance index
+                    VertexFormat::Uint32,
+                ]
+            } else {
+                vec![
+                    // transform
+                    VertexFormat::Float32x4,
+                    // color
+                    VertexFormat::Float32x4,
+                    // corner radius x values (top left, top right, bottom right, bottom left)
+                    VertexFormat::Float32x4,
+                    // corner radius y values (top left, top right, bottom right, bottom left)
+                    VertexFormat::Float32x4,
+                    // translation
+                    VertexFormat::Float32x2,
+                    // inner size
+                    VertexFormat::Float32x2,
+                    // outer bounds
+                    VertexFormat::Float32x2,
+                    // blur radius
+                    VertexFormat::Float32,
+                ]
+            },
         )
         .offset_locations_by(1);
-        // Account for padding.
-        instance_layout.array_stride += 4;
+        // Account for padding if needed.
+        if !key.retained_instances {
+            instance_layout.array_stride += 4;
+        }
 
-        let shader_defs = vec![ShaderDefVal::UInt("SHADOW_SAMPLES".into(), key.samples)];
+        let mut shader_defs = vec![ShaderDefVal::UInt("SHADOW_SAMPLES".into(), key.samples)];
+        if key.retained_instances {
+            shader_defs.push("RETAINED_INSTANCES".into());
+        }
+
+        let mut pipeline_layout = vec![self.view_layout.clone()];
+        if key.retained_instances {
+            pipeline_layout.push(self.instances_layout.clone());
+        }
 
         RenderPipelineDescriptor {
             vertex: VertexState {
@@ -180,7 +210,7 @@ impl SpecializedRenderPipeline for BoxShadowPipeline {
                 })],
                 ..default()
             }),
-            layout: vec![self.view_layout.clone()],
+            layout: pipeline_layout,
             label: Some("box_shadow_pipeline".into()),
             ..default()
         }
@@ -204,7 +234,7 @@ impl UiRenderObject for ExtractedBoxShadow {
     type ViewPipelineKeyBuilder = UiBoxShadowViewPipelineKeyBuilder;
     type ViewQueryData = Option<&'static BoxShadowSamples>;
     type SpecializedRenderPipeline = BoxShadowPipeline;
-    type PipelineKeySystemParam = ();
+    type PipelineKeySystemParam = SRes<UiMeta<ExtractedBoxShadow>>;
 
     fn get_sort_key(&self) -> FloatOrd {
         FloatOrd(self.stack_index as f32 + stack_z_offsets::BOX_SHADOW)
@@ -221,10 +251,11 @@ impl UiRenderObject for ExtractedBoxShadow {
     fn create_pipeline_key(
         &self,
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
-        _: &mut SystemParamItem<Self::PipelineKeySystemParam>,
+        ui_meta: &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<BoxShadowPipelineKey> {
         Some(BoxShadowPipelineKey {
             target_format: cached_camera_view.extracted_view.target_format,
+            retained_instances: matches!(ui_meta.instances, UiInstances::Retained { .. }),
             samples: cached_camera_view
                 .pipeline_key_builder
                 .box_shadow_samples
@@ -237,10 +268,13 @@ impl UiRenderObject for ExtractedBoxShadow {
 impl UiPrepareRenderObject for ExtractedBoxShadow {
     type InstanceData = BoxShadowInstanceData;
 
-    fn view_bind_group_layout(
+    fn bind_group_layouts(
         pipeline: &Self::SpecializedRenderPipeline,
-    ) -> &BindGroupLayoutDescriptor {
-        &pipeline.view_layout
+    ) -> UiRenderObjectBindGroupLayouts<'_> {
+        UiRenderObjectBindGroupLayouts {
+            view: &pipeline.view_layout,
+            instances: &pipeline.instances_layout,
+        }
     }
 
     fn clip(&self) -> Option<&CalculatedClip> {
@@ -493,5 +527,5 @@ pub struct UiBoxShadowViewPipelineKeyBuilder {
 pub type DrawBoxShadows = (
     SetItemPipeline,
     SetUiViewBindGroup<ExtractedBoxShadow, 0>,
-    DrawUiRenderObject<ExtractedBoxShadow>,
+    DrawUiRenderObject<ExtractedBoxShadow, 1>,
 );
