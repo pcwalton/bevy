@@ -127,6 +127,11 @@ pub trait UiMaterial: AsBindGroup + Asset + Clone + Sized {
 
 pub struct UiMaterialKey<M: UiMaterial> {
     pub target_format: TextureFormat,
+    /// True if we're using retained mode instances or false if we're using
+    /// immediate mode instances.
+    ///
+    /// See [`crate::UiInstances`] for more information.
+    pub retained_instances: bool,
     pub bind_group_data: M::Data,
 }
 
@@ -148,6 +153,7 @@ where
     fn clone(&self) -> Self {
         Self {
             target_format: self.target_format,
+            retained_instances: self.retained_instances,
             bind_group_data: self.bind_group_data.clone(),
         }
     }

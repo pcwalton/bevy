@@ -12,6 +12,7 @@ pub mod clipping;
 mod gradient;
 mod image;
 use bevy_ecs::query::QueryData;
+use bevy_ecs::system::lifetimeless::SRes;
 use bevy_render::batching::gpu_preprocessing::IndirectParametersIndexed;
 use bevy_render::render_asset::{ExtractedAssets, RenderAsset};
 use bevy_render::render_phase::DrawFunctionId;
@@ -31,7 +32,7 @@ mod debug_overlay;
 use bevy_a11y::AccessibilitySystems;
 use bevy_camera::visibility::InheritedVisibility;
 use bevy_camera::{Camera, Camera2d, Camera3d, RenderTarget};
-use bevy_ecs::entity::{EntityHashSet, EntityIndexMap};
+use bevy_ecs::entity::{EntityHashMap, EntityHashSet, EntityIndexMap};
 use bevy_reflect::prelude::ReflectDefault;
 use bevy_reflect::Reflect;
 use bevy_render::camera::{extract_cameras, CameraMainPassTextureFormats};
@@ -396,7 +397,7 @@ impl UiRenderObject for ExtractedUiNode {
     type ViewPipelineKeyBuilder = UiNodePipelineKeyBuilder;
     type ViewQueryData = Option<&'static UiAntiAlias>;
     type SpecializedRenderPipeline = UiPipeline;
-    type PipelineKeySystemParam = ();
+    type PipelineKeySystemParam = SRes<UiMeta<ExtractedUiNode>>;
     type InstanceData = UiNodeInstanceData;
     type TexturedGpuAsset = GpuImage;
 
@@ -417,21 +418,32 @@ impl UiRenderObject for ExtractedUiNode {
     fn create_pipeline_key(
         &self,
         cached_camera_view: &CachedCameraView<Self::ViewPipelineKeyBuilder>,
-        _: &mut SystemParamItem<Self::PipelineKeySystemParam>,
+        ui_meta: &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key> {
+        let mut flags = UiPipelineKeyFlags::empty();
+        if matches!(
+            cached_camera_view.pipeline_key_builder.anti_alias,
+            None | Some(UiAntiAlias::On)
+        ) {
+            flags.insert(UiPipelineKeyFlags::ANTI_ALIAS);
+        }
+        if matches!(ui_meta.instances, UiInstances::Retained { .. }) {
+            flags.insert(UiPipelineKeyFlags::RETAINED_INSTANCES);
+        }
+
         Some(UiPipelineKey {
             target_format: cached_camera_view.extracted_view.target_format,
-            anti_alias: matches!(
-                cached_camera_view.pipeline_key_builder.anti_alias,
-                None | Some(UiAntiAlias::On)
-            ),
+            flags,
         })
     }
 
-    fn view_bind_group_layout(
+    fn bind_group_layouts(
         pipeline: &Self::SpecializedRenderPipeline,
-    ) -> &BindGroupLayoutDescriptor {
-        &pipeline.view_layout
+    ) -> UiRenderObjectBindGroupLayouts<'_> {
+        UiRenderObjectBindGroupLayouts {
+            view: &pipeline.view_layout,
+            instances: &pipeline.instances_layout,
+        }
     }
 
     fn textured_asset_id(&self) -> AssetId<Image> {
@@ -2208,21 +2220,181 @@ where
     /// The GPU index buffer needed to render the objects of this type.
     indices: RawBufferVec<u32>,
     /// Per-instance data.
-    instances: RawBufferVec<E::InstanceData>,
+    instances: UiInstances<E::InstanceData>,
     /// The view bind group that the shader needs.
     view_bind_group: Option<BindGroup>,
 }
 
-impl<E> Default for UiMeta<E>
+impl<E> FromWorld for UiMeta<E>
 where
     E: UiRenderObject,
 {
-    fn default() -> Self {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
             indices: RawBufferVec::new(BufferUsages::INDEX),
-            instances: RawBufferVec::new(BufferUsages::VERTEX),
+            // If storage buffers are supported, create a retained mode instance
+            // buffer. Otherwise, create an immediate mode one.
+            //
+            // Note that storage buffers are supported on more or less every
+            // platform but WebGL 2.
+            instances: if render_device.limits().max_storage_buffers_per_shader_stage > 0 {
+                UiInstances::Retained {
+                    instances: SparseBufferVec::new(
+                        BufferUsages::STORAGE,
+                        "UI retained instances".into(),
+                    ),
+                    instances_free_list: vec![],
+                    entity_to_instance_index: default(),
+                    instance_index_buffer: RawBufferVec::new(BufferUsages::VERTEX),
+                    bind_group: None,
+                }
+            } else {
+                UiInstances::Immediate {
+                    instances: RawBufferVec::new(BufferUsages::VERTEX | BufferUsages::COPY_DST),
+                }
+            },
             view_bind_group: None,
+        }
+    }
+}
+
+/// The GPU buffers that store per-instance data, either retained or
+/// non-retained.
+#[expect(clippy::large_enum_variant, reason = "there are only a small number of these")]
+pub(crate) enum UiInstances<T>
+where
+    T: Pod + Default,
+{
+    /// The GPU buffers used to store per-instance data when storage buffers are
+    /// available on the target platform.
+    Retained {
+        /// The buffer that contains the instance data.
+        instances: SparseBufferVec<T>,
+        /// Indices of free entries in the `instances` buffer.
+        instances_free_list: Vec<u32>,
+        /// A mapping from each render entity to index of the instance or
+        /// instances in the `instance` buffer that correspond to it.
+        entity_to_instance_index: EntityHashMap<SmallVec<[u32; 1]>>,
+        /// The buffer that's supplied to the GPU that maps the instance index
+        /// in the drawcall to the index of the per-instance data in the
+        /// `instances` buffer.
+        ///
+        /// This is supplied to the GPU as an instance-rate shading buffer. It's
+        /// emptied and regenerated every frame.
+        instance_index_buffer: RawBufferVec<u32>,
+        /// The bind group that includes the `instances` buffer.
+        bind_group: Option<BindGroup>,
+    },
+    /// The GPU buffer used to store per-instance data when storage buffers
+    /// *aren't* available on the target platform.
+    ///
+    /// In practice, this means WebGL 2.
+    Immediate {
+        /// The buffer that contains all the instance data.
+        ///
+        /// This is supplied to the GPU as an instance rate shading buffer. In
+        /// immediate mode, it's emptied and regenerated every frame.
+        instances: RawBufferVec<T>,
+    },
+}
+
+impl<T> UiInstances<T>
+where
+    T: Pod + Default,
+{
+    /// Returns the instance data corresponding to a single entity, either
+    /// retained or immediate.
+    fn get_entity_mut(&mut self, entity: Entity) -> UiEntityInstances<'_, T> {
+        match *self {
+            UiInstances::Retained {
+                ref mut instances,
+                ref mut instances_free_list,
+                ref mut entity_to_instance_index,
+                ref mut instance_index_buffer,
+                ..
+            } => UiEntityInstances::Retained {
+                instances,
+                instances_free_list,
+                entity_instance_indices: entity_to_instance_index.entry(entity).or_default(),
+                instance_index_buffer,
+            },
+            UiInstances::Immediate { ref mut instances } => {
+                UiEntityInstances::Immediate { instances }
+            }
+        }
+    }
+
+    /// Removes the instance data corresponding to an entity that was changed or
+    /// removed.
+    fn free_entity(&mut self, entity: Entity) {
+        if let UiInstances::Retained {
+            ref mut instances_free_list,
+            ref mut entity_to_instance_index,
+            ..
+        } = *self
+            && let Some(indices) = entity_to_instance_index.remove(&entity)
+        {
+            instances_free_list.extend(indices);
+        }
+    }
+}
+
+/// A reference to the GPU instance data for a single entity, either retained or
+/// non-retained.
+enum UiEntityInstances<'a, T>
+where
+    T: Pod + Default,
+{
+    Retained {
+        instances: &'a mut SparseBufferVec<T>,
+        instances_free_list: &'a mut Vec<u32>,
+        entity_instance_indices: &'a mut SmallVec<[u32; 1]>,
+        instance_index_buffer: &'a mut RawBufferVec<u32>,
+    },
+    Immediate {
+        instances: &'a mut RawBufferVec<T>,
+    },
+}
+
+impl<'a, T> UiEntityInstances<'a, T>
+where
+    T: Pod + Default,
+{
+    /// Returns the instance data for a single entity, creating it via the
+    /// supplied callback if necessary.
+    fn get_or_insert_instance(
+        &mut self,
+        entity_index: usize,
+        create_instance: impl FnOnce() -> T,
+    ) -> u32 {
+        match *self {
+            UiEntityInstances::Immediate { ref mut instances } => {
+                instances.push(create_instance()) as u32
+            }
+            UiEntityInstances::Retained {
+                ref mut instances,
+                ref mut instances_free_list,
+                ref mut entity_instance_indices,
+                ref mut instance_index_buffer,
+            } => {
+                if let Some(instance_index) = entity_instance_indices.get_mut(entity_index) {
+                    return instance_index_buffer.push(*instance_index) as u32;
+                }
+
+                let instance_index = match instances_free_list.pop() {
+                    Some(instance_index) => {
+                        instances.set(instance_index, create_instance());
+                        instance_index
+                    }
+                    None => instances.push(create_instance()),
+                };
+                debug_assert_eq!(entity_instance_indices.len(), entity_index);
+                entity_instance_indices.push(instance_index);
+                instance_index_buffer.push(instance_index) as u32
+            }
         }
     }
 }
@@ -2616,11 +2788,28 @@ pub fn prepare_uinodes<E>(
     mut maybe_textured_bind_groups: Option<ResMut<UiTexturedBindGroups<E::TexturedGpuAsset>>>,
     gpu_textured_assets: Res<RenderAssets<E::TexturedGpuAsset>>,
     mut phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
+    (
+        mut sparse_buffer_update_jobs,
+        mut sparse_buffer_update_bind_groups,
+        sparse_buffer_update_pipelines,
+    ): (
+        ResMut<SparseBufferUpdateJobs>,
+        ResMut<SparseBufferUpdateBindGroups>,
+        Res<SparseBufferUpdatePipelines>,
+    ),
     mut previous_len: Local<usize>,
 ) where
     E: UiRenderObject,
 {
     let ui_meta = ui_meta.into_inner();
+
+    for changed_ui_objects in extracted_uinodes.changed.values() {
+        for changed_ui_object in changed_ui_objects {
+            ui_meta
+                .instances
+                .free_entity(changed_ui_object.render_entity);
+        }
+    }
 
     let globals_binding = if E::NEEDS_GLOBALS_UNIFORM {
         let Some(globals_binding) = globals_buffer.buffer.binding() else {
@@ -2634,11 +2823,19 @@ pub fn prepare_uinodes<E>(
     if let Some(view_binding) = view_uniforms.uniforms.binding() {
         let mut batches: Vec<(Entity, UiBatch<E>)> = Vec::with_capacity(*previous_len);
 
+        let bind_group_layouts = E::bind_group_layouts(&ui_pipeline);
+
         ui_meta.vertices.clear();
         ui_meta.indices.clear();
-        ui_meta.instances.clear();
-        let view_bind_group_layout =
-            pipeline_cache.get_bind_group_layout(E::view_bind_group_layout(&ui_pipeline));
+        match ui_meta.instances {
+            UiInstances::Immediate { ref mut instances } => instances.clear(),
+            UiInstances::Retained {
+                ref mut instance_index_buffer,
+                ..
+            } => instance_index_buffer.clear(),
+        };
+
+        let view_bind_group_layout = pipeline_cache.get_bind_group_layout(bind_group_layouts.view);
         ui_meta.view_bind_group = Some(if let Some(globals_binding) = globals_binding {
             render_device.create_bind_group(
                 "ui_view_and_globals_bind_group",
@@ -2748,6 +2945,7 @@ pub fn prepare_uinodes<E>(
                 }
 
                 // Now iterate over each quad.
+                let mut entity_instances = ui_meta.instances.get_entity_mut(item.entity());
                 let (mut quad, mut generated_any_geometry) = (UiQuad::default(), false);
                 for quad_index in 0..extracted_uinode.quad_count() {
                     // Fill in the per-quad data.
@@ -2762,7 +2960,8 @@ pub fn prepare_uinodes<E>(
                     // to push any vertices and can just use the rectangular
                     // quad.
                     if extracted_uinode.clip().is_none() {
-                        let instance_index = ui_meta.instances.push(quad.instance_data) as u32;
+                        let instance_index = entity_instances
+                            .get_or_insert_instance(quad_index, || quad.instance_data);
                         batches
                             .last_mut()
                             .unwrap()
@@ -2772,12 +2971,12 @@ pub fn prepare_uinodes<E>(
                         continue;
                     }
 
+                    // Create a polygon, and clip it with Sutherland-Hodgman
+                    // clipping. Skip this item entirely if it ends up
+                    // completely clipped out.
                     let vertices: [_; 4] = array::from_fn(|index| {
                         (quad.positions[index], QUAD_VERTEX_POSITIONS[index])
                     });
-
-                    // Clip the polygon with Sutherland-Hodgman clipping. Skip
-                    // if clipped out.
                     let clipped_quad = clip_polygon(extracted_uinode.clip(), &vertices, Vec2::lerp);
                     if clipped_quad.is_empty() {
                         continue;
@@ -2786,7 +2985,8 @@ pub fn prepare_uinodes<E>(
                     // Push the geometry of the quad onto the vertex buffers
                     // we're building up.
 
-                    let instance_index = ui_meta.instances.push(quad.instance_data) as u32;
+                    let instance_index =
+                        entity_instances.get_or_insert_instance(quad_index, || quad.instance_data);
                     let index_count = (clipped_quad.len() as u32 - 2) * 3;
                     batches.last_mut().unwrap().1.push(
                         vertices_index,
@@ -2823,9 +3023,38 @@ pub fn prepare_uinodes<E>(
 
         ui_meta.vertices.write_buffer(&render_device, &render_queue);
         ui_meta.indices.write_buffer(&render_device, &render_queue);
-        ui_meta
-            .instances
-            .write_buffer(&render_device, &render_queue);
+
+        match ui_meta.instances {
+            UiInstances::Immediate { ref mut instances } => {
+                instances.write_buffer(&render_device, &render_queue);
+            }
+            UiInstances::Retained {
+                ref mut instances,
+                ref mut instance_index_buffer,
+                ref mut bind_group,
+                ..
+            } => {
+                instances.write_buffers(&render_device, &render_queue);
+                instances.prepare_to_populate_buffers(
+                    &render_device,
+                    &pipeline_cache,
+                    &mut sparse_buffer_update_jobs,
+                    &mut sparse_buffer_update_bind_groups,
+                    &sparse_buffer_update_pipelines,
+                );
+                instance_index_buffer.write_buffer(&render_device, &render_queue);
+                *bind_group = instances.buffer().map(|instances_buffer| {
+                    let bind_group_layout =
+                        pipeline_cache.get_bind_group_layout(bind_group_layouts.instances);
+                    render_device.create_bind_group(
+                        "UI instances bind group",
+                        &bind_group_layout,
+                        &BindGroupEntries::single(instances_buffer.as_entire_binding()),
+                    )
+                });
+            }
+        }
+
         *previous_len = batches.len();
         commands.try_insert_batch(batches);
     }
@@ -2861,6 +3090,13 @@ where
     for entity in &batches_query {
         commands.entity(entity).remove::<UiBatch<E>>();
     }
+}
+
+/// References to the various bind group layouts that UI render objects all
+/// need.
+pub struct UiRenderObjectBindGroupLayouts<'a> {
+    pub view: &'a BindGroupLayoutDescriptor,
+    pub instances: &'a BindGroupLayoutDescriptor,
 }
 
 /// A render-world resource that holds all UI render objects of a single type.
@@ -3025,11 +3261,11 @@ pub trait UiRenderObject: Send + Sync + 'static {
         system_param: &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key>;
 
-    /// Extracts the layout of the view bind group from the given pipeline and
-    /// returns it.
-    fn view_bind_group_layout(
+    /// Extracts the layouts of the view and instances bind groups from the
+    /// given pipeline and returns them.
+    fn bind_group_layouts(
         pipeline: &Self::SpecializedRenderPipeline,
-    ) -> &BindGroupLayoutDescriptor;
+    ) -> UiRenderObjectBindGroupLayouts<'_>;
 
     /// Returns the asset ID corresponding to the texture that this render
     /// object uses.
