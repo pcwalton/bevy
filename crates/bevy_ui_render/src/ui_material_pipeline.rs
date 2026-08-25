@@ -88,11 +88,16 @@ pub struct UiMaterialVertex {
     pub radius: [[f32; 4]; 2],
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+#[repr(C)]
 pub struct ExtractedUiMaterialNodeInstanceData {
-    size: Vec2,
+    world_from_local: Vec4,
     border: Vec4,
     radius: [Vec4; 2],
+    size: Vec2,
+    translation: Vec2,
+    uv_scale: Vec2,
+    uv_offset: Vec2,
 }
 
 /// Render pipeline data for a given [`UiMaterial`]
@@ -116,26 +121,38 @@ where
             VertexStepMode::Vertex,
             vec![
                 // position
-                VertexFormat::Float32x3,
-                // uv
                 VertexFormat::Float32x2,
-                // size
-                VertexFormat::Float32x2,
+            ],
+        );
+        let instance_layout = VertexBufferLayout::from_vertex_formats(
+            VertexStepMode::Instance,
+            vec![
+                // transform
+                VertexFormat::Float32x4,
                 // border widths
                 VertexFormat::Float32x4,
                 // border radius x values (top left, top right, bottom right, bottom left)
                 VertexFormat::Float32x4,
                 // border radius y values (top left, top right, bottom right, bottom left)
                 VertexFormat::Float32x4,
+                // size
+                VertexFormat::Float32x2,
+                // translation
+                VertexFormat::Float32x2,
+                // UV scale
+                VertexFormat::Float32x2,
+                // UV offset
+                VertexFormat::Float32x2,
             ],
-        );
+        )
+        .offset_locations_by(1);
         let shader_defs = Vec::new();
 
         let mut descriptor = RenderPipelineDescriptor {
             vertex: VertexState {
                 shader: self.vertex_shader.clone(),
                 shader_defs: shader_defs.clone(),
-                buffers: vec![vertex_layout],
+                buffers: vec![vertex_layout, instance_layout],
                 ..default()
             },
             fragment: Some(FragmentState {
@@ -227,7 +244,6 @@ where
     type ViewQueryData = ();
     type SpecializedRenderPipeline = UiMaterialPipeline<M>;
     type PipelineKeySystemParam = Res<'static, RenderAssets<PreparedUiMaterial<M>>>;
-    type Vertex = UiMaterialVertex;
     type InstanceData = ExtractedUiMaterialNodeInstanceData;
     type TexturedGpuAsset = PreparedUiMaterial<M>;
 
@@ -285,9 +301,6 @@ where
 
         let rect_size = self.rect.size();
 
-        let positions =
-            QUAD_VERTEX_POSITIONS.map(|pos| self.transform.transform_point2(pos * rect_size));
-
         let uvs = [
             Vec2::new(self.rect.min.x, self.rect.min.y),
             Vec2::new(self.rect.max.x, self.rect.min.y),
@@ -297,6 +310,7 @@ where
         .map(|pos| pos / self.rect.max);
 
         out_quad.instance_data = ExtractedUiMaterialNodeInstanceData {
+            world_from_local: pack_transform(self.transform, rect_size),
             size: rect_size,
             border: vec4(
                 self.border.min_inset.x,
@@ -305,31 +319,10 @@ where
                 self.border.max_inset.y,
             ),
             radius: self.border_radius,
+            translation: self.transform.translation,
+            uv_scale: uvs[2] - uvs[0],
+            uv_offset: uvs[0],
         };
-
-        for (&mut (ref mut out_position, ref mut out_uvs), (position, uv)) in out_quad
-            .vertices
-            .iter_mut()
-            .zip(positions.iter().zip(uvs.iter()))
-        {
-            *out_position = *position;
-            out_uvs.uv = *uv;
-            out_uvs.point = default();
-        }
-    }
-
-    fn create_vertex(
-        quad: &UiQuad<Self::InstanceData>,
-        position: Vec2,
-        uvs: &UiQuadInterpolants,
-    ) -> Self::Vertex {
-        UiMaterialVertex {
-            position: position.extend(1.0).into(),
-            uv: uvs.uv.into(),
-            size: quad.instance_data.size.into(),
-            border: quad.instance_data.border.into(),
-            radius: quad.instance_data.radius.map(Into::into),
-        }
     }
 }
 

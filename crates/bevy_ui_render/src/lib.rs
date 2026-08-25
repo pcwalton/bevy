@@ -12,6 +12,7 @@ pub mod clipping;
 mod gradient;
 mod image;
 use bevy_ecs::query::QueryData;
+use bevy_render::batching::gpu_preprocessing::IndirectParametersIndexed;
 use bevy_render::render_asset::{ExtractedAssets, RenderAsset};
 use bevy_render::render_phase::DrawFunctionId;
 use bevy_render::render_resource::SpecializedRenderPipeline;
@@ -52,7 +53,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_ecs::system::{StaticSystemParam, SystemParam, SystemParamItem};
 use bevy_image::{prelude::*, TRANSPARENT_IMAGE_HANDLE};
-use bevy_math::{proj, Affine2, FloatOrd, Rect, UVec4, Vec2};
+use bevy_math::{proj, vec4, Affine2, FloatOrd, Rect, UVec4, Vec2, Vec4, Vec4Swizzles as _};
 use bevy_render::{
     globals::GlobalsBuffer,
     render_asset::RenderAssets,
@@ -85,7 +86,7 @@ use bytemuck::{Pod, Zeroable};
 use core::ops::Range;
 use smallvec::SmallVec;
 use std::marker::{PhantomData, Send};
-use std::mem;
+use std::{array, mem};
 
 pub use pipeline::*;
 pub use render_pass::*;
@@ -371,13 +372,19 @@ pub struct ExtractedUiNode {
     pub transform: Affine2,
 }
 
-#[derive(Clone, Default)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+#[repr(C)]
 pub struct ExtractedUiNodeInstanceData {
-    color: [f32; 4],
-    flags: u32,
-    radius: [[f32; 4]; 2],
-    border: [f32; 4],
+    world_from_local: Vec4,
+    color: Vec4,
+    border: Vec4,
+    radius: [Vec4; 2],
+    uv_scale: Vec2,
+    uv_offset: Vec2,
+    translation: Vec2,
     size: Vec2,
+    flags: u32,
+    pad: [u32; 3],
 }
 
 impl UiRenderObject for ExtractedUiNode {
@@ -386,7 +393,6 @@ impl UiRenderObject for ExtractedUiNode {
     type ViewQueryData = Option<&'static UiAntiAlias>;
     type SpecializedRenderPipeline = UiPipeline;
     type PipelineKeySystemParam = ();
-    type Vertex = UiVertex;
     type InstanceData = ExtractedUiNodeInstanceData;
     type TexturedGpuAsset = GpuImage;
 
@@ -452,7 +458,7 @@ impl UiRenderObject for ExtractedUiNode {
         gpu_textured_assets: &RenderAssets<Self::TexturedGpuAsset>,
         textured_asset_id: &AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset>,
     ) {
-        let (positions, uvs, points);
+        let positions;
 
         match &self.item {
             ExtractedUiItem::Node {
@@ -478,10 +484,10 @@ impl UiRenderObject for ExtractedUiNode {
                 let transform = self.transform;
 
                 // Specify the corners of the node
-                points = QUAD_VERTEX_POSITIONS.map(|pos| pos * rect_size);
+                let points = QUAD_VERTEX_POSITIONS.map(|pos| pos * rect_size);
                 positions = points.map(|pos| transform.transform_point2(pos));
 
-                uvs = if flags == shader_flags::UNTEXTURED {
+                let uvs = if flags == shader_flags::UNTEXTURED {
                     [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y]
                 } else {
                     let mut uinode_rect = *rect;
@@ -507,7 +513,7 @@ impl UiRenderObject for ExtractedUiNode {
                     .map(|pos| pos / atlas_extent)
                 };
 
-                let color = color.to_f32_array();
+                let color = color.to_vec4();
                 match node_type {
                     NodeType::Border(border_flags) => {
                         flags |= border_flags;
@@ -519,16 +525,21 @@ impl UiRenderObject for ExtractedUiNode {
                 }
 
                 out_quad.instance_data = ExtractedUiNodeInstanceData {
+                    world_from_local: pack_transform(transform, rect_size),
                     color,
                     flags,
                     radius: (*border_radius).into(),
-                    border: [
+                    border: vec4(
                         border.min_inset.x,
                         border.min_inset.y,
                         border.max_inset.x,
                         border.max_inset.y,
-                    ],
+                    ),
                     size: rect_size,
+                    uv_scale: uvs[2] - uvs[0],
+                    uv_offset: uvs[0],
+                    translation: transform.translation,
+                    pad: default(),
                 };
             }
             ExtractedUiItem::Glyphs { glyphs } => {
@@ -539,7 +550,7 @@ impl UiRenderObject for ExtractedUiNode {
                 let atlas_extent = image.size_2d().as_vec2();
 
                 let glyph = &glyphs[quad_index];
-                let color = glyph.color.to_f32_array();
+                let color = glyph.color.to_vec4();
                 let glyph_rect = glyph.rect;
                 let rect_size = glyph_rect.size();
 
@@ -549,51 +560,29 @@ impl UiRenderObject for ExtractedUiNode {
                         .transform_point2(glyph.translation + pos * glyph_rect.size())
                 });
 
-                uvs = [
+                let uvs = [
                     Vec2::new(glyph.rect.min.x, glyph.rect.min.y) / atlas_extent,
                     Vec2::new(glyph.rect.max.x, glyph.rect.min.y) / atlas_extent,
                     Vec2::new(glyph.rect.max.x, glyph.rect.max.y) / atlas_extent,
                     Vec2::new(glyph.rect.min.x, glyph.rect.max.y) / atlas_extent,
                 ];
 
-                points = default();
-
                 out_quad.instance_data = ExtractedUiNodeInstanceData {
+                    world_from_local: pack_transform(self.transform, rect_size),
                     color,
-                    flags: shader_flags::TEXTURED,
+                    flags: shader_flags::TEXTURED | shader_flags::TEXT,
                     radius: default(),
                     border: default(),
                     size: rect_size,
+                    uv_scale: uvs[2] - uvs[0],
+                    uv_offset: uvs[0],
+                    translation: self.transform.transform_point2(glyph.translation),
+                    pad: default(),
                 };
             }
         }
 
-        for (&mut (ref mut out_position, ref mut out_uvs), (position, (uv_a, uv_b))) in out_quad
-            .vertices
-            .iter_mut()
-            .zip(positions.iter().zip(uvs.iter().zip(points.iter())))
-        {
-            *out_position = *position;
-            out_uvs.uv = *uv_a;
-            out_uvs.point = *uv_b;
-        }
-    }
-
-    fn create_vertex(
-        quad: &UiQuad<Self::InstanceData>,
-        position: Vec2,
-        uvs: &UiQuadInterpolants,
-    ) -> UiVertex {
-        UiVertex {
-            position: position.extend(0.0).into(),
-            uv: uvs.uv.into(),
-            color: quad.instance_data.color,
-            flags: quad.instance_data.flags,
-            radius: quad.instance_data.radius,
-            border: quad.instance_data.border,
-            size: quad.instance_data.size.into(),
-            point: uvs.point.into(),
-        }
+        out_quad.positions = positions;
     }
 }
 
@@ -2207,34 +2196,33 @@ pub fn extract_text_decorations(
     }
 }
 
+/// The GPU representation of a local-space vertex.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct UiVertex {
-    pub position: [f32; 3],
-    pub uv: [f32; 2],
-    pub color: [f32; 4],
-    /// Shader flags to determine how to render the UI node.
-    /// See [`shader_flags`] for possible values.
-    pub flags: u32,
-    /// Border radius of the UI node.
-    /// Ordering: top left, top right, bottom right, bottom left.
-    pub radius: [[f32; 4]; 2],
-    /// Border thickness of the UI node.
-    /// Ordering: left, top, right, bottom.
-    pub border: [f32; 4],
-    /// Size of the UI node.
-    pub size: [f32; 2],
-    /// Position relative to the center of the UI node.
-    pub point: [f32; 2],
+    /// The local-space position.
+    ///
+    /// If this is an unclipped vertex, each component will be ±0.5.
+    pub position: Vec2,
 }
 
+/// A render-world resource that stores the GPU resources needed to render
+/// batches of UI items.
 #[derive(Resource)]
 pub struct UiMeta<E>
 where
     E: UiRenderObject,
 {
-    vertices: RawBufferVec<E::Vertex>,
+    /// The vertex buffer.
+    ///
+    /// This contains just local-space vertices. Other per-UI-object data is all
+    /// part of [`Self::instances`].
+    vertices: RawBufferVec<UiVertex>,
+    /// The index buffer.
     indices: RawBufferVec<u32>,
+    /// Per-instance data.
+    instances: RawBufferVec<E::InstanceData>,
+    /// The bind group for the current camera view.
     view_bind_group: Option<BindGroup>,
 }
 
@@ -2246,11 +2234,15 @@ where
         Self {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
             indices: RawBufferVec::new(BufferUsages::INDEX),
+            instances: RawBufferVec::new(BufferUsages::VERTEX),
             view_bind_group: None,
         }
     }
 }
 
+/// Local-space vertex positions of a unit quad centered on the origin.
+///
+/// This is in the order (top left, top right, bottom right, bottom left).
 pub(crate) const QUAD_VERTEX_POSITIONS: [Vec2; 4] = [
     Vec2::new(-0.5, -0.5),
     Vec2::new(0.5, -0.5),
@@ -2258,14 +2250,55 @@ pub(crate) const QUAD_VERTEX_POSITIONS: [Vec2; 4] = [
     Vec2::new(-0.5, 0.5),
 ];
 
+// Indices of the above quad.
+pub(crate) const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+/// UI items rendered in a single drawcall.
 #[derive(Component, Debug)]
 pub struct UiBatch<E>
 where
     E: UiRenderObject,
 {
-    pub range: Range<u32>,
+    /// The list of indirect parameters.
+    pub params: Vec<IndirectParametersIndexed>,
+
+    /// The ID of the textured asset that this batch uses, if any.
+    ///
+    /// If this isn't present, it'll be [`AssetId::default`].
     pub textured_asset_id: AssetId<<E::TexturedGpuAsset as RenderAsset>::SourceAsset>,
+
     phantom: PhantomData<E>,
+}
+
+impl<E> UiBatch<E>
+where
+    E: UiRenderObject,
+{
+    /// Adds a trivially unclipped quad to this batch.
+    fn push_unclipped_quad(&mut self, instance_index: u32) {
+        self.push(0, 0..(QUAD_INDICES.len() as u32), instance_index);
+    }
+
+    /// Adds a potentially clipped quad using a custom range of vertices.
+    fn push(&mut self, base_vertex: u32, indices: Range<u32>, instance_index: u32) {
+        match self.params.last_mut() {
+            Some(params)
+                if params.base_vertex == base_vertex
+                    && params.first_index == indices.start
+                    && params.first_index + params.index_count == indices.end
+                    && params.first_instance + params.instance_count == instance_index =>
+            {
+                params.instance_count += 1;
+            }
+            _ => self.params.push(IndirectParametersIndexed {
+                index_count: indices.end - indices.start,
+                instance_count: 1,
+                first_index: indices.start,
+                base_vertex,
+                first_instance: instance_index,
+            }),
+        }
+    }
 }
 
 /// The values here should match the values for the constants in `ui.wesl`
@@ -2286,6 +2319,7 @@ pub mod shader_flags {
     pub const BORDER_BOTTOM: u32 = 2048;
     pub const BORDER_ALL: u32 = BORDER_LEFT + BORDER_TOP + BORDER_RIGHT + BORDER_BOTTOM;
     pub const INVERT: u32 = 4096;
+    pub const TEXT: u32 = 8192;
 }
 
 /// Information that the [`queue_ui_items`] system keeps internally.
@@ -2614,6 +2648,7 @@ pub fn prepare_uinodes<E>(
 
         ui_meta.vertices.clear();
         ui_meta.indices.clear();
+        ui_meta.instances.clear();
         let view_bind_group_layout =
             pipeline_cache.get_bind_group_layout(E::view_bind_group_layout(&ui_pipeline));
         ui_meta.view_bind_group = Some(if let Some(globals_binding) = globals_binding {
@@ -2630,9 +2665,18 @@ pub fn prepare_uinodes<E>(
             )
         });
 
+        // Initialize the buffers with a single rectangular quad. Trivially
+        // unclipped nodes use this to avoid having to push any geometry.
+        ui_meta.vertices.extend(
+            QUAD_VERTEX_POSITIONS
+                .iter()
+                .map(|&position| UiVertex { position }),
+        );
+        ui_meta.indices.extend(QUAD_INDICES);
+
         // Buffer indexes
-        let mut vertices_index = 0;
-        let mut indices_index = 0;
+        let mut vertices_index = QUAD_VERTEX_POSITIONS.len() as u32;
+        let mut indices_index = QUAD_INDICES.len() as u32;
 
         for ui_phase in phases.values_mut() {
             let mut batch_item_index = 0;
@@ -2703,7 +2747,7 @@ pub fn prepare_uinodes<E>(
                     batch_textured_asset_id = Some(textured_asset_id);
 
                     let new_batch = UiBatch {
-                        range: vertices_index..vertices_index,
+                        params: vec![],
                         textured_asset_id,
                         phantom: PhantomData,
                     };
@@ -2716,8 +2760,7 @@ pub fn prepare_uinodes<E>(
                 }
 
                 // Now iterate over each quad.
-                let indices_start_index = indices_index;
-                let mut quad = UiQuad::default();
+                let (mut quad, mut generated_any_geometry) = (UiQuad::default(), false);
                 for quad_index in 0..extracted_uinode.quad_count() {
                     // Fill in the per-quad data.
                     extracted_uinode.populate_quad(
@@ -2727,13 +2770,27 @@ pub fn prepare_uinodes<E>(
                         &textured_asset_id,
                     );
 
+                    // If this node is trivially unclipped, then we don't need
+                    // to push any vertices and can just use the rectangular
+                    // quad.
+                    if extracted_uinode.clip().is_none() {
+                        let instance_index = ui_meta.instances.push(quad.instance_data) as u32;
+                        batches
+                            .last_mut()
+                            .unwrap()
+                            .1
+                            .push_unclipped_quad(instance_index);
+                        generated_any_geometry = true;
+                        continue;
+                    }
+
+                    let vertices: [_; 4] = array::from_fn(|index| {
+                        (quad.positions[index], QUAD_VERTEX_POSITIONS[index])
+                    });
+
                     // Clip the polygon with Sutherland-Hodgman clipping. Skip
                     // if clipped out.
-                    let clipped_quad = clip_polygon(
-                        extracted_uinode.clip(),
-                        &quad.vertices,
-                        UiQuadInterpolants::interpolate,
-                    );
+                    let clipped_quad = clip_polygon(extracted_uinode.clip(), &vertices, Vec2::lerp);
                     if clipped_quad.is_empty() {
                         continue;
                     }
@@ -2741,29 +2798,36 @@ pub fn prepare_uinodes<E>(
                     // Push the geometry of the quad onto the vertex buffers
                     // we're building up.
 
-                    for &(position, ref uvs) in &clipped_quad {
-                        ui_meta
-                            .vertices
-                            .push(E::create_vertex(&quad, position, uvs));
+                    let instance_index = ui_meta.instances.push(quad.instance_data) as u32;
+                    let index_count = (clipped_quad.len() as u32 - 2) * 3;
+                    batches.last_mut().unwrap().1.push(
+                        vertices_index,
+                        indices_index..(indices_index + index_count),
+                        instance_index,
+                    );
+
+                    for &(_, local_position) in &clipped_quad {
+                        ui_meta.vertices.push(UiVertex {
+                            position: local_position,
+                        });
                     }
 
                     for i in 1..clipped_quad.len() as u32 - 1 {
-                        ui_meta.indices.push(indices_index);
-                        ui_meta.indices.push(indices_index + i);
-                        ui_meta.indices.push(indices_index + i + 1);
+                        ui_meta.indices.push(0);
+                        ui_meta.indices.push(i);
+                        ui_meta.indices.push(i + 1);
                     }
 
-                    vertices_index += 3 * (clipped_quad.len() as u32 - 2);
-                    indices_index += clipped_quad.len() as u32;
+                    vertices_index += clipped_quad.len() as u32;
+                    indices_index += index_count;
+                    generated_any_geometry = true;
                 }
 
                 // If this batch was empty, skip it entirely.
-                if indices_start_index == indices_index {
+                if !generated_any_geometry {
                     continue;
                 }
 
-                // Push the batch onto the list of batches we're building up.
-                batches.last_mut().unwrap().1.range.end = vertices_index;
                 last_drawn_item_index_of_this_type = Some(item_index);
                 ui_phase.items[batch_item_index].batch_range_mut().end += 1;
             }
@@ -2771,6 +2835,9 @@ pub fn prepare_uinodes<E>(
 
         ui_meta.vertices.write_buffer(&render_device, &render_queue);
         ui_meta.indices.write_buffer(&render_device, &render_queue);
+        ui_meta
+            .instances
+            .write_buffer(&render_device, &render_queue);
         *previous_len = batches.len();
         commands.try_insert_batch(batches);
     }
@@ -2932,14 +2999,9 @@ pub trait UiRenderObject: Send + Sync + 'static {
     /// Any extra system data needed in order to create a pipeline key.
     type PipelineKeySystemParam: SystemParam;
 
-    /// The GPU type of a single vertex.
-    type Vertex: Pod + Zeroable + Send + Sync + 'static;
-
-    /// Data that's unique to each quad but shared among all vertices.
-    ///
-    /// This isn't uploaded to the GPU; it's there to aid in the construction of
-    /// a vertex in [`Self::create_vertex`].
-    type InstanceData: Clone + Default;
+    /// The GPU type for data that's unique to each quad but shared among all
+    /// vertices.
+    type InstanceData: Clone + Copy + Default + Pod + Zeroable + Send + Sync + 'static;
 
     /// If there is no texture, you can set this to `GpuImage`.
     type TexturedGpuAsset: UiTexturedRenderAsset;
@@ -3022,18 +3084,6 @@ pub trait UiRenderObject: Send + Sync + 'static {
         gpu_textured_assets: &RenderAssets<Self::TexturedGpuAsset>,
         textured_asset_id: &AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset>,
     );
-
-    /// Creates the interpolated vertex for a quad with the given world-space
-    /// position.
-    ///
-    /// The interpolants are already pre-interpolated, so all this method needs
-    /// to do is to pack the position, instance data, and interpolants into an
-    /// instance of type [`Self::Vertex`].
-    fn create_vertex(
-        quad: &UiQuad<Self::InstanceData>,
-        position: Vec2,
-        uvs: &UiQuadInterpolants,
-    ) -> Self::Vertex;
 }
 
 /// Unclipped quad data emitted by a UI render object.
@@ -3042,39 +3092,14 @@ pub trait UiRenderObject: Send + Sync + 'static {
 #[derive(Default)]
 pub struct UiQuad<ID>
 where
-    ID: Clone + Default,
+    ID: Copy + Clone + Default,
 {
-    /// The world-space position of each vertex, as well as the interpolants.
+    /// The local-space position of each vertex.
     ///
     /// This is in the order (top left, top right, bottom right, bottom left).
-    vertices: [(Vec2, UiQuadInterpolants); 4],
+    positions: [Vec2; 4],
     /// Render-object-specific per-quad data.
     instance_data: ID,
-}
-
-/// Data that's interpolated across each quad.
-///
-/// The meaning of this data is up to each individual UI render object. Any
-/// interpolant can be set to `default()` if not needed by the render object in
-/// question.
-#[derive(Clone, Copy, Default)]
-pub struct UiQuadInterpolants {
-    /// An interpolant typically used for the UV of a texture.
-    uv: Vec2,
-    /// A second interpolant, the meaning of which varies depending on the
-    /// render object.
-    point: Vec2,
-}
-
-impl UiQuadInterpolants {
-    /// Interpolates the [`Self::uv`] and [`Self::point`] data according to the
-    /// given time value.
-    fn interpolate(a: Self, b: Self, t: f32) -> UiQuadInterpolants {
-        UiQuadInterpolants {
-            uv: a.uv.lerp(b.uv, t),
-            point: a.point.lerp(b.point, t),
-        }
-    }
 }
 
 /// A render asset that can produce bind groups for a textured render object.
@@ -3155,4 +3180,10 @@ impl<'w, PKB> CachedCameraView<'w, PKB> {
             pipeline_key_builder: E::create_view_pipeline_key_builder(pipeline_key_builder_item),
         });
     }
+}
+
+fn pack_transform(transform: Affine2, rect_size: Vec2) -> Vec4 {
+    Vec4::ZERO
+        .with_xy(transform.matrix2.x_axis * rect_size.x)
+        .with_zw(transform.matrix2.y_axis * rect_size.y)
 }

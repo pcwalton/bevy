@@ -54,15 +54,16 @@ impl Plugin for UiTextureSlicerPlugin {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct UiTextureSliceVertex {
-    pub position: [f32; 3],
-    pub uv: [f32; 2],
-    pub color: [f32; 4],
-    pub slices: [f32; 4],
-    pub border: [f32; 4],
-    pub repeat: [f32; 4],
-    pub atlas: [f32; 4],
+#[derive(Copy, Clone, Default, Pod, Zeroable)]
+pub struct UiTextureSliceInstanceData {
+    pub world_from_local: Vec4,
+    pub color: Vec4,
+    pub slices: Vec4,
+    pub border: Vec4,
+    pub repeat: Vec4,
+    pub atlas: Vec4,
+    pub translation: Vec2,
+    pub pad: Vec2,
 }
 
 #[derive(Resource, Default)]
@@ -117,9 +118,15 @@ impl SpecializedRenderPipeline for UiTextureSlicePipeline {
             VertexStepMode::Vertex,
             vec![
                 // position
-                VertexFormat::Float32x3,
-                // uv
                 VertexFormat::Float32x2,
+            ],
+        );
+
+        let mut instance_layout = VertexBufferLayout::from_vertex_formats(
+            VertexStepMode::Instance,
+            vec![
+                // transform
+                VertexFormat::Float32x4,
                 // color
                 VertexFormat::Float32x4,
                 // normalized texture slicing lines (left, top, right, bottom)
@@ -130,15 +137,21 @@ impl SpecializedRenderPipeline for UiTextureSlicePipeline {
                 VertexFormat::Float32x4,
                 // normalized texture atlas rect (left, top, right, bottom)
                 VertexFormat::Float32x4,
+                // transform translation
+                VertexFormat::Float32x2,
             ],
-        );
+        )
+        .offset_locations_by(1);
+        // Account for padding.
+        instance_layout.array_stride += 8;
+
         let shader_defs = Vec::new();
 
         RenderPipelineDescriptor {
             vertex: VertexState {
                 shader: self.shader.clone(),
                 shader_defs: shader_defs.clone(),
-                buffers: vec![vertex_layout],
+                buffers: vec![vertex_layout, instance_layout],
                 ..default()
             },
             fragment: Some(FragmentState {
@@ -172,22 +185,12 @@ pub struct ExtractedUiTextureSlice {
     pub inverse_scale_factor: f32,
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct UiTextureSliceInstanceData {
-    color: Vec4,
-    slices: Vec4,
-    border: Vec4,
-    repeat: Vec4,
-    atlas: Vec4,
-}
-
 impl UiRenderObject for ExtractedUiTextureSlice {
     type DrawFunctions = DrawUiTextureSlices;
     type ViewQueryData = ();
     type SpecializedRenderPipeline = UiTextureSlicePipeline;
     type ViewPipelineKeyBuilder = ();
     type PipelineKeySystemParam = ();
-    type Vertex = UiTextureSliceVertex;
     type InstanceData = UiTextureSliceInstanceData;
     type TexturedGpuAsset = GpuImage;
 
@@ -243,10 +246,8 @@ impl UiRenderObject for ExtractedUiTextureSlice {
         let rect_size = uinode_rect.size();
 
         // Specify the corners of the node
-        let positions =
+        out_quad.positions =
             QUAD_VERTEX_POSITIONS.map(|pos| self.transform.transform_point2(pos * rect_size));
-
-        let uvs = [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y];
 
         let color = self.color.to_vec4();
 
@@ -285,38 +286,15 @@ impl UiRenderObject for ExtractedUiTextureSlice {
         );
 
         out_quad.instance_data = UiTextureSliceInstanceData {
+            world_from_local: pack_transform(self.transform, rect_size),
             color,
             slices: slices.into(),
             border: border.into(),
             repeat: repeat.into(),
             atlas: atlas.into(),
+            translation: self.transform.translation,
+            pad: default(),
         };
-
-        for (&mut (ref mut out_position, ref mut out_uvs), (position, uv)) in out_quad
-            .vertices
-            .iter_mut()
-            .zip(positions.iter().zip(uvs.iter()))
-        {
-            *out_position = *position;
-            out_uvs.uv = *uv;
-            out_uvs.point = Vec2::ZERO;
-        }
-    }
-
-    fn create_vertex(
-        quad: &UiQuad<Self::InstanceData>,
-        position: Vec2,
-        uvs: &UiQuadInterpolants,
-    ) -> Self::Vertex {
-        UiTextureSliceVertex {
-            position: position.extend(0.0).into(),
-            uv: uvs.uv.into(),
-            color: quad.instance_data.color.into(),
-            slices: quad.instance_data.slices.into(),
-            border: quad.instance_data.border.into(),
-            repeat: quad.instance_data.repeat.into(),
-            atlas: quad.instance_data.atlas.into(),
-        }
     }
 }
 

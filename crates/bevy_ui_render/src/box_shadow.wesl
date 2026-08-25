@@ -71,18 +71,21 @@ fn roundedBoxShadow(
 
 @vertex
 fn vertex(
-    @location(0) vertex_position: vec3<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) vertex_color: vec4<f32>,
-    @location(3) size: vec2<f32>,
-    @location(4) radius_x: vec4<f32>,
-    @location(5) radius_y: vec4<f32>,
-    @location(6) blur: f32,
-    @location(7) bounds: vec2<f32>,
+    @location(0) vertex_position: vec2<f32>,
+    @location(1) @interpolate(flat) world_from_local: vec4<f32>,
+    @location(2) @interpolate(flat) vertex_color: vec4<f32>,
+    @location(3) @interpolate(flat) radius_x: vec4<f32>,
+    @location(4) @interpolate(flat) radius_y: vec4<f32>,
+    @location(5) @interpolate(flat) translation: vec2<f32>,
+    @location(6) @interpolate(flat) size: vec2<f32>,
+    @location(7) @interpolate(flat) bounds: vec2<f32>,
+    @location(8) @interpolate(flat) blur: f32,
 ) -> BoxShadowVertexOutput {
     var out: BoxShadowVertexOutput;
-    out.position = view.clip_from_world * vec4(vertex_position, 1.0);
-    out.point = (uv.xy - 0.5) * bounds;
+    let world_position = mat2x2<f32>(world_from_local.xy, world_from_local.zw) * vertex_position +
+        translation;
+    out.position = view.clip_from_world * vec4(world_position, 0.0, 1.0);
+    out.point = vertex_position * bounds;
     out.color = vertex_color;
     out.size = size;
     out.radius_x = radius_x;
