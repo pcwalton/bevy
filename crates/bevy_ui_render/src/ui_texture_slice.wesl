@@ -45,18 +45,21 @@ struct UiVertexOutput {
 
 @vertex
 fn vertex(
-    @location(0) vertex_position: vec3<f32>,
-    @location(1) vertex_uv: vec2<f32>,
-    @location(2) vertex_color: vec4<f32>,
-    @location(3) texture_slices: vec4<f32>,
-    @location(4) target_slices: vec4<f32>,
-    @location(5) repeat: vec4<f32>,
-    @location(6) atlas_rect: vec4<f32>,
+    @location(0) vertex_position: vec2<f32>,
+    @location(1) @interpolate(flat) world_from_local: vec4<f32>,
+    @location(2) @interpolate(flat) vertex_color: vec4<f32>,
+    @location(3) @interpolate(flat) texture_slices: vec4<f32>,
+    @location(4) @interpolate(flat) target_slices: vec4<f32>,
+    @location(5) @interpolate(flat) repeat: vec4<f32>,
+    @location(6) @interpolate(flat) atlas_rect: vec4<f32>,
+    @location(7) @interpolate(flat) translation: vec2<f32>,
 ) -> UiVertexOutput {
     var out: UiVertexOutput;
-    out.uv = vertex_uv;
+    let world_position = mat2x2<f32>(world_from_local.xy, world_from_local.zw) * vertex_position +
+        translation;
+    out.uv = vertex_position + vec2(0.5);
     out.color = vertex_color;
-    out.position = view.clip_from_world * vec4<f32>(vertex_position, 1.0);
+    out.position = view.clip_from_world * vec4<f32>(world_position, 0.0, 1.0);
     out.texture_slices = texture_slices;
     out.target_slices = target_slices;
     out.repeat = repeat;
