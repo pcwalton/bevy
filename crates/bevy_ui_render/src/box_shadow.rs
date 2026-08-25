@@ -284,6 +284,7 @@ impl UiRenderObject for ExtractedBoxShadow {
         quad_index: usize,
         _: &RenderAssets<Self::TexturedGpuAsset>,
         _: &AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset>,
+        _: u32,
     ) {
         debug_assert_eq!(quad_index, 0);
 

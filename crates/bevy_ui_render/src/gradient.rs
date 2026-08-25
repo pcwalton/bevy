@@ -351,6 +351,7 @@ impl UiRenderObject for ExtractedGradient {
         quad_index: usize,
         _: &RenderAssets<Self::TexturedGpuAsset>,
         _: &AssetId<<Self::TexturedGpuAsset as RenderAsset>::SourceAsset>,
+        _: u32,
     ) {
         let uinode_rect = self.rect;
 
