@@ -6,7 +6,7 @@ use bevy_ecs::{
     prelude::Component,
     query::ROQueryItem,
     system::{
-        lifetimeless::{Read, SRes},
+        lifetimeless::{Read, SRes, SResMut},
         *,
     },
 };
@@ -63,6 +63,7 @@ where
                 .add_render_command::<TransparentUi, DrawUiMaterial<M>>()
                 .init_resource::<ExtractedUiMaterialNodes<M>>()
                 .init_gpu_resource::<UiMaterialMeta<M>>()
+                .init_gpu_resource::<UiTexturedBindGroups<M>>()
                 .init_gpu_resource::<SpecializedRenderPipelines<UiMaterialPipeline<M>>>()
                 .add_systems(RenderStartup, init_ui_material_pipeline::<M>)
                 .add_systems(
@@ -251,7 +252,7 @@ pub struct SetUiMaterialBindGroup<M: UiMaterial, const I: usize>(PhantomData<M>)
 impl<P: PhaseItem, M: UiMaterial, const I: usize> RenderCommand<P>
     for SetUiMaterialBindGroup<M, I>
 {
-    type Param = SRes<RenderAssets<PreparedUiMaterial<M>>>;
+    type Param = SRes<UiTexturedBindGroups<M>>;
     type ViewQuery = ();
     type ItemQuery = Read<UiMaterialBatch<M>>;
 
@@ -259,16 +260,20 @@ impl<P: PhaseItem, M: UiMaterial, const I: usize> RenderCommand<P>
         _item: &P,
         _view: (),
         material_handle: Option<ROQueryItem<'_, '_, Self::ItemQuery>>,
-        materials: SystemParamItem<'w, '_, Self::Param>,
+        bind_groups: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let Some(material_handle) = material_handle else {
             return RenderCommandResult::Skip;
         };
-        let Some(material) = materials.into_inner().get(material_handle.material) else {
+        let Some(bind_group) = bind_groups
+            .into_inner()
+            .values
+            .get(&material_handle.material)
+        else {
             return RenderCommandResult::Skip;
         };
-        pass.set_bind_group(I, &material.bind_group, &[]);
+        pass.set_bind_group(I, bind_group, &[]);
         RenderCommandResult::Success
     }
 }
@@ -647,7 +652,6 @@ pub fn prepare_uimaterial_nodes<M>(
 
 pub struct PreparedUiMaterial<T: UiMaterial> {
     pub bindings: BindingResources,
-    pub bind_group: BindGroup,
     pub key: T::Data,
 }
 
@@ -660,18 +664,20 @@ impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M> {
         SRes<FallbackBuffer>,
         SRes<RenderAssets<GpuShaderBuffer>>,
         SRes<UiMaterialPipeline<M>>,
+        SResMut<UiTexturedBindGroups<PreparedUiMaterial<M>>>,
         M::Param,
     );
 
     fn prepare_asset(
         material: Self::SourceAsset,
-        _: AssetId<Self::SourceAsset>,
+        id: AssetId<Self::SourceAsset>,
         (
             render_device,
             pipeline_cache,
             fallback_buffer,
             shader_buffer_assets,
             pipeline,
+            bind_groups,
             material_param,
         ): &mut SystemParamItem<Self::Param>,
         _: Option<&Self>,
@@ -685,15 +691,29 @@ impl<M: UiMaterial> RenderAsset for PreparedUiMaterial<M> {
             shader_buffer_assets,
             material_param,
         ) {
-            Ok(prepared) => Ok(PreparedUiMaterial {
-                bindings: prepared.bindings,
-                bind_group: prepared.bind_group,
-                key: bind_group_data,
-            }),
+            Ok(prepared) => {
+                // Insert the bind group into the [`UiTexturedBindGroups`]
+                // resource.
+                bind_groups.values.insert(id, prepared.bind_group);
+                Ok(PreparedUiMaterial {
+                    bindings: prepared.bindings,
+                    key: bind_group_data,
+                })
+            }
             Err(AsBindGroupError::RetryNextUpdate) => {
                 Err(PrepareAssetError::RetryNextUpdate(material))
             }
             Err(other) => Err(PrepareAssetError::AsBindGroupError(other)),
         }
     }
+
+    fn unload_asset(
+        source_asset: AssetId<Self::SourceAsset>,
+        (_, _, _, _, _, bind_groups, _): &mut SystemParamItem<Self::Param>,
+    ) {
+        // Remove the bind group from the [`UiTexturedBindGroups`] resource.
+        bind_groups.values.remove(&source_asset);
+    }
 }
+
+impl<M> UiTexturedRenderAsset for PreparedUiMaterial<M> where M: UiMaterial {}

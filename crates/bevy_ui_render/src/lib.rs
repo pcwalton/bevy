@@ -12,6 +12,7 @@ pub mod clipping;
 mod gradient;
 mod image;
 use bevy_ecs::query::QueryData;
+use bevy_render::render_asset::{ExtractedAssets, RenderAsset};
 use bevy_render::render_phase::DrawFunctionId;
 use bevy_render::render_resource::SpecializedRenderPipeline;
 use bevy_utils::default;
@@ -44,7 +45,7 @@ use bevy_ui::{
 };
 
 use bevy_app::prelude::*;
-use bevy_asset::{AssetEvent, AssetEventSystems, AssetId, Assets};
+use bevy_asset::{Asset, AssetEvent, AssetEventSystems, AssetId, Assets};
 use bevy_color::{Alpha, ColorToComponents, LinearRgba};
 use bevy_core_pipeline::schedule::{Core2d, Core2dSystems, Core3d, Core3dSystems};
 use bevy_core_pipeline::upscaling::upscaling;
@@ -238,7 +239,7 @@ impl Plugin for UiRenderPlugin {
 
         render_app
             .init_gpu_resource::<SpecializedRenderPipelines<UiPipeline>>()
-            .init_gpu_resource::<ImageNodeBindGroups>()
+            .init_gpu_resource::<UiTexturedBindGroups<Image>>()
             .init_gpu_resource::<UiMeta>()
             .init_resource::<ExtractedUiNodes>()
             .allow_ambiguous_resource::<ExtractedUiNodes>()
@@ -295,6 +296,7 @@ impl Plugin for UiRenderPlugin {
                 (
                     queue_ui_items::<ExtractedUiNode>.in_set(RenderSystems::Queue),
                     sort_phase_system::<TransparentUi>.in_set(RenderSystems::PhaseSort),
+                    remove_textured_bind_groups::<GpuImage>.in_set(RenderSystems::PrepareResources),
                     prepare_uinodes.in_set(RenderSystems::PrepareBindGroups),
                     clear_batches.in_set(RenderSystems::Cleanup),
                 ),
@@ -2328,10 +2330,33 @@ pub struct UiNodePipelineKeyBuilder {
     anti_alias: Option<UiAntiAlias>,
 }
 
-#[derive(Resource, Default)]
-pub struct ImageNodeBindGroups {
-    pub values: HashMap<AssetId<Image>, BindGroup>,
+/// Stores the bind groups for *textured* UI render objects.
+///
+/// A textured UI render object is one that needs an auxiliary bind group,
+/// usually to sample a texture (hence the name). The asset type is either
+/// [`GpuImage`] for images or a type that conforms to
+/// [`ui_material::UiMaterial`] for materials.
+#[derive(Resource)]
+pub struct UiTexturedBindGroups<A>
+where
+    A: UiTexturedRenderAsset,
+{
+    /// A mapping from the asset ID to the bind group for that asset.
+    pub values: HashMap<AssetId<<A as RenderAsset>::SourceAsset>, BindGroup>,
 }
+
+impl<A> Default for UiTexturedBindGroups<A>
+where
+    A: UiTexturedRenderAsset,
+{
+    fn default() -> Self {
+        Self {
+            values: Default::default(),
+        }
+    }
+}
+
+impl UiTexturedRenderAsset for GpuImage {}
 
 pub fn prepare_uinodes(
     mut commands: Commands,
@@ -2342,25 +2367,11 @@ pub fn prepare_uinodes(
     extracted_uinodes: Res<ExtractedUiNodes>,
     view_uniforms: Res<ViewUniforms>,
     ui_pipeline: Res<UiPipeline>,
-    mut image_bind_groups: ResMut<ImageNodeBindGroups>,
+    mut image_bind_groups: ResMut<UiTexturedBindGroups<GpuImage>>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     mut phases: ResMut<ViewSortedRenderPhases<TransparentUi>>,
-    events: Res<SpriteAssetEvents>,
     mut previous_len: Local<usize>,
 ) {
-    // If an image has changed, the GpuImage has (probably) changed
-    for event in &events.images {
-        match event {
-            AssetEvent::Added { .. } |
-            AssetEvent::Unused { .. } |
-            // Images don't have dependencies
-            AssetEvent::LoadedWithDependencies { .. } => {}
-            AssetEvent::Modified { id } | AssetEvent::Removed { id } => {
-                image_bind_groups.values.remove(id);
-            }
-        };
-    }
-
     if let Some(view_binding) = view_uniforms.uniforms.binding() {
         let mut batches: Vec<(Entity, UiBatch)> = Vec::with_capacity(*previous_len);
 
@@ -2647,6 +2658,23 @@ pub fn prepare_uinodes(
     }
 }
 
+/// A system, part of the render world, that removes textured bind groups when
+/// their underlying assets are changed.
+pub fn remove_textured_bind_groups<A>(
+    mut bind_groups: ResMut<UiTexturedBindGroups<A>>,
+    extracted_assets: Res<ExtractedAssets<A>>,
+) where
+    A: UiTexturedRenderAsset,
+{
+    for id in extracted_assets
+        .modified
+        .iter()
+        .chain(extracted_assets.removed.iter())
+    {
+        bind_groups.values.remove(id);
+    }
+}
+
 /// A render-world system that removes all [`UiBatch`] components.
 ///
 /// They're currently rebuilt from scratch every frame, so we have to remove
@@ -2800,6 +2828,12 @@ pub trait UiRenderObject: Send + Sync + 'static {
         system_param: &mut SystemParamItem<Self::PipelineKeySystemParam>,
     ) -> Option<<Self::SpecializedRenderPipeline as SpecializedRenderPipeline>::Key>;
 }
+
+/// A render asset that can produce bind groups for a textured render object.
+///
+/// At present, this is either a [`GpuImage`] or a
+/// [`ui_material_pipeline::PreparedUiMaterial`].
+pub trait UiTexturedRenderAsset: RenderAsset {}
 
 /// Information about a single view that [`queue_ui_items`] caches.
 ///

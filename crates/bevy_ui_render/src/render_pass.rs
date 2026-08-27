@@ -1,6 +1,6 @@
 use core::ops::Range;
 
-use super::{ImageNodeBindGroups, UiBatch, UiMeta, UiViewTarget};
+use super::{UiBatch, UiMeta, UiTexturedBindGroups, UiViewTarget};
 
 use crate::UiCameraView;
 use bevy_ecs::{
@@ -8,6 +8,7 @@ use bevy_ecs::{
     prelude::*,
     system::{lifetimeless::*, SystemParamItem},
 };
+use bevy_image::Image;
 use bevy_math::FloatOrd;
 use bevy_render::{
     camera::ExtractedCamera,
@@ -183,7 +184,7 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetUiViewBindGroup<I> {
 }
 pub struct SetUiTextureBindGroup<const I: usize>;
 impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetUiTextureBindGroup<I> {
-    type Param = SRes<ImageNodeBindGroups>;
+    type Param = SRes<UiTexturedBindGroups<Image>>;
     type ViewQuery = ();
     type ItemQuery = Read<UiBatch>;
 
