@@ -91,7 +91,7 @@ fn main() {
         LogDiagnosticsPlugin::default(),
     ))
     .insert_resource(WinitSettings::continuous())
-    .add_systems(Update, (button_system, set_text_colors_changed));
+    .add_systems(Update, button_system);
 
     if !args.no_camera {
         app.add_systems(Startup, |mut commands: Commands| {
@@ -119,6 +119,7 @@ fn main() {
                 .iter_mut()
                 .for_each(|mut text| text.set_changed());
         });
+        app.add_systems(Update, set_text_colors_changed);
     }
 
     if args.respawn {
